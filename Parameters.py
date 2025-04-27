@@ -202,7 +202,7 @@ class ExchangeAnalyzer:
             union_parts.append(query)
         
         # Join with UNION and add ORDER BY at the end
-        complete_query = " UNION ".join(union_parts) + " ORDER BY timestamp"
+        complete_query = " UNION ".join(union_parts) + " ORDER BY timestamp DESC"
         return complete_query
 
     def fetch_and_analyze(self, conn, pairs_to_analyze, hours=24):
@@ -305,7 +305,7 @@ class ExchangeAnalyzer:
             for point_count in self.point_counts:
                 if len(prices) >= point_count:
                     # Use the most recent N points
-                    sample = prices.iloc[-point_count:]
+                    sample = prices.iloc[:point_count]
                     
                     # Calculate mean price for ATR percentage calculation
                     mean_price = sample.mean()
