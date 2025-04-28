@@ -343,91 +343,33 @@ def calculate_choppiness_for_window(prices, window_size=20):
 
 # Calculate synchronized choppiness
 def calculate_synchronized_choppiness(rollbit_df, surf_df, window_size=20, tick_count=5000, num_points=10, interval_minutes=5):
-    """
-    Calculate choppiness for both exchanges at exactly the same timestamps.
+    """Calculate choppiness exactly like parameters.py does"""
     
-    Args:
-        rollbit_df: DataFrame with Rollbit data
-        surf_df: DataFrame with Surf data
-        window_size: Size of the rolling window (default: 20)
-        tick_count: Number of ticks to use for calculation (default: 5000)
-        num_points: Number of points to calculate (default: 10)
-        interval_minutes: Minutes between points (default: 5)
+    # For each timestamp:
+    # 1. Get 5000 ticks before that point
+    # 2. Calculate choppiness using the parameters.py method
     
-    Returns:
-        Tuple of (timestamps, rollbit_choppiness, surf_choppiness)
-    """
-    # Ensure both dataframes exist and have enough data
-    if rollbit_df is None or surf_df is None:
-        return [], [], []
+    # For calculating individual choppiness values:
+    def calc_choppiness_params_way(prices, window):
+        # Exact implementation from parameters.py
+        diff = prices.diff().abs()
+        sum_abs_changes = diff.rolling(window, min_periods=1).sum()
+        price_range = prices.rolling(window, min_periods=1).max() - prices.rolling(window, min_periods=1).min()
         
-    if len(rollbit_df) < tick_count + window_size or len(surf_df) < tick_count + window_size:
-        st.warning(f"Not enough data: Rollbit has {len(rollbit_df)} ticks, Surf has {len(surf_df)} ticks")
-        return [], [], []
-    
-    # Sort dataframes by timestamp
-    rollbit_df = rollbit_df.sort_values('timestamp_sgt', ascending=True)
-    surf_df = surf_df.sort_values('timestamp_sgt', ascending=True)
-    
-    # Get the most recent common timestamp (use the earlier of the two latest timestamps)
-    latest_rollbit = rollbit_df['timestamp_sgt'].iloc[-1]
-    latest_surf = surf_df['timestamp_sgt'].iloc[-1]
-    latest_common = min(latest_rollbit, latest_surf)
-    
-    # Create evenly spaced timestamps going backwards
-    timestamps = []
-    for i in range(num_points):
-        timestamps.append(latest_common - timedelta(minutes=interval_minutes * (num_points - 1 - i)))
-    
-    # Calculate choppiness for each exchange at each timestamp
-    rollbit_values = []
-    surf_values = []
-    valid_timestamps = []
-    
-    for timestamp in timestamps:
-        # Get Rollbit data before this timestamp
-        rollbit_mask = rollbit_df['timestamp_sgt'] <= timestamp
-        rollbit_previous = rollbit_df[rollbit_mask]
+        # Check for zero price range
+        if (price_range == 0).any():
+            # Replace zeros with a small value to avoid division by zero
+            price_range = price_range.replace(0, 1e-10)
         
-        # Get Surf data before this timestamp
-        surf_mask = surf_df['timestamp_sgt'] <= timestamp
-        surf_previous = surf_df[surf_mask]
+        # Avoid division by zero
+        epsilon = 1e-10
+        choppiness = 100 * sum_abs_changes / (price_range + epsilon)
         
-        # Skip if either exchange doesn't have enough data
-        if len(rollbit_previous) < tick_count or len(surf_previous) < tick_count:
-            st.info(f"Skipping {timestamp} - insufficient data (Rollbit: {len(rollbit_previous)}, Surf: {len(surf_previous)})")
-            continue
+        # Cap extreme values and handle NaN
+        choppiness = np.minimum(choppiness, 1000)
+        choppiness = choppiness.fillna(200)  # Replace NaN with a reasonable default
         
-        # Get most recent tick_count ticks for each exchange
-        rollbit_recent = rollbit_previous.iloc[-tick_count:]
-        surf_recent = surf_previous.iloc[-tick_count:]
-        
-        # Calculate choppiness for Rollbit
-        rollbit_chop_values = []
-        for i in range(window_size, len(rollbit_recent)):
-            window = rollbit_recent['price'].iloc[i-window_size:i]
-            chop = calculate_choppiness_for_window(window, window_size)
-            if chop is not None:
-                rollbit_chop_values.append(chop)
-        
-        # Calculate choppiness for Surf
-        surf_chop_values = []
-        for i in range(window_size, len(surf_recent)):
-            window = surf_recent['price'].iloc[i-window_size:i]
-            chop = calculate_choppiness_for_window(window, window_size)
-            if chop is not None:
-                surf_chop_values.append(chop)
-        
-        # Calculate averages and add to results
-        if rollbit_chop_values and surf_chop_values:
-            rollbit_avg = sum(rollbit_chop_values) / len(rollbit_chop_values)
-            surf_avg = sum(surf_chop_values) / len(surf_chop_values)
-            
-            valid_timestamps.append(timestamp)
-            rollbit_values.append(rollbit_avg)
-            surf_values.append(surf_avg)
-    
-    return valid_timestamps, rollbit_values, surf_values
+        return choppiness.mean()
 
 # Main app
 def main():
