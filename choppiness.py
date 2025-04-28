@@ -325,14 +325,8 @@ def calculate_choppiness_for_window(prices, window_size=20):
 def track_choppiness_over_time(df, window_size=20, tick_count=5000):
     """
     Track how the 5000-tick choppiness average changes over time.
-    
-    Args:
-        df: DataFrame with timestamp_sgt and price columns
-        window_size: Size of the rolling window for choppiness calculation
-        tick_count: Number of most recent ticks to use for each calculation
-    
-    Returns:
-        Tuple of (timestamps, choppiness_values)
+    For each point, calculate the average 20-tick choppiness 
+    across the previous 5000 ticks from that point.
     """
     if df is None or len(df) < tick_count:
         return [], []
@@ -340,35 +334,36 @@ def track_choppiness_over_time(df, window_size=20, tick_count=5000):
     timestamps = []
     choppiness_values = []
     
-    # We'll calculate 5000-tick choppiness at regular intervals
-    # For demonstration, we'll use every 500 ticks
-    step_size = 500  
-    
     # Make sure df is sorted by timestamp (ascending)
     df = df.sort_values('timestamp_sgt')
     
-    # For each interval point, calculate the 5000-tick choppiness
-    for i in range(tick_count, len(df), step_size):
+    # Choose timestamps at regular intervals
+    # Let's take 10-20 points across the data
+    num_points = min(20, (len(df) - tick_count) // 100)
+    if num_points < 3:  # Need at least 3 points for a meaningful timeline
+        return [], []
+        
+    step = (len(df) - tick_count) // num_points
+    
+    # For each selected point in time
+    for i in range(tick_count, len(df), step):
         # Get the timestamp for this point
         timestamp = df['timestamp_sgt'].iloc[i-1]
         
         # Get the 5000 most recent ticks up to this point
         recent_ticks = df.iloc[i-tick_count:i]
         
-        # Calculate choppiness using 20-tick windows across all 5000 ticks
-        choppiness_values_for_5000 = []
-        
+        # Calculate 20-tick choppiness across all 5000 ticks
+        chop_values = []
         for j in range(window_size, len(recent_ticks)):
             window = recent_ticks['price'].iloc[j-window_size:j]
-            choppiness = calculate_choppiness_for_window(window, window_size)
-            if choppiness is not None:
-                choppiness_values_for_5000.append(choppiness)
+            chop = calculate_choppiness_for_window(window, window_size)
+            if chop is not None:
+                chop_values.append(chop)
         
-        # Calculate the average choppiness for all windows
-        if choppiness_values_for_5000:
-            avg_choppiness = np.mean(choppiness_values_for_5000)
-            
-            # Store the result
+        # Calculate the average choppiness
+        if chop_values:
+            avg_choppiness = sum(chop_values) / len(chop_values)
             timestamps.append(timestamp)
             choppiness_values.append(avg_choppiness)
     
