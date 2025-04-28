@@ -6,6 +6,9 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from contextlib import contextmanager
 
+# Clear cache at startup to ensure fresh data
+st.cache_data.clear()
+
 # Page configuration - absolute minimum for speed
 st.set_page_config(
     page_title="Depth Tier Analyzer",
@@ -295,18 +298,32 @@ class SimplifiedDepthTierAnalyzer:
                     );
                 """)
                 
-                if not session.execute(check_table, {"table_name": table_name}).scalar():
+                # Debug information about table checking
+                if progress_bar:
+                    progress_bar.progress(0.05, text=f"Checking for table: {table_name}")
+                
+                table_exists = session.execute(check_table, {"table_name": table_name}).scalar()
+                
+                if not table_exists:
                     # Try yesterday if today doesn't exist
                     yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
                     table_name = f"oracle_order_book_level_price_data_partition_v4_{yesterday}"
                     
+                    if progress_bar:
+                        progress_bar.progress(0.05, text=f"Today's table not found, checking: {table_name}")
+                    
                     # Check if yesterday's table exists
                     if not session.execute(check_table, {"table_name": table_name}).scalar():
+                        if progress_bar:
+                            progress_bar.progress(0.05, text="No data tables found for analysis")
                         return False
                 
                 # Calculate time range
                 start_time = datetime.now() - timedelta(hours=hours)
                 start_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
+                
+                if progress_bar:
+                    progress_bar.progress(0.1, text=f"Fetching data from {start_str} to now...")
                 
                 # Fetch all data at once with a single query for the max point count
                 max_points = max(self.point_counts)
@@ -338,8 +355,18 @@ class SimplifiedDepthTierAnalyzer:
                 columns = ['pair_name'] + self.depth_tier_columns
                 all_data = result.fetchall()
                 
-                if not all_data or len(all_data) < min(self.point_counts):
+                if not all_data:
+                    if progress_bar:
+                        progress_bar.progress(0.1, text="No data found for the specified pair")
                     return False
+                    
+                if len(all_data) < min(self.point_counts):
+                    if progress_bar:
+                        progress_bar.progress(0.1, text=f"Insufficient data: found {len(all_data)} rows, need at least {min(self.point_counts)}")
+                    return False
+                
+                if progress_bar:
+                    progress_bar.progress(0.2, text=f"Processing {len(all_data)} data points...")
                 
                 # Convert to DataFrame for faster processing
                 all_df = pd.DataFrame(all_data, columns=columns)
@@ -347,7 +374,7 @@ class SimplifiedDepthTierAnalyzer:
                 # Process each point count using the pre-fetched data
                 for i, point_count in enumerate(self.point_counts):
                     if progress_bar:
-                        progress_bar.progress((i / len(self.point_counts)) * 0.9 + 0.1, 
+                        progress_bar.progress((i / len(self.point_counts)) * 0.7 + 0.2, 
                                           text=f"Processing {point_count} points...")
                     
                     if len(all_df) >= point_count:
@@ -382,6 +409,8 @@ class SimplifiedDepthTierAnalyzer:
                 return has_results
                 
         except Exception as e:
+            if progress_bar:
+                progress_bar.progress(1.0, text=f"Error: {str(e)}")
             st.error(f"Error in analysis: {e}")
             return False
 
@@ -520,11 +549,11 @@ def create_point_count_table(analyzer, point_count):
 
 # Format number with commas (e.g., 1,234,567)
 def format_number(num):
-    """格式化数字显示，添加千位分隔符
+    """Format number with thousand separators
     Args:
-        num: 要格式化的数字
+        num: Number to format
     Returns:
-        str: 格式化后的字符串
+        str: Formatted string
     """
     if num is None:
         return "N/A"
@@ -537,6 +566,10 @@ def format_number(num):
 def main():
     # Main layout - super streamlined
     st.markdown("<h1 style='text-align: center; font-size:28px; margin-bottom: 10px;'>Liquidity Depth Tier Analyzer</h1>", unsafe_allow_html=True)
+
+    # Display current time to confirm updates
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    st.markdown(f"<p style='text-align: center; font-size:14px; color:gray;'>Last updated: {current_time}</p>", unsafe_allow_html=True)
 
     # Get available pairs from the database
     available_pairs = get_available_pairs()
@@ -556,6 +589,13 @@ def main():
 
     # Main content
     if run_analysis and selected_pair:
+        # Clear cache before analysis to ensure fresh data
+        st.cache_data.clear()
+        
+        # Show analysis time
+        analysis_start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        st.markdown(f"<p style='text-align: center; font-size:14px; color:green;'>Analysis started at: {analysis_start_time}</p>", unsafe_allow_html=True)
+        
         # Get current bid/ask data
         bid_ask_data = get_current_bid_ask(selected_pair)
 
@@ -599,6 +639,10 @@ def main():
 
             with tabs[3]:
                 create_point_count_table(analyzer, 50000)
+
+            # Show analysis completion time
+            analysis_end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            st.markdown(f"<p style='text-align: center; font-size:14px; color:green;'>Analysis completed at: {analysis_end_time}</p>", unsafe_allow_html=True)
 
         else:
             progress_bar.empty()
