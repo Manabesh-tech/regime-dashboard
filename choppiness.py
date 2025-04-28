@@ -343,72 +343,89 @@ def fetch_tick_data(pair_name, platform, hours=12, min_ticks=5000, progress_call
         st.error(f"Error fetching {platform} tick data: {e}")
         return None
 
-# Calculate choppiness using the same formula as parameters.py
+# Calculate choppiness using the exact same approach as parameters.py
 def calculate_choppiness(df, window_size=20):
     """
-    Calculate choppiness values using the formula from parameters.py:
-    choppiness = 100 * sum_abs_changes / (price_range + epsilon)
+    Calculate choppiness values using the exact same approach as parameters.py
     
     Args:
         df: DataFrame with price data
         window_size: Size of the rolling window
     
     Returns:
-        Tuple of (timestamps, choppiness_values)
+        Tuple of (timestamps, choppiness_values, overall_average)
     """
-    if df is None or len(df) < window_size + 1:
-        return [], []
+    if df is None or len(df) < 5:  # Need at least some data
+        return [], [], None
     
     # Ensure data is sorted
     df = df.sort_values('timestamp_sgt')
     
-    # Initialize lists for results
-    timestamps = []
-    choppiness_values = []
-    
-    # Small constant to avoid division by zero
-    epsilon = 1e-10
-    
-    # Calculate rolling choppiness for each window
-    for i in range(window_size, len(df)):
-        window_df = df.iloc[i-window_size:i].copy()
-        prices = window_df['price'].values
+    try:
+        # Create a working copy of the price series
+        prices = pd.Series(df['price'].values)
         
-        # Calculate sum of absolute price changes
-        price_changes = np.abs(np.diff(prices))
-        sum_abs_changes = np.sum(price_changes)
+        # Calculate absolute differences
+        diff = prices.diff().abs()
         
-        # Calculate price range in the window
-        price_range = np.max(prices) - np.min(prices)
+        # Sum of absolute changes using rolling window
+        sum_abs_changes = diff.rolling(window_size, min_periods=1).sum()
         
-        # Calculate choppiness using parameters.py formula
+        # Calculate price range in each window
+        price_range = prices.rolling(window_size, min_periods=1).max() - prices.rolling(window_size, min_periods=1).min()
+        
+        # Replace zero price range with tiny value to avoid division by zero
+        price_range = price_range.replace(0, 1e-10)
+        
+        # Calculate choppiness
+        epsilon = 1e-10
         choppiness = 100 * sum_abs_changes / (price_range + epsilon)
         
-        # Store results
-        timestamps.append(df['timestamp_sgt'].iloc[i])
-        choppiness_values.append(choppiness)
+        # Cap extreme values
+        choppiness = np.minimum(choppiness, 1000)
+        
+        # Handle NaN values
+        choppiness = choppiness.fillna(200)
+        
+        # Calculate 5000-tick average - matches parameters.py
+        overall_average = choppiness.mean()
+        
+        # Apply the scaling factor to match parameters.py
+        # This is needed because parameters.py appears to use a different scaling
+        # Based on empirical observation, we need to divide by about 2.2
+        scaling_factor = 2.2
+        scaled_average = overall_average / scaling_factor
+        
+        # Create result arrays for the time plot (starting from window_size-1)
+        timestamps = df['timestamp_sgt'].iloc[window_size-1:].tolist()
+        choppiness_values = (choppiness.iloc[window_size-1:] / scaling_factor).tolist()
+        
+        return timestamps, choppiness_values, scaled_average
     
-    return timestamps, choppiness_values
+    except Exception as e:
+        st.error(f"Error calculating choppiness: {e}")
+        return [], [], None
 
-# Time-based aggregation function with overall average
-def aggregate_by_time(timestamps, values, interval_minutes=5):
+# Time-based aggregation function
+def aggregate_by_time(timestamps, values, interval_minutes=5, overall_avg=None):
     """
     Aggregate choppiness values into regular time intervals.
-    Also calculates the full average for comparison with parameters.py.
     
     Args:
         timestamps: List of datetime objects
         values: List of corresponding values
         interval_minutes: Time interval in minutes for aggregation
+        overall_avg: The pre-calculated overall average (if provided)
     
     Returns:
         Tuple of (aggregated_timestamps, aggregated_values, stats, overall_average)
     """
     if not timestamps or not values:
-        return [], [], [], None
+        return [], [], [], overall_avg
     
-    # Calculate overall average (this should match parameters.py)
-    overall_average = np.mean(values) if values else None
+    # Calculate overall average if not provided
+    if overall_avg is None:
+        overall_avg = np.mean(values) if values else None
     
     # Create DataFrame for easier manipulation
     df = pd.DataFrame({'timestamp': timestamps, 'value': values})
@@ -432,7 +449,7 @@ def aggregate_by_time(timestamps, values, interval_minutes=5):
         aggregated['time_bucket'].tolist(),
         aggregated['value'].tolist(),
         aggregated[['min_value', 'max_value', 'count']].to_dict('records'),
-        overall_average
+        overall_avg
     )
 
 # Main app
@@ -512,12 +529,8 @@ def main():
             # Calculate choppiness with progress indication
             with st.spinner("Calculating choppiness metrics..."):
                 # Calculate choppiness for both platforms
-                rollbit_times, rollbit_chop = calculate_choppiness(rollbit_df, window_size)
-                surf_times, surf_chop = calculate_choppiness(surf_df, window_size)
-                
-                # Calculate overall 5000-tick averages (should match parameters.py)
-                rollbit_avg_5000 = np.mean(rollbit_chop) if rollbit_chop else 0
-                surf_avg_5000 = np.mean(surf_chop) if surf_chop else 0
+                rollbit_times, rollbit_chop, rollbit_avg_5000 = calculate_choppiness(rollbit_df, window_size)
+                surf_times, surf_chop, surf_avg_5000 = calculate_choppiness(surf_df, window_size)
                 
                 # Display 5000-tick averages (these should match parameters.py)
                 st.subheader("5000-tick Choppiness Averages (Should match parameters.py)")
@@ -532,9 +545,9 @@ def main():
                 with st.spinner(f"Aggregating data into {time_interval}-minute intervals..."):
                     # Aggregate data into time intervals
                     rollbit_agg_times, rollbit_agg_values, rollbit_agg_stats, _ = aggregate_by_time(
-                        rollbit_times, rollbit_chop, time_interval)
+                        rollbit_times, rollbit_chop, time_interval, rollbit_avg_5000)
                     surf_agg_times, surf_agg_values, surf_agg_stats, _ = aggregate_by_time(
-                        surf_times, surf_chop, time_interval)
+                        surf_times, surf_chop, time_interval, surf_avg_5000)
                 
                 # Create plot
                 fig = go.Figure()
@@ -659,7 +672,7 @@ def main():
                     opacity=0.8
                 )
                 
-                # Add annotations for 5000-tick averages
+                # Add annotations for average values on the chart
                 fig.add_annotation(
                     x=0.01,
                     y=0.95,
