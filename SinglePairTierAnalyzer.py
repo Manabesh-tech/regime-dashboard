@@ -214,7 +214,7 @@ class SimplifiedDepthTierAnalyzer:
     """
 
     def __init__(self):
-        self.point_counts = [500, 5000, 10000, 50000]
+        self.point_counts = [500, 1500, 2500, 5000]
 
         # Define depth tiers
         self.depth_tier_columns = [
@@ -617,7 +617,7 @@ def main():
         """)
 
         # Set up tabs for results
-        tabs = st.tabs(["500 POINTS", "5,000 POINTS", "10,000 POINTS", "50,000 POINTS"])
+        tabs = st.tabs(["500 POINTS", "1500 POINTS", "2,500 POINTS", "5,000 POINTS"])
 
         # Create progress bar
         progress_bar = st.progress(0, text="Starting analysis...")
