@@ -458,10 +458,10 @@ def main():
     current_time_sg = now_sg.strftime("%Y-%m-%d %H:%M:%S")
     
     # Main title
-    st.title("5-Minute Interval Choppiness: Rollbit vs Surf")
+    st.title("User-defined Interval Choppiness: Rollbit vs Surf")
     st.markdown(f"<p style='text-align: center; font-size:14px; color:gray;'>Last updated: {current_time_sg} (SGT)</p>", unsafe_allow_html=True)
     
-    st.markdown("Comparison of 5000-tick choppiness at 5-minute intervals. Each point represents the average 20-tick choppiness across 5000 ticks.")
+    st.markdown("Comparison of 5000-tick choppiness at user-defined intervals. Each point represents the average 20-tick choppiness across 5000 ticks. 10 points only")
     
     # Get available pairs
     available_pairs = get_available_pairs()
@@ -498,7 +498,7 @@ def main():
         )
     
     # Create plot button
-    if st.button("Generate 5-Minute Interval Choppiness Plot", use_container_width=True):
+    if st.button("Generate User-defined Interval Choppiness Plot", use_container_width=True):
         # Progress bars for data fetching
         col_rollbit, col_surf = st.columns(2)
         
