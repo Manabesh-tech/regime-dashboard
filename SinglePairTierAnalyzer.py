@@ -283,6 +283,15 @@ class SimplifiedDepthTierAnalyzer:
         # Store results
         self.results = {point: None for point in self.point_counts}
 
+    def _display_sql_info(self, sql, params=None, title="SQL查询"):
+        """显示SQL查询信息"""
+        st.write(f"### {title}")
+        st.code(str(sql), language="sql")
+        if params:
+            st.write("参数:")
+            for key, value in params.items():
+                st.write(f"- {key}: {value}")
+
     def fetch_and_analyze(self, pair_name, hours=24, progress_bar=None, use_replication=True):
         """Fetch data and calculate metrics for each depth tier"""
         try:
@@ -309,10 +318,6 @@ class SimplifiedDepthTierAnalyzer:
                 # Format for database query (without timezone)
                 start_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
                 
-                # Display the exact time range being analyzed
-                if progress_bar:
-                    progress_bar.progress(0.05, text=f"Analyzing data from {start_str_display} to {end_str_display} (SGT)")
-                
                 # Get current day's partition table (most likely to have data)
                 today = datetime.now().strftime("%Y%m%d")
                 table_name = f"oracle_order_book_level_price_data_partition_v4_{today}"
@@ -326,9 +331,12 @@ class SimplifiedDepthTierAnalyzer:
                     );
                 """)
                 
-                # Debug information about table checking
-                if progress_bar:
-                    progress_bar.progress(0.1, text=f"Checking for table: {table_name}")
+                # 显示检查表是否存在的SQL
+                self._display_sql_info(
+                    check_table,
+                    {"table_name": table_name},
+                    "检查分区表SQL"
+                )
                 
                 table_exists = session.execute(check_table, {"table_name": table_name}).scalar()
                 
@@ -337,23 +345,22 @@ class SimplifiedDepthTierAnalyzer:
                     yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
                     table_name = f"oracle_order_book_level_price_data_partition_v4_{yesterday}"
                     
-                    if progress_bar:
-                        progress_bar.progress(0.1, text=f"Today's table not found, checking: {table_name}")
+                    # 显示检查昨天的表是否存在的SQL
+                    self._display_sql_info(
+                        check_table,
+                        {"table_name": table_name},
+                        "检查昨天分区表SQL"
+                    )
                     
                     # Check if yesterday's table exists
                     if not session.execute(check_table, {"table_name": table_name}).scalar():
-                        if progress_bar:
-                            progress_bar.progress(0.1, text="No data tables found for analysis")
                         return False
-                
-                if progress_bar:
-                    progress_bar.progress(0.15, text=f"Fetching data from {table_name} for {pair_name}...")
                 
                 # Fetch all data at once with a single query for the max point count
                 max_points = max(self.point_counts)
                 
                 query = text(f"""
-                    SELECT
+                    SELECT id,
                         pair_name,
                         {', '.join(self.depth_tier_columns)}
                     FROM
@@ -364,6 +371,18 @@ class SimplifiedDepthTierAnalyzer:
                     ORDER BY created_at DESC
                     LIMIT :limit
                 """)
+                
+                # 显示主查询SQL
+                self._display_sql_info(
+                    query,
+                    {
+                        "pair_name": pair_name,
+                        "start_time": start_str,
+                        "limit": max_points + 1000,
+                        "table_name": table_name
+                    },
+                    "数据查询SQL"
+                )
                 
                 # Execute query with parameters
                 result = session.execute(
@@ -380,20 +399,17 @@ class SimplifiedDepthTierAnalyzer:
                 all_data = result.fetchall()
                 
                 if not all_data:
-                    if progress_bar:
-                        progress_bar.progress(0.2, text="No data found for the specified pair")
                     return False
                     
                 if len(all_data) < min(self.point_counts):
-                    if progress_bar:
-                        progress_bar.progress(0.2, text=f"Insufficient data: found {len(all_data)} rows, need at least {min(self.point_counts)}")
                     return False
-                
-                if progress_bar:
-                    progress_bar.progress(0.3, text=f"Processing {len(all_data)} data points...")
                 
                 # Convert to DataFrame for faster processing
                 all_df = pd.DataFrame(all_data, columns=columns)
+                
+                # 显示查询结果样例
+                st.write("### 查询结果样例 (前5行):")
+                st.dataframe(all_df.head(), use_container_width=True)
                 
                 # Process each point count using the pre-fetched data
                 for i, point_count in enumerate(self.point_counts):
