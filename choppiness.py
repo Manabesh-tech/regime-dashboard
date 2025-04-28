@@ -248,7 +248,7 @@ def fetch_tick_data(pair_name, platform, hours=24, min_ticks=10000, progress_cal
             complete_query = " UNION ".join(union_parts) + " ORDER BY timestamp_sgt DESC"  # DESC to get newest first
             
             # Add LIMIT to get at least min_ticks
-            limited_query = complete_query + f" LIMIT {min_ticks * 2}"  # Get more than needed to account for potential duplicates
+            limited_query = complete_query + f" LIMIT {min_ticks * 10}"  # Get more than needed to account for potential duplicates
             
             if progress_callback:
                 progress_callback(0.4, f"Executing query for {platform}...")
