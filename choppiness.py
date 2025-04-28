@@ -15,7 +15,7 @@ if hasattr(st, 'cache_data'):
     st.cache_data.clear()
 
 # Page configuration
-st.set_page_config(page_title="5-Minute Interval Choppiness", layout="wide")
+st.set_page_config(page_title="User-defined Interval Choppiness", layout="wide")
 
 # Enhanced CSS for better UI
 st.markdown("""
