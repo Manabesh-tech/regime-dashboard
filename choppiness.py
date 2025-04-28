@@ -751,7 +751,7 @@ def main():
                     st.markdown("""
                     **How Choppiness Is Calculated:**
                     
-                    1. For each point in time (spaced 5 minutes apart):
+                    1. For each point in time (spaced user-defined minutes apart):
                        - We take the most recent 5000 ticks up to that point
                        - Calculate the choppiness using the exact same method as in parameters.py
                        - The calculation uses a 20-tick rolling window across all 5000 ticks
