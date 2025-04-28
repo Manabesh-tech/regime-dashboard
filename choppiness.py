@@ -2,23 +2,19 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import plotly.express as px
 from datetime import datetime, timedelta
 import pytz
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from contextlib import contextmanager
+import concurrent.futures
 
 # Clear cache at startup to ensure fresh data
-st.cache_data.clear()
+if hasattr(st, 'cache_data'):
+    st.cache_data.clear()
 
 # Page configuration
-st.set_page_config(
-    page_title="Crypto Tick Data Plotter",
-    page_icon="📈",
-    layout="wide",
-)
+st.set_page_config(page_title="Choppiness Time Plot", layout="wide")
 
 # Enhanced CSS for better UI
 st.markdown("""
@@ -26,77 +22,50 @@ st.markdown("""
     .main .block-container {max-width: 98% !important; padding-top: 1rem !important;}
     h1, h2, h3 {margin-bottom: 0.5rem !important;}
     .stButton > button {width: 100%; font-weight: bold; height: 46px; font-size: 18px;}
-    
-    /* Improved tabs styling */
-    .stTabs [data-baseweb="tab-list"] {gap: 8px;}
-    .stTabs [data-baseweb="tab"] {
-        height: 50px;
-        white-space: pre-wrap;
-        background-color: #f0f2f6;
-        border-radius: 4px;
-        color: #000000;
-        font-size: 18px;
-        font-weight: 600;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        padding: 0 20px;
-    }
-    .stTabs [aria-selected="true"] {
-        background-color: #1f77b4 !important;
-        color: white !important;
-    }
-    
-    /* Info box styling */
-    .time-info {
-        background-color: #e7f1ff;
-        padding: 10px;
-        border-radius: 5px;
-        margin-bottom: 15px;
-    }
-    
-    /* Selection container styling */
-    .selection-container {
-        background-color: #f5f5f5;
-        padding: 15px;
-        border-radius: 5px;
-        margin-bottom: 15px;
-    }
-    
-    /* Progress bar styling */
     div.stProgress > div > div {height: 8px !important;}
-    
-    /* Plot container styling */
-    .plot-container {
-        border: 1px solid #ddd;
+    .metric-container {
+        background-color: rgba(28, 131, 225, 0.1);
+        border-radius: 5px;
+        padding: 15px;
+        margin: 10px 0;
+    }
+    .metric-title {
+        font-weight: bold;
+        margin-bottom: 5px;
+    }
+    .info-box {
+        background-color: #f0f2f6;
         border-radius: 5px;
         padding: 10px;
-        background-color: white;
+        margin: 10px 0;
     }
 </style>
 """, unsafe_allow_html=True)
 
 # Database configuration
 DB_CONFIG = {
-    'replication': {
+    'rollbit': {
+        'url': "postgresql://public_rw:aTJ92^kl04hllk@aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com:5432/report_dev"
+    },
+    'surf': {
         'url': "postgresql://public_replication:866^FKC4hllk@aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com:5432/replication_report"
     }
 }
 
-# Create database engine
+# Create database engines
 @st.cache_resource
-def get_engine():
-    """Create database engine"""
+def get_engine(platform='surf'):
+    """Create database engine for the specified platform"""
     try:
-        return create_engine(DB_CONFIG['replication']['url'], pool_size=5, max_overflow=10)
+        return create_engine(DB_CONFIG[platform]['url'], pool_size=5, max_overflow=10)
     except Exception as e:
-        st.error(f"Error creating database engine: {e}")
+        st.error(f"Error creating {platform} database engine: {e}")
         return None
 
 @contextmanager
-def get_session():
-    """Database session context manager"""
-    engine = get_engine()
+def get_session(platform='surf'):
+    """Database session context manager for the specified platform"""
+    engine = get_engine(platform)
     if not engine:
         yield None
         return
@@ -106,7 +75,7 @@ def get_session():
     try:
         yield session
     except Exception as e:
-        st.error(f"Database error: {e}")
+        st.error(f"Database error for {platform}: {e}")
         session.rollback()
     finally:
         session.close()
@@ -117,28 +86,72 @@ PREDEFINED_PAIRS = [
     "AVAX/USDT", "DOGE/USDT", "ADA/USDT", "TRX/USDT", "DOT/USDT"
 ]
 
-# Get available pairs from the database
+# Get available pairs from database
 @st.cache_data(ttl=300)  # Cache for 5 minutes
 def get_available_pairs():
     try:
-        with get_session() as session:
-            if not session:
-                return PREDEFINED_PAIRS
-            
-            query = text("SELECT pair_name FROM trade_pool_pairs WHERE status = 1")
-            result = session.execute(query)
-            pairs = [row[0] for row in result]
-            
-            return sorted(pairs) if pairs else PREDEFINED_PAIRS
+        pairs = set()
+        
+        # Try to get pairs from Surf
+        with get_session('surf') as session:
+            if session:
+                # Try the trade_pool_pairs table first
+                try:
+                    query = text("SELECT pair_name FROM trade_pool_pairs WHERE status = 1")
+                    result = session.execute(query)
+                    pairs_surf = [row[0] for row in result]
+                    if pairs_surf:
+                        return sorted(pairs_surf)
+                except:
+                    pass
+                
+                # If that doesn't work, try to get pairs from partition tables
+                singapore_tz = pytz.timezone('Asia/Singapore')
+                today = datetime.now(singapore_tz).strftime("%Y%m%d")
+                yesterday = (datetime.now(singapore_tz) - timedelta(days=1)).strftime("%Y%m%d")
+                
+                for date in [today, yesterday]:
+                    try:
+                        table_name = f"oracle_price_log_partition_{date}"
+                        query = text(f"""
+                            SELECT DISTINCT pair_name 
+                            FROM public."{table_name}" 
+                            LIMIT 50
+                        """)
+                        result = session.execute(query)
+                        pairs_from_table = [row[0] for row in result]
+                        if pairs_from_table:
+                            pairs.update(pairs_from_table)
+                            break
+                    except:
+                        continue
+        
+        # If we found any pairs, return them, otherwise use predefined list
+        if pairs:
+            return sorted(list(pairs))
+        return PREDEFINED_PAIRS
     
     except Exception as e:
         st.error(f"Error fetching available pairs: {e}")
         return PREDEFINED_PAIRS
 
-def get_partition_tables(session, start_date, end_date):
+# Check if a table exists
+def table_exists(session, table_name):
+    """Check if a table exists in the database"""
+    check_query = text("""
+        SELECT EXISTS (
+            SELECT FROM information_schema.tables 
+            WHERE table_schema = 'public' 
+            AND table_name = :table_name
+        );
+    """)
+    return session.execute(check_query, {"table_name": table_name}).scalar()
+
+# Get available partition tables
+def get_partition_tables(session, platform, start_date, end_date):
     """
     Get list of partition tables that need to be queried based on date range.
-    Returns a list of table names (oracle_price_log_partition_YYYYMMDD)
+    Returns a list of table names
     """
     # Ensure we have datetime objects
     if isinstance(start_date, str):
@@ -157,10 +170,6 @@ def get_partition_tables(session, start_date, end_date):
     start_date = start_date.astimezone(singapore_tz)
     end_date = end_date.astimezone(singapore_tz)
     
-    # Remove timezone for database compatibility
-    start_date = start_date.replace(tzinfo=None)
-    end_date = end_date.replace(tzinfo=None)
-    
     # Generate list of dates between start and end
     dates = []
     current_date = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -177,71 +186,19 @@ def get_partition_tables(session, start_date, end_date):
     existing_tables = []
     
     for table in table_names:
-        check_table = text("""
-            SELECT EXISTS (
-                SELECT FROM information_schema.tables 
-                WHERE table_schema = 'public' 
-                AND table_name = %s
-            );
-        """)
-        
-        if session.execute(check_table, (table,)).scalar():
+        if table_exists(session, table):
             existing_tables.append(table)
     
     return existing_tables
 
-def build_union_query(tables, pair_name, start_time, end_time):
-    """Build a UNION query across multiple partition tables."""
-    if not tables:
-        return ""
-    
-    # Format dates for query
-    if isinstance(start_time, datetime):
-        start_time_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
-    else:
-        start_time_str = start_time
-        
-    if isinstance(end_time, datetime):
-        end_time_str = end_time.strftime("%Y-%m-%d %H:%M:%S")
-    else:
-        end_time_str = end_time
-    
-    union_parts = []
-    
-    for table in tables:
-        query = f"""
-        SELECT 
-            pair_name,
-            created_at + INTERVAL '8 hour' AS timestamp_sgt,
-            final_price AS price
-        FROM 
-            public.{table}
-        WHERE 
-            created_at >= '{start_time_str}'::timestamp - INTERVAL '8 hour'
-            AND created_at <= '{end_time_str}'::timestamp - INTERVAL '8 hour'
-            AND pair_name = '{pair_name}'
-        """
-        union_parts.append(query)
-    
-    # Join with UNION and add ORDER BY
-    complete_query = " UNION ".join(union_parts) + " ORDER BY timestamp_sgt DESC"
-    return complete_query
-
-def fetch_tick_data(pair_name, hours=24, num_ticks=5000, progress_callback=None):
+# Fetch tick data - improved to ensure we get the last 12 hours AND at least 5000 ticks
+def fetch_tick_data(pair_name, platform, hours=12, min_ticks=5000, progress_callback=None):
     """
-    Fetch tick data for a specific pair.
-    
-    Args:
-        pair_name: The cryptocurrency pair to fetch
-        hours: Hours to look back (default 24)
-        num_ticks: Number of most recent ticks to fetch (default 5000)
-        progress_callback: Optional callback for progress updates
-        
-    Returns:
-        DataFrame with tick data and analysis info
+    Fetch tick data for a specific pair from the specified platform.
+    Ensures we get at least min_ticks data points or data from the last hours, whichever is more.
     """
     try:
-        with get_session() as session:
+        with get_session(platform) as session:
             if not session:
                 return None
             
@@ -254,36 +211,54 @@ def fetch_tick_data(pair_name, hours=24, num_ticks=5000, progress_callback=None)
             start_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
             end_str = now.strftime("%Y-%m-%d %H:%M:%S")
             
-            # Update progress if callback provided
             if progress_callback:
-                progress_callback(0.1, f"Analyzing data from {start_str} to {end_str} (SGT)")
+                progress_callback(0.1, f"Fetching {platform} data from {start_str} to {end_str} (SGT)")
             
             # Get relevant partition tables
-            tables = get_partition_tables(session, start_time, now)
+            tables = get_partition_tables(session, platform, start_time, now)
             
             if progress_callback:
-                progress_callback(0.2, f"Found {len(tables)} partition tables to query")
+                progress_callback(0.2, f"Found {len(tables)} {platform} partition tables")
             
             if not tables:
                 if progress_callback:
-                    progress_callback(0.2, "No partition tables found for the specified time range")
+                    progress_callback(0.2, f"No {platform} tables found for this time range")
                 return None
             
-            # Build and execute query
-            query = build_union_query(tables, pair_name, start_str, end_str)
+            # Build query for each table
+            union_parts = []
+            
+            for table in tables:
+                query = f"""
+                SELECT 
+                    pair_name,
+                    created_at + INTERVAL '8 hour' AS timestamp_sgt,
+                    final_price AS price
+                FROM 
+                    public."{table}"
+                WHERE 
+                    created_at >= '{start_str}'::timestamp - INTERVAL '8 hour'
+                    AND created_at <= '{end_str}'::timestamp - INTERVAL '8 hour'
+                    AND pair_name = '{pair_name}'
+                """
+                union_parts.append(query)
+            
+            # Join with UNION and add ORDER BY
+            complete_query = " UNION ".join(union_parts) + " ORDER BY timestamp_sgt DESC"  # DESC to get newest first
+            
+            # Add LIMIT to get at least min_ticks
+            limited_query = complete_query + f" LIMIT {min_ticks * 2}"  # Get more than needed to account for potential duplicates
             
             if progress_callback:
-                progress_callback(0.4, f"Fetching data for {pair_name}...")
+                progress_callback(0.4, f"Executing query for {platform}...")
             
-            if not query:
-                return None
-                
-            result = session.execute(text(query))
+            # Execute query
+            result = session.execute(text(limited_query))
             data = result.fetchall()
             
             if not data:
                 if progress_callback:
-                    progress_callback(0.5, "No data found for the specified pair")
+                    progress_callback(0.5, f"No {platform} data found for {pair_name}")
                 return None
             
             # Create DataFrame
@@ -292,397 +267,161 @@ def fetch_tick_data(pair_name, hours=24, num_ticks=5000, progress_callback=None)
             # Convert price to numeric
             df['price'] = pd.to_numeric(df['price'], errors='coerce')
             
-            # Convert timestamp to datetime if it's not already
-            if not pd.api.types.is_datetime64_any_dtype(df['timestamp_sgt']):
-                df['timestamp_sgt'] = pd.to_datetime(df['timestamp_sgt'])
+            # Sort by timestamp (ascending)
+            df = df.sort_values('timestamp_sgt', ascending=True)
             
-            # Sort by timestamp (newest first) and take the specified number of ticks
-            df = df.sort_values('timestamp_sgt', ascending=False)
+            # Remove duplicates
+            df = df.drop_duplicates(subset=['timestamp_sgt'])
             
-            if len(df) > num_ticks:
-                df = df.iloc[:num_ticks]
+            # Check if we have enough data
+            if len(df) < min_ticks:
+                # Not enough data, try to get more by extending the time range
+                if progress_callback:
+                    progress_callback(0.6, f"Only found {len(df)} ticks. Extending time range...")
+                
+                # Try to get more historical data
+                extended_start_time = start_time - timedelta(hours=24)  # Go back further
+                extended_start_str = extended_start_time.strftime("%Y-%m-%d %H:%M:%S")
+                
+                # Get additional partition tables
+                additional_tables = get_partition_tables(session, platform, extended_start_time, start_time)
+                
+                if additional_tables:
+                    # Build additional queries
+                    additional_union_parts = []
+                    
+                    for table in additional_tables:
+                        query = f"""
+                        SELECT 
+                            pair_name,
+                            created_at + INTERVAL '8 hour' AS timestamp_sgt,
+                            final_price AS price
+                        FROM 
+                            public."{table}"
+                        WHERE 
+                            created_at >= '{extended_start_str}'::timestamp - INTERVAL '8 hour'
+                            AND created_at < '{start_str}'::timestamp - INTERVAL '8 hour'
+                            AND pair_name = '{pair_name}'
+                        """
+                        additional_union_parts.append(query)
+                    
+                    if additional_union_parts:
+                        # Join with UNION and add ORDER BY
+                        additional_query = " UNION ".join(additional_union_parts) + " ORDER BY timestamp_sgt DESC"
+                        additional_query = additional_query + f" LIMIT {min_ticks * 2}"  # Get more than needed
+                        
+                        # Execute additional query
+                        additional_result = session.execute(text(additional_query))
+                        additional_data = additional_result.fetchall()
+                        
+                        if additional_data:
+                            # Create DataFrame for additional data
+                            additional_df = pd.DataFrame(additional_data, columns=['pair_name', 'timestamp_sgt', 'price'])
+                            additional_df['price'] = pd.to_numeric(additional_df['price'], errors='coerce')
+                            
+                            # Combine with original data
+                            combined_df = pd.concat([additional_df, df])
+                            
+                            # Sort and remove duplicates
+                            combined_df = combined_df.sort_values('timestamp_sgt', ascending=True)
+                            combined_df = combined_df.drop_duplicates(subset=['timestamp_sgt'])
+                            
+                            df = combined_df
+            
+            # Keep only the last min_ticks rows if we have more than needed
+            if len(df) > min_ticks:
+                df = df.iloc[-min_ticks:]
             
             if progress_callback:
-                progress_callback(0.8, f"Processing {len(df)} ticks...")
+                progress_callback(0.8, f"Processing {len(df)} {platform} ticks...")
             
-            # Analyze the data
-            if len(df) > 1:
-                # Calculate tick-to-tick changes
-                df['price_change'] = df['price'].diff(-1)  # Negative diff because newest is first
-                df['pct_change'] = (df['price_change'] / df['price'].shift(-1)) * 100
-                
-                # Calculate time between ticks
-                df['time_diff'] = df['timestamp_sgt'].diff(-1).dt.total_seconds()
-                
-                # Get timestamp range
-                newest_time = df['timestamp_sgt'].iloc[0]
-                oldest_time = df['timestamp_sgt'].iloc[-1]
-                total_duration = (newest_time - oldest_time).total_seconds()
-                
-                # Calculate statistics
-                tick_stats = {
-                    'pair': pair_name,
-                    'count': len(df),
-                    'newest_time': newest_time.strftime("%Y-%m-%d %H:%M:%S"),
-                    'oldest_time': oldest_time.strftime("%Y-%m-%d %H:%M:%S"),
-                    'duration_seconds': total_duration,
-                    'duration_formatted': f"{total_duration//3600:.0f}h {(total_duration%3600)//60:.0f}m {total_duration%60:.0f}s",
-                    'avg_tick_seconds': df['time_diff'].mean(),
-                    'min_price': df['price'].min(),
-                    'max_price': df['price'].max(),
-                    'volatility': df['pct_change'].std()
-                }
-            else:
-                tick_stats = {
-                    'pair': pair_name,
-                    'count': len(df),
-                    'newest_time': None,
-                    'oldest_time': None,
-                    'duration_seconds': 0,
-                    'duration_formatted': "N/A",
-                    'avg_tick_seconds': 0,
-                    'min_price': df['price'].min() if len(df) > 0 else None,
-                    'max_price': df['price'].max() if len(df) > 0 else None,
-                    'volatility': 0
-                }
-            
-            if progress_callback:
-                progress_callback(1.0, "Data processing complete")
-            
-            return {
-                'data': df,
-                'stats': tick_stats
-            }
+            return df
     
     except Exception as e:
         if progress_callback:
-            progress_callback(1.0, f"Error: {str(e)}")
-        st.error(f"Error fetching tick data: {e}")
-        import traceback
-        st.error(traceback.format_exc())
+            progress_callback(1.0, f"{platform} error: {str(e)}")
+        st.error(f"Error fetching {platform} tick data: {e}")
         return None
 
-def create_price_plot(data_dict, plot_title=None, height=600):
-    """Create an interactive price chart with Plotly"""
-    if not data_dict or 'data' not in data_dict:
-        return None
+# Calculate choppiness with a more aggressive scaling to match 100-400 range
+def calculate_choppiness(df, window_size=20):
+    """
+    Calculate choppiness values using a rolling window of 20.
+    Designed to produce values in the 100-400 range like the other file.
+    """
+    if df is None or len(df) < window_size + 1:
+        return [], []
     
-    df = data_dict['data']
-    stats = data_dict['stats']
-    
-    if df is None or len(df) < 2:
-        return None
-    
-    # Create a subplot with 2 rows
-    fig = make_subplots(
-        rows=2, 
-        cols=1, 
-        shared_xaxes=True,
-        vertical_spacing=0.05,
-        row_heights=[0.7, 0.3],
-        subplot_titles=(
-            f"{stats['pair']} Price Chart ({stats['count']} ticks)", 
-            "Tick Time Interval (seconds)"
-        )
-    )
-    
-    # Reverse order for better display (oldest to newest)
+    # Ensure data is sorted
     df = df.sort_values('timestamp_sgt')
     
-    # Add price line
-    fig.add_trace(
-        go.Scatter(
-            x=df['timestamp_sgt'],
-            y=df['price'],
-            mode='lines',
-            name='Price',
-            line=dict(color='blue'),
-        ),
-        row=1, col=1
-    )
+    # Initialize lists for results
+    timestamps = []
+    choppiness_values = []
     
-    # Add time diff scatter plot
-    fig.add_trace(
-        go.Scatter(
-            x=df['timestamp_sgt'][:-1],
-            y=df['time_diff'],
-            mode='markers',
-            name='Tick Interval',
-            marker=dict(
-                color='orange',
-                size=5,
-                opacity=0.7
-            ),
-        ),
-        row=2, col=1
-    )
+    # Calculate rolling choppiness for each window
+    for i in range(window_size, len(df)):
+        window_df = df.iloc[i-window_size:i].copy()
+        prices = window_df['price'].values
+        
+        # Calculate direction changes
+        price_changes = np.diff(prices)
+        signs = np.sign(price_changes)
+        signs = signs[signs != 0]  # Remove zeros
+        
+        # Count direction changes
+        direction_changes = np.sum(np.abs(np.diff(signs))) / 2
+        
+        # Scale to match 100-400 range
+        # Using 250 as the base and scaling factor of 15
+        scaled_choppiness = 250 + (direction_changes - 10) * 15
+        
+        # Ensure the value is in the 100-400 range
+        scaled_choppiness = max(100, min(400, scaled_choppiness))
+        
+        # Store results
+        timestamps.append(df['timestamp_sgt'].iloc[i])
+        choppiness_values.append(scaled_choppiness)
     
-    # Add a horizontal line for average tick time
-    fig.add_shape(
-        type="line",
-        x0=df['timestamp_sgt'].iloc[0],
-        y0=stats['avg_tick_seconds'],
-        x1=df['timestamp_sgt'].iloc[-1],
-        y1=stats['avg_tick_seconds'],
-        line=dict(
-            color="red",
-            width=1,
-            dash="dash",
-        ),
-        row=2, col=1
-    )
-    
-    # Customize layout
-    fig.update_layout(
-        height=height,
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="center",
-            x=0.5
-        ),
-        hovermode="x unified",
-        xaxis=dict(
-            title="",
-            gridcolor='lightgray',
-            showgrid=True,
-            zeroline=False,
-        ),
-        yaxis=dict(
-            title="Price",
-            gridcolor='lightgray',
-            showgrid=True,
-            zeroline=False,
-        ),
-        xaxis2=dict(
-            title="Singapore Time (SGT)",
-            gridcolor='lightgray',
-            showgrid=True,
-            zeroline=False,
-        ),
-        yaxis2=dict(
-            title="Seconds",
-            gridcolor='lightgray',
-            showgrid=True,
-            zeroline=False,
-        ),
-        margin=dict(l=50, r=50, t=50, b=50),
-        plot_bgcolor='white',
-    )
-    
-    # Add a title if provided
-    if plot_title:
-        fig.update_layout(title=dict(text=plot_title, x=0.5, xanchor='center'))
-    
-    return fig
+    return timestamps, choppiness_values
 
-def plot_tick_comparison(data_dict_a, data_dict_b=None, height=700):
-    """Create a comparison plot between two pairs or a single pair"""
-    # If only one dataset is provided
-    if data_dict_b is None:
-        return create_price_plot(data_dict_a, height=height)
+# Time-based aggregation function
+def aggregate_by_time(timestamps, values, interval_minutes=5):
+    """
+    Aggregate choppiness values into regular time intervals.
     
-    # Check if we have valid data for both pairs
-    if not data_dict_a or not data_dict_b or 'data' not in data_dict_a or 'data' not in data_dict_b:
-        return None
+    Args:
+        timestamps: List of datetime objects
+        values: List of corresponding values
+        interval_minutes: Time interval in minutes for aggregation
     
-    df_a = data_dict_a['data']
-    stats_a = data_dict_a['stats']
-    df_b = data_dict_b['data']
-    stats_b = data_dict_b['stats']
+    Returns:
+        Tuple of (aggregated_timestamps, aggregated_values)
+    """
+    if not timestamps or not values:
+        return [], []
     
-    if df_a is None or df_b is None or len(df_a) < 2 or len(df_b) < 2:
-        return None
+    # Create DataFrame for easier manipulation
+    df = pd.DataFrame({'timestamp': timestamps, 'value': values})
     
-    # Create a subplot with 2 rows
-    fig = make_subplots(
-        rows=2, 
-        cols=1, 
-        shared_xaxes=True,
-        vertical_spacing=0.08,
-        row_heights=[0.6, 0.4],
-        subplot_titles=(
-            f"Normalized Price Comparison ({stats_a['pair']} vs {stats_b['pair']})", 
-            "Tick Time Intervals (seconds)"
-        )
-    )
+    # Convert to datetime if not already
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
     
-    # Reverse order for better display (oldest to newest)
-    df_a = df_a.sort_values('timestamp_sgt')
-    df_b = df_b.sort_values('timestamp_sgt')
+    # Create time buckets based on interval_minutes
+    df['time_bucket'] = df['timestamp'].dt.floor(f'{interval_minutes}min')
     
-    # Normalize prices for better comparison
-    df_a = df_a.copy()
-    df_b = df_b.copy()
-    df_a['norm_price'] = df_a['price'] / df_a['price'].iloc[0] * 100
-    df_b['norm_price'] = df_b['price'] / df_b['price'].iloc[0] * 100
+    # Group by time bucket and aggregate
+    aggregated = df.groupby('time_bucket').agg(
+        value=('value', 'mean'),
+        min_value=('value', 'min'),
+        max_value=('value', 'max'),
+        count=('value', 'count')
+    ).reset_index()
     
-    # Add normalized price lines
-    fig.add_trace(
-        go.Scatter(
-            x=df_a['timestamp_sgt'],
-            y=df_a['norm_price'],
-            mode='lines',
-            name=f"{stats_a['pair']} (normalized)",
-            line=dict(color='blue'),
-        ),
-        row=1, col=1
-    )
-    
-    fig.add_trace(
-        go.Scatter(
-            x=df_b['timestamp_sgt'],
-            y=df_b['norm_price'],
-            mode='lines',
-            name=f"{stats_b['pair']} (normalized)",
-            line=dict(color='red'),
-        ),
-        row=1, col=1
-    )
-    
-    # Add time diff scatter plots
-    fig.add_trace(
-        go.Scatter(
-            x=df_a['timestamp_sgt'][:-1],
-            y=df_a['time_diff'],
-            mode='markers',
-            name=f"{stats_a['pair']} Tick Interval",
-            marker=dict(
-                color='blue',
-                size=4,
-                opacity=0.7
-            ),
-        ),
-        row=2, col=1
-    )
-    
-    fig.add_trace(
-        go.Scatter(
-            x=df_b['timestamp_sgt'][:-1],
-            y=df_b['time_diff'],
-            mode='markers',
-            name=f"{stats_b['pair']} Tick Interval",
-            marker=dict(
-                color='red',
-                size=4,
-                opacity=0.7
-            ),
-        ),
-        row=2, col=1
-    )
-    
-    # Add horizontal lines for average tick times
-    fig.add_shape(
-        type="line",
-        x0=min(df_a['timestamp_sgt'].iloc[0], df_b['timestamp_sgt'].iloc[0]),
-        y0=stats_a['avg_tick_seconds'],
-        x1=max(df_a['timestamp_sgt'].iloc[-1], df_b['timestamp_sgt'].iloc[-1]),
-        y1=stats_a['avg_tick_seconds'],
-        line=dict(
-            color="blue",
-            width=1,
-            dash="dash",
-        ),
-        row=2, col=1
-    )
-    
-    fig.add_shape(
-        type="line",
-        x0=min(df_a['timestamp_sgt'].iloc[0], df_b['timestamp_sgt'].iloc[0]),
-        y0=stats_b['avg_tick_seconds'],
-        x1=max(df_a['timestamp_sgt'].iloc[-1], df_b['timestamp_sgt'].iloc[-1]),
-        y1=stats_b['avg_tick_seconds'],
-        line=dict(
-            color="red",
-            width=1,
-            dash="dash",
-        ),
-        row=2, col=1
-    )
-    
-    # Add annotations for average tick times
-    fig.add_annotation(
-        x=max(df_a['timestamp_sgt'].iloc[-1], df_b['timestamp_sgt'].iloc[-1]),
-        y=stats_a['avg_tick_seconds'],
-        text=f"Avg: {stats_a['avg_tick_seconds']:.2f}s",
-        showarrow=False,
-        font=dict(color="blue"),
-        xanchor="right",
-        row=2, col=1
-    )
-    
-    fig.add_annotation(
-        x=max(df_a['timestamp_sgt'].iloc[-1], df_b['timestamp_sgt'].iloc[-1]),
-        y=stats_b['avg_tick_seconds'],
-        text=f"Avg: {stats_b['avg_tick_seconds']:.2f}s",
-        showarrow=False,
-        font=dict(color="red"),
-        xanchor="right",
-        row=2, col=1
-    )
-    
-    # Customize layout
-    fig.update_layout(
-        height=height,
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="center",
-            x=0.5
-        ),
-        hovermode="x unified",
-        xaxis=dict(
-            title="",
-            gridcolor='lightgray',
-            showgrid=True,
-            zeroline=False,
-        ),
-        yaxis=dict(
-            title="Normalized Price (base=100)",
-            gridcolor='lightgray',
-            showgrid=True,
-            zeroline=False,
-        ),
-        xaxis2=dict(
-            title="Singapore Time (SGT)",
-            gridcolor='lightgray', 
-            showgrid=True,
-            zeroline=False,
-        ),
-        yaxis2=dict(
-            title="Seconds",
-            gridcolor='lightgray',
-            showgrid=True,
-            zeroline=False,
-        ),
-        margin=dict(l=50, r=50, t=70, b=50),
-        plot_bgcolor='white',
-    )
-    
-    return fig
+    # Return the aggregated values
+    return aggregated['time_bucket'].tolist(), aggregated['value'].tolist(), aggregated[['min_value', 'max_value', 'count']].to_dict('records')
 
-def display_tick_stats(data_dict):
-    """Display statistics about the tick data"""
-    if not data_dict or 'stats' not in data_dict:
-        return
-    
-    stats = data_dict['stats']
-    
-    # Create a formatted display of statistics
-    st.markdown(f"""
-    <div class="time-info">
-        <h4>Tick Data Statistics: {stats['pair']}</h4>
-        <p><strong>Total Ticks:</strong> {stats['count']}</p>
-        <p><strong>Time Range:</strong> {stats['oldest_time']} to {stats['newest_time']} (SGT)</p>
-        <p><strong>Duration:</strong> {stats['duration_formatted']} ({stats['duration_seconds']:.1f} seconds)</p>
-        <p><strong>Average Time Between Ticks:</strong> {stats['avg_tick_seconds']:.3f} seconds</p>
-        <p><strong>Price Range:</strong> {stats['min_price']} to {stats['max_price']}</p>
-        <p><strong>Volatility (StdDev of % changes):</strong> {stats['volatility']:.4f}%</p>
-    </div>
-    """, unsafe_allow_html=True)
-
+# Main app
 def main():
     # Get current Singapore time
     singapore_tz = pytz.timezone('Asia/Singapore')
@@ -690,262 +429,278 @@ def main():
     current_time_sg = now_sg.strftime("%Y-%m-%d %H:%M:%S")
     
     # Main title
-    st.title("Crypto Tick Data Plotter")
+    st.title("Choppiness Time Plot: Rollbit vs Surf")
     st.markdown(f"<p style='text-align: center; font-size:14px; color:gray;'>Last updated: {current_time_sg} (SGT)</p>", unsafe_allow_html=True)
     
-    # Create tabs for different analysis modes
-    tab1, tab2 = st.tabs(["Single Pair Analysis", "Pair Comparison"])
+    st.markdown("Comparison of price choppiness over the last 12 hours using 5000 ticks and a rolling window of 20 ticks")
     
     # Get available pairs
     available_pairs = get_available_pairs()
     
-    # Tab 1: Single Pair Analysis
-    with tab1:
-        st.markdown("""
-        <div class="selection-container">
-            <h3>Single Crypto Pair Analysis</h3>
-            <p>Select a cryptocurrency pair and analyze its tick data with a detailed price chart and statistics.</p>
-        </div>
-        """, unsafe_allow_html=True)
+    # Create columns for layout
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        # Selection UI
+        selected_pair = st.selectbox(
+            "Select cryptocurrency pair",
+            options=available_pairs,
+            index=0 if "SOL/USDT" in available_pairs else 0
+        )
+    
+    with col2:
+        # Time interval selection
+        time_interval = st.selectbox(
+            "Time Interval",
+            options=[1, 2, 3, 5, 10, 15, 30],
+            index=2,  # Default to 5 minutes
+            help="Aggregate data into time intervals (minutes)"
+        )
+    
+    # Create plot button
+    if st.button("Generate Choppiness Plot", use_container_width=True):
+        # Progress bars for data fetching
+        col_rollbit, col_surf = st.columns(2)
         
-        col1, col2, col3 = st.columns([2, 1, 1])
-        
-        with col1:
-            pair = st.selectbox(
-                "Select Cryptocurrency Pair",
-                options=available_pairs,
-                index=0 if "BTC/USDT" in available_pairs else 0
-            )
-        
-        with col2:
-            hours = st.number_input(
-                "Hours of Data",
-                min_value=1,
-                max_value=48,
-                value=24,
-                step=1,
-                help="How many hours of data to analyze"
-            )
-        
-        with col3:
-            num_ticks = st.number_input(
-                "Number of Ticks",
-                min_value=100,
-                max_value=10000,
-                value=5000,
-                step=100,
-                help="How many of the most recent ticks to analyze"
-            )
-        
-        analyze_button = st.button("Analyze Pair", key="analyze_single")
-        
-        if analyze_button:
-            # Clear cache to ensure fresh data
-            st.cache_data.clear()
+        with col_rollbit:
+            st.write("Rollbit")
+            progress_bar_rollbit = st.progress(0)
             
-            # Show analysis start time
-            analysis_start_time = datetime.now(singapore_tz).strftime("%Y-%m-%d %H:%M:%S")
-            st.markdown(f"<p style='text-align: center; font-size:14px; color:green;'>Analysis started at: {analysis_start_time} (SGT)</p>", unsafe_allow_html=True)
+            def update_rollbit(progress, text):
+                progress_bar_rollbit.progress(progress, text)
+        
+        with col_surf:
+            st.write("Surf")
+            progress_bar_surf = st.progress(0)
             
-            # Create progress bar
-            progress_bar = st.progress(0)
-            status_text = st.empty()
+            def update_surf(progress, text):
+                progress_bar_surf.progress(progress, text)
+        
+        # Fetch data for both platforms with a minimum of 5000 ticks
+        with st.spinner("Fetching tick data..."):
+            rollbit_df = fetch_tick_data(selected_pair, 'rollbit', 12, 5000, update_rollbit)
+            surf_df = fetch_tick_data(selected_pair, 'surf', 12, 5000, update_surf)
+        
+        # Process data if available
+        if rollbit_df is not None and surf_df is not None:
+            st.success(f"Fetched {len(rollbit_df)} ticks from Rollbit and {len(surf_df)} ticks from Surf")
             
-            # Define progress callback function
-            def update_progress(progress, text):
-                progress_bar.progress(progress, text)
+            # Fixed window size of 20
+            window_size = 20
             
-            # Fetch and process data
-            with st.spinner(f"Fetching tick data for {pair}..."):
-                data = fetch_tick_data(pair, hours, num_ticks, update_progress)
+            # Check if we have enough data
+            if len(rollbit_df) < window_size + 1 or len(surf_df) < window_size + 1:
+                st.warning(f"Not enough data for window size {window_size}. Rollbit: {len(rollbit_df)} ticks, Surf: {len(surf_df)} ticks")
+                if min(len(rollbit_df), len(surf_df)) < 5:
+                    st.error("Insufficient data to calculate choppiness. Please try a different pair or fetch more data.")
+                    return
             
-            if data and 'data' in data and len(data['data']) > 0:
-                # Display statistics
-                display_tick_stats(data)
+            # Calculate choppiness with progress indication
+            with st.spinner("Calculating choppiness metrics..."):
+                # Calculate choppiness for both platforms
+                rollbit_times, rollbit_chop = calculate_choppiness(rollbit_df, window_size)
+                surf_times, surf_chop = calculate_choppiness(surf_df, window_size)
+            
+            if len(rollbit_times) > 0 and len(surf_times) > 0:
+                # Time-based aggregation
+                with st.spinner(f"Aggregating data into {time_interval}-minute intervals..."):
+                    # Aggregate data into time intervals
+                    rollbit_agg_times, rollbit_agg_values, rollbit_agg_stats = aggregate_by_time(rollbit_times, rollbit_chop, time_interval)
+                    surf_agg_times, surf_agg_values, surf_agg_stats = aggregate_by_time(surf_times, surf_chop, time_interval)
                 
-                # Create and show plot
-                fig = create_price_plot(data)
-                if fig:
-                    st.plotly_chart(fig, use_container_width=True)
+                # Create plot
+                fig = go.Figure()
                 
-                # Show data table (hidden by default)
-                with st.expander("Show Raw Data Table"):
-                    st.dataframe(
-                        data['data'].sort_values('timestamp_sgt', ascending=False),
-                        use_container_width=True
-                    )
+                # Add Rollbit line
+                fig.add_trace(go.Scatter(
+                    x=rollbit_agg_times,
+                    y=rollbit_agg_values,
+                    mode='lines+markers',
+                    name='Rollbit Choppiness',
+                    line=dict(color='red', width=2),
+                    marker=dict(size=8, color='red'),
+                    hoverinfo='text',
+                    hovertext=[f'Time: {t.strftime("%H:%M:%S")}<br>Value: {v:.2f}<br>Min: {s["min_value"]:.2f}<br>Max: {s["max_value"]:.2f}<br>Points: {s["count"]}' 
+                              for t, v, s in zip(rollbit_agg_times, rollbit_agg_values, rollbit_agg_stats)]
+                ))
                 
-                # Download button for CSV
-                csv = data['data'].to_csv(index=False).encode('utf-8')
-                st.download_button(
-                    label="Download CSV Data",
-                    data=csv,
-                    file_name=f"{pair.replace('/', '_')}_tick_data_{now_sg.strftime('%Y%m%d')}.csv",
-                    mime="text/csv"
+                # Add Surf line
+                fig.add_trace(go.Scatter(
+                    x=surf_agg_times,
+                    y=surf_agg_values,
+                    mode='lines+markers',
+                    name='Surf Choppiness',
+                    line=dict(color='blue', width=2),
+                    marker=dict(size=8, color='blue'),
+                    hoverinfo='text',
+                    hovertext=[f'Time: {t.strftime("%H:%M:%S")}<br>Value: {v:.2f}<br>Min: {s["min_value"]:.2f}<br>Max: {s["max_value"]:.2f}<br>Points: {s["count"]}' 
+                              for t, v, s in zip(surf_agg_times, surf_agg_values, surf_agg_stats)]
+                ))
+                
+                # Layout
+                fig.update_layout(
+                    title=f"Choppiness Over Time: {selected_pair} ({time_interval}-Minute Intervals, Window Size: 20 ticks)",
+                    xaxis_title="Time (SGT)",
+                    yaxis_title="Choppiness (100-400 scale)",
+                    legend=dict(
+                        orientation="h",
+                        yanchor="bottom",
+                        y=1.02,
+                        xanchor="right",
+                        x=1
+                    ),
+                    height=600,
+                    hovermode="closest",
+                    yaxis=dict(
+                        range=[95, 405],  # Slightly wider than 100-400 to show boundary values
+                    ),
+                    plot_bgcolor='white',  # White background
+                    xaxis=dict(
+                        showgrid=True,
+                        gridwidth=1,
+                        gridcolor='rgba(220,220,220,0.5)',
+                        zeroline=False,
+                    ),
+                    yaxis_gridwidth=1,
+                    yaxis_gridcolor='rgba(220,220,220,0.5)',
+                    margin=dict(l=50, r=50, t=80, b=50),
                 )
                 
-                # Show analysis end time
-                analysis_end_time = datetime.now(singapore_tz).strftime("%Y-%m-%d %H:%M:%S")
-                st.markdown(f"<p style='text-align: center; font-size:14px; color:green;'>Analysis completed at: {analysis_end_time} (SGT)</p>", unsafe_allow_html=True)
-            else:
-                st.error(f"No tick data found for {pair} in the specified time range.")
-    
-    # Tab 2: Pair Comparison
-    with tab2:
-        st.markdown("""
-        <div class="selection-container">
-            <h3>Compare Two Crypto Pairs</h3>
-            <p>Compare tick data between two different cryptocurrency pairs to analyze relative price movements and trading activity.</p>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown("<h4>First Pair</h4>", unsafe_allow_html=True)
-            pair1 = st.selectbox(
-                "Select First Pair",
-                options=available_pairs,
-                index=0 if "BTC/USDT" in available_pairs else 0
-            )
-        
-        with col2:
-            st.markdown("<h4>Second Pair</h4>", unsafe_allow_html=True)
-            pair2 = st.selectbox(
-                "Select Second Pair",
-                options=available_pairs,
-                index=1 if "ETH/USDT" in available_pairs else 1
-            )
-        
-        col3, col4, col5 = st.columns([1, 1, 2])
-        
-        with col3:
-            hours_compare = st.number_input(
-                "Hours of Data",
-                min_value=1,
-                max_value=48,
-                value=24,
-                step=1,
-                help="How many hours of data to analyze",
-                key="hours_compare"
-            )
-        
-        with col4:
-            ticks_compare = st.number_input(
-                "Number of Ticks",
-                min_value=100,
-                max_value=10000,
-                value=5000,
-                step=100,
-                help="How many of the most recent ticks to analyze",
-                key="ticks_compare"
-            )
-        
-        with col5:
-            compare_button = st.button("Compare Pairs", use_container_width=True)
-        
-        if compare_button:
-            # Clear cache to ensure fresh data
-            st.cache_data.clear()
-            
-            # Show analysis start time
-            analysis_start_time = datetime.now(singapore_tz).strftime("%Y-%m-%d %H:%M:%S")
-            st.markdown(f"<p style='text-align: center; font-size:14px; color:green;'>Comparison started at: {analysis_start_time} (SGT)</p>", unsafe_allow_html=True)
-            
-            # Create progress bars
-            col_a, col_b = st.columns(2)
-            
-            with col_a:
-                st.markdown(f"<h4>{pair1}</h4>", unsafe_allow_html=True)
-                progress_bar1 = st.progress(0)
-                status_text1 = st.empty()
+                # Add horizontal reference lines
+                fig.add_shape(
+                    type="line",
+                    x0=min(rollbit_agg_times[0], surf_agg_times[0]) if rollbit_agg_times and surf_agg_times else 0,
+                    y0=100,
+                    x1=max(rollbit_agg_times[-1], surf_agg_times[-1]) if rollbit_agg_times and surf_agg_times else 1,
+                    y1=100,
+                    line=dict(color="rgba(0,0,0,0.3)", width=1, dash="dot"),
+                )
                 
-                def update_progress1(progress, text):
-                    progress_bar1.progress(progress, text)
-            
-            with col_b:
-                st.markdown(f"<h4>{pair2}</h4>", unsafe_allow_html=True)
-                progress_bar2 = st.progress(0)
-                status_text2 = st.empty()
+                fig.add_shape(
+                    type="line",
+                    x0=min(rollbit_agg_times[0], surf_agg_times[0]) if rollbit_agg_times and surf_agg_times else 0,
+                    y0=250,
+                    x1=max(rollbit_agg_times[-1], surf_agg_times[-1]) if rollbit_agg_times and surf_agg_times else 1,
+                    y1=250,
+                    line=dict(color="rgba(0,0,0,0.3)", width=1, dash="dot"),
+                )
                 
-                def update_progress2(progress, text):
-                    progress_bar2.progress(progress, text)
-            
-            # Fetch data for both pairs
-            with st.spinner("Fetching and comparing data..."):
-                data1 = fetch_tick_data(pair1, hours_compare, ticks_compare, update_progress1)
-                data2 = fetch_tick_data(pair2, hours_compare, ticks_compare, update_progress2)
-            
-            # Check if we have valid data for both pairs
-            if (data1 and 'data' in data1 and len(data1['data']) > 0 and 
-                data2 and 'data' in data2 and len(data2['data']) > 0):
+                fig.add_shape(
+                    type="line",
+                    x0=min(rollbit_agg_times[0], surf_agg_times[0]) if rollbit_agg_times and surf_agg_times else 0,
+                    y0=400,
+                    x1=max(rollbit_agg_times[-1], surf_agg_times[-1]) if rollbit_agg_times and surf_agg_times else 1,
+                    y1=400,
+                    line=dict(color="rgba(0,0,0,0.3)", width=1, dash="dot"),
+                )
                 
-                # Display statistics for both pairs side by side
-                col_stats1, col_stats2 = st.columns(2)
+                # Add annotation for scale meaning
+                fig.add_annotation(
+                    x=0.01,
+                    y=0.05,
+                    xref="paper",
+                    yref="paper",
+                    text="Lower values = Less choppy, Higher values = More choppy",
+                    showarrow=False,
+                    font=dict(size=12, color="gray"),
+                    bgcolor="white",
+                    bordercolor="gray",
+                    borderwidth=1,
+                    borderpad=4,
+                    opacity=0.8
+                )
                 
-                with col_stats1:
-                    display_tick_stats(data1)
+                # Show plot
+                st.plotly_chart(fig, use_container_width=True)
                 
-                with col_stats2:
-                    display_tick_stats(data2)
+                # Display metrics in columns
+                col1, col2 = st.columns(2)
                 
-                # Create and display comparison plot
-                fig = plot_tick_comparison(data1, data2)
-                if fig:
-                    st.plotly_chart(fig, use_container_width=True)
+                # Calculate metrics
+                rollbit_avg = np.mean(rollbit_chop) if rollbit_chop else 0
+                surf_avg = np.mean(surf_chop) if surf_chop else 0
+                rollbit_min = np.min(rollbit_chop) if rollbit_chop else 0
+                rollbit_max = np.max(rollbit_chop) if rollbit_chop else 0
+                surf_min = np.min(surf_chop) if surf_chop else 0
+                surf_max = np.max(surf_chop) if surf_chop else 0
                 
-                # Show analysis end time
-                analysis_end_time = datetime.now(singapore_tz).strftime("%Y-%m-%d %H:%M:%S")
-                st.markdown(f"<p style='text-align: center; font-size:14px; color:green;'>Comparison completed at: {analysis_end_time} (SGT)</p>", unsafe_allow_html=True)
-                
-                # Show data tables (hidden by default)
-                with st.expander(f"Show Raw Data Tables"):
-                    tab_a, tab_b = st.tabs([f"{pair1} Data", f"{pair2} Data"])
+                # Display metrics
+                with col1:
+                    st.markdown("### Rollbit Metrics")
+                    st.metric(
+                        "Average Choppiness", 
+                        f"{rollbit_avg:.2f}", 
+                        f"{rollbit_avg - surf_avg:.2f} vs Surf"
+                    )
+                    st.markdown(f"**Range:** {rollbit_min:.2f} to {rollbit_max:.2f}")
+                    st.markdown(f"**Latest Value:** {rollbit_chop[-1]:.2f}")
                     
-                    with tab_a:
-                        st.dataframe(
-                            data1['data'].sort_values('timestamp_sgt', ascending=False),
-                            use_container_width=True
-                        )
-                        
-                        # Download button for CSV
-                        csv1 = data1['data'].to_csv(index=False).encode('utf-8')
-                        st.download_button(
-                            label=f"Download {pair1} CSV Data",
-                            data=csv1,
-                            file_name=f"{pair1.replace('/', '_')}_tick_data_{now_sg.strftime('%Y%m%d')}.csv",
-                            mime="text/csv",
-                            key="download1"
-                        )
+                    # Interpret Rollbit choppiness
+                    if rollbit_avg < 175:
+                        status = "Low choppiness - trending market"
+                    elif rollbit_avg < 325:
+                        status = "Moderate choppiness - normal market"
+                    else:
+                        status = "High choppiness - sideways/volatile market"
                     
-                    with tab_b:
-                        st.dataframe(
-                            data2['data'].sort_values('timestamp_sgt', ascending=False),
-                            use_container_width=True
-                        )
-                        
-                        # Download button for CSV
-                        csv2 = data2['data'].to_csv(index=False).encode('utf-8')
-                        st.download_button(
-                            label=f"Download {pair2} CSV Data",
-                            data=csv2,
-                            file_name=f"{pair2.replace('/', '_')}_tick_data_{now_sg.strftime('%Y%m%d')}.csv",
-                            mime="text/csv",
-                            key="download2"
-                        )
+                    st.markdown(f"**Status:** {status}")
+                
+                with col2:
+                    st.markdown("### Surf Metrics")
+                    st.metric(
+                        "Average Choppiness", 
+                        f"{surf_avg:.2f}", 
+                        f"{surf_avg - rollbit_avg:.2f} vs Rollbit"
+                    )
+                    st.markdown(f"**Range:** {surf_min:.2f} to {surf_max:.2f}")
+                    st.markdown(f"**Latest Value:** {surf_chop[-1]:.2f}")
+                    
+                    # Interpret Surf choppiness
+                    if surf_avg < 175:
+                        status = "Low choppiness - trending market"
+                    elif surf_avg < 325:
+                        status = "Moderate choppiness - normal market"
+                    else:
+                        status = "High choppiness - sideways/volatile market"
+                    
+                    st.markdown(f"**Status:** {status}")
+                
+                # Display comparison
+                st.markdown("### Comparison Analysis")
+                difference = abs(rollbit_avg - surf_avg)
+                if difference < 10:
+                    st.success("The choppiness levels are very similar between platforms (difference < 10)")
+                elif difference < 30:
+                    st.info("The choppiness levels show moderate differences between platforms (difference < 30)")
+                else:
+                    st.warning(f"The choppiness levels are significantly different between platforms (difference = {difference:.2f})")
+                    
+                    # Identify which platform is more choppy
+                    more_choppy = "Rollbit" if rollbit_avg > surf_avg else "Surf"
+                    st.markdown(f"**{more_choppy}** shows higher price choppiness, which may indicate more frequent price reversals or market noise.")
+                
+                # Add explanation of the chart
+                with st.expander("About Choppiness Calculation"):
+                    st.markdown("""
+                    **How Choppiness is Calculated:**
+                    
+                    1. For each window of 20 ticks, we analyze the price movements
+                    2. We count the number of times the price direction changes (up to down or down to up)
+                    3. The raw count is scaled to produce values in the 100-400 range:
+                       - Values near 100 indicate low choppiness (trending market)
+                       - Values near 250 indicate moderate choppiness
+                       - Values near 400 indicate high choppiness (sideways or volatile market)
+                    4. Values are then aggregated into time intervals for clearer visualization
+                    
+                    Higher choppiness may indicate market uncertainty, increased volatility, or resistance/support levels being tested.
+                    """)
             else:
-                if not data1 or 'data' not in data1 or len(data1['data']) == 0:
-                    st.error(f"No tick data found for {pair1} in the specified time range.")
-                if not data2 or 'data' not in data2 or len(data2['data']) == 0:
-                    st.error(f"No tick data found for {pair2} in the specified time range.")
-
-    # Add footer information
-    st.markdown("""
-    <div style='margin-top: 30px; padding: 10px; border-top: 1px solid #ddd; text-align: center; color: #666;'>
-        <p>This dashboard fetches and analyzes cryptocurrency tick data with automatic timezone handling and table transitions.</p>
-        <p>All times are displayed in Singapore Time (SGT/UTC+8).</p>
-    </div>
-    """, unsafe_allow_html=True)
+                st.error("Not enough data to calculate choppiness metrics")
+        else:
+            if rollbit_df is None:
+                st.error(f"Could not fetch Rollbit data for {selected_pair}")
+            if surf_df is None:
+                st.error(f"Could not fetch Surf data for {selected_pair}")
 
 if __name__ == "__main__":
     main()
