@@ -112,7 +112,7 @@ def get_session(use_replication=True):
     if not engine:
         yield None
         return
-        
+
     Session = sessionmaker(bind=engine)
     session = Session()
     try:
@@ -136,14 +136,14 @@ def get_available_pairs():
         with get_session() as session:
             if not session:
                 return PREDEFINED_PAIRS  # Fallback to predefined pairs
-            
+
             query = text("SELECT pair_name FROM trade_pool_pairs WHERE status = 1")
             result = session.execute(query)
             pairs = [row[0] for row in result]
-            
+
             # Return sorted pairs or fallback to predefined list if empty
             return sorted(pairs) if pairs else PREDEFINED_PAIRS
-    
+
     except Exception as e:
         st.error(f"Error fetching available pairs: {e}")
         return PREDEFINED_PAIRS  # Fallback to predefined pairs
@@ -154,11 +154,11 @@ def get_current_bid_ask(pair_name, use_replication=True):
         with get_session(use_replication=use_replication) as session:
             if not session:
                 return None
-            
+
             # Get the most recent partition table
             today = datetime.now().strftime("%Y%m%d")
             table_name = f'oracle_order_book_level_price_data_partition_v4_{today}'
-            
+
             # Check if table exists
             check_table = text("""
                 SELECT EXISTS (
@@ -167,16 +167,16 @@ def get_current_bid_ask(pair_name, use_replication=True):
                     AND table_name = :table_name
                 );
             """)
-            
+
             if not session.execute(check_table, {"table_name": table_name}).scalar():
                 # Try yesterday if today doesn't exist
                 yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
                 table_name = f'oracle_order_book_level_price_data_partition_v4_{yesterday}'
-                
+
                 # Check if yesterday's table exists
                 if not session.execute(check_table, {"table_name": table_name}).scalar():
                     return None
-            
+
             # Use the exact SQL you provided
             query = text(f"""
             SELECT 
@@ -192,9 +192,9 @@ def get_current_bid_ask(pair_name, use_replication=True):
                 created_at DESC
             LIMIT 1
             """)
-            
+
             result = session.execute(query, {"pair_name": pair_name}).fetchone()
-            
+
             if result:
                 return {
                     "pair": result[0],
@@ -203,7 +203,7 @@ def get_current_bid_ask(pair_name, use_replication=True):
                     "all_ask": result[3]
                 }
             return None
-            
+
     except Exception as e:
         st.error(f"Error getting bid/ask data: {e}")
         return None
@@ -217,9 +217,12 @@ class SimplifiedDepthTierAnalyzer:
     def __init__(self):
         # Update point counts to match the other file
         self.point_counts = [500, 1500, 2500, 5000]
-        
+
         # Initialize analysis time range
         self.analysis_time_range = None
+
+        # Initialize time ranges for each point count
+        self.point_time_ranges = {point: None for point in self.point_counts}
 
         # Define depth tiers
         self.depth_tier_columns = [
@@ -283,40 +286,47 @@ class SimplifiedDepthTierAnalyzer:
         # Store results
         self.results = {point: None for point in self.point_counts}
 
-    def fetch_and_analyze(self, pair_name, hours=24, progress_bar=None, use_replication=True):
-        """Fetch data and calculate metrics for each depth tier"""
+    def fetch_and_analyze(self, pair_name, hours=3, progress_bar=None, use_replication=True):
+        """Fetch data and calculate metrics for each depth tier
+
+        Args:
+            pair_name: Cryptocurrency pair to analyze
+            hours: Hours of data to look back (default reduced from 24 to 3)
+            progress_bar: Optional progress bar to update
+            use_replication: Whether to use replication database
+        """
         try:
             with get_session(use_replication=use_replication) as session:
                 if not session:
                     return False
-                
+
                 # Calculate time range in Singapore time
                 singapore_tz = pytz.timezone('Asia/Singapore')
                 now = datetime.now(singapore_tz)
                 start_time = now - timedelta(hours=hours)
-                
+
                 # Format for display
                 start_str_display = start_time.strftime("%Y-%m-%d %H:%M:%S")
                 end_str_display = now.strftime("%Y-%m-%d %H:%M:%S")
-                
+
                 # Store the time range for display later
                 self.analysis_time_range = {
                     'start': start_str_display,
                     'end': end_str_display,
                     'timezone': 'SGT'
                 }
-                
+
                 # Format for database query (without timezone)
                 start_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
-                
+
                 # Display the exact time range being analyzed
                 if progress_bar:
                     progress_bar.progress(0.05, text=f"Analyzing data from {start_str_display} to {end_str_display} (SGT)")
-                
+
                 # Get current day's partition table (most likely to have data)
                 today = datetime.now().strftime("%Y%m%d")
                 table_name = f"oracle_order_book_level_price_data_partition_v4_{today}"
-                
+
                 # Check if table exists
                 check_table = text("""
                     SELECT EXISTS (
@@ -325,117 +335,130 @@ class SimplifiedDepthTierAnalyzer:
                         AND table_name = :table_name
                     );
                 """)
-                
+
                 # Debug information about table checking
                 if progress_bar:
                     progress_bar.progress(0.1, text=f"Checking for table: {table_name}")
-                
+
                 table_exists = session.execute(check_table, {"table_name": table_name}).scalar()
-                
+
                 if not table_exists:
                     # Try yesterday if today doesn't exist
                     yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
                     table_name = f"oracle_order_book_level_price_data_partition_v4_{yesterday}"
-                    
+
                     if progress_bar:
                         progress_bar.progress(0.1, text=f"Today's table not found, checking: {table_name}")
-                    
+
                     # Check if yesterday's table exists
                     if not session.execute(check_table, {"table_name": table_name}).scalar():
                         if progress_bar:
                             progress_bar.progress(0.1, text="No data tables found for analysis")
                         return False
-                
+
                 if progress_bar:
                     progress_bar.progress(0.15, text=f"Fetching data from {table_name} for {pair_name}...")
-                
-                # Fetch all data at once with a single query for the max point count
-                max_points = max(self.point_counts)
-                
+
+                # Update query to include created_at column for timestamp tracking
                 query = text(f"""
                     SELECT
                         pair_name,
+                        TO_CHAR(created_at + INTERVAL '8 hour', 'YYYY-MM-DD HH24:MI:SS.MS') AS timestamp_sgt,
                         {', '.join(self.depth_tier_columns)}
                     FROM
                         public."{table_name}"
                     WHERE
                         pair_name = :pair_name
-                        AND created_at >= :start_time
                     ORDER BY created_at DESC
                     LIMIT :limit
                 """)
-                
+
                 # Execute query with parameters
                 result = session.execute(
                     query,
                     {
                         "pair_name": pair_name,
                         "start_time": start_str,
-                        "limit": max_points + 1000
+                        "limit": max(self.point_counts) + 1000
                     }
                 )
-                
+
                 # Fetch all rows and create DataFrame
-                columns = ['pair_name'] + self.depth_tier_columns
+                columns = ['pair_name', 'timestamp_sgt'] + self.depth_tier_columns
                 all_data = result.fetchall()
-                
+
                 if not all_data:
                     if progress_bar:
                         progress_bar.progress(0.2, text="No data found for the specified pair")
                     return False
-                    
+
                 if len(all_data) < min(self.point_counts):
                     if progress_bar:
                         progress_bar.progress(0.2, text=f"Insufficient data: found {len(all_data)} rows, need at least {min(self.point_counts)}")
                     return False
-                
+
                 if progress_bar:
                     progress_bar.progress(0.3, text=f"Processing {len(all_data)} data points...")
-                
+
                 # Convert to DataFrame for faster processing
                 all_df = pd.DataFrame(all_data, columns=columns)
-                
+
                 # Process each point count using the pre-fetched data
                 for i, point_count in enumerate(self.point_counts):
                     if progress_bar:
-                        progress_bar.progress((i / len(self.point_counts)) * 0.6 + 0.3, 
-                                          text=f"Processing {point_count} points...")
-                    
+                        progress_bar.progress((i / len(self.point_counts)) * 0.6 + 0.3,
+                                              text=f"Processing {point_count} points...")
+
                     if len(all_df) >= point_count:
+                        # Get and store the time range for this specific point count
+                        point_df = all_df.iloc[:point_count]
+
+                        if 'timestamp_sgt' in point_df.columns:
+                            newest_time = point_df['timestamp_sgt'].iloc[0]
+                            oldest_time = point_df['timestamp_sgt'].iloc[-1]
+
+                            self.point_time_ranges[point_count] = {
+                                'newest': newest_time,
+                                'oldest': oldest_time,
+                                'count': len(point_df)
+                            }
+
                         # Process each depth tier separately
                         tier_results = {}
-                        
+
                         for column in self.depth_tier_columns:
                             # Extract price data for this tier
                             if column in all_df.columns:
                                 # Make a clean copy of the data for this specific tier
                                 df_tier = all_df[['pair_name', column]].copy()
-                                
+
                                 # Calculate metrics using the correct method
                                 metrics = self._calculate_metrics(df_tier, column, point_count)
                                 if metrics:
                                     tier = self.depth_tier_values[column]
                                     tier_results[tier] = metrics
-                        
+
                         # Convert to DataFrame and sort by a primary metric
                         self.results[point_count] = self._create_results_table(tier_results)
-                
+
                 if progress_bar:
                     progress_bar.progress(1.0, text="Analysis complete!")
-                    
+
                 # Check if we got any results
                 has_results = False
                 for pc in self.point_counts:
                     if self.results[pc] is not None:
                         has_results = True
                         break
-                    
+
                 return has_results
-                
+
         except Exception as e:
             if progress_bar:
                 progress_bar.progress(1.0, text=f"Error: {str(e)}")
             st.error(f"Error in analysis: {e}")
+            import traceback
+            st.error(traceback.format_exc())
             return False
 
     def _calculate_metrics(self, df, price_col, point_count):
@@ -527,12 +550,16 @@ def create_point_count_table(analyzer, point_count):
         st.info(f"No data available for {point_count} points analysis.")
         return
 
-    # Display the time range for this analysis if available
-    if hasattr(analyzer, 'analysis_time_range') and analyzer.analysis_time_range:
+    # Display specific point count time range if available
+    if hasattr(analyzer, 'point_time_ranges') and analyzer.point_time_ranges.get(point_count):
+        point_range = analyzer.point_time_ranges[point_count]
         st.markdown(f"""
-        <p style="font-size:14px; color:#666;">
-            Data time range: {analyzer.analysis_time_range['start']} to {analyzer.analysis_time_range['end']} ({analyzer.analysis_time_range['timezone']})
-        </p>
+        <div style="background-color: #f0f7ff; padding: 8px; border-radius: 5px; margin-bottom: 15px;">
+            <h4 style="margin: 0 0 5px 0;">Specific Time Range for {point_count} Points:</h4>
+            <p style="margin: 3px 0;"><strong>Newest data point:</strong> {point_range['newest']} (SGT)</p>
+            <p style="margin: 3px 0;"><strong>Oldest data point:</strong> {point_range['oldest']} (SGT)</p>
+            <p style="margin: 3px 0;"><strong>Total data points:</strong> {point_range['count']}</p>
+        </div>
         """, unsafe_allow_html=True)
 
     df = analyzer.results[point_count]
@@ -627,11 +654,11 @@ def main():
     if run_analysis and selected_pair:
         # Clear cache before analysis to ensure fresh data
         st.cache_data.clear()
-        
+
         # Show analysis time in Singapore timezone
         analysis_start_time = datetime.now(singapore_tz).strftime("%Y-%m-%d %H:%M:%S")
         st.markdown(f"<p style='text-align: center; font-size:14px; color:green;'>Analysis started at: {analysis_start_time} (SGT)</p>", unsafe_allow_html=True)
-        
+
         # Get current bid/ask data
         bid_ask_data = get_current_bid_ask(selected_pair)
 
@@ -660,19 +687,20 @@ def main():
 
         # Initialize analyzer and run analysis
         analyzer = SimplifiedDepthTierAnalyzer()
-        success = analyzer.fetch_and_analyze(selected_pair, 24, progress_bar)
+        success = analyzer.fetch_and_analyze(selected_pair, hours=3, progress_bar=progress_bar)  # Reduced from 24 to 3 hours
 
         if success:
             # Display the time range used for analysis
-            if hasattr(analyzer, 'analysis_time_range') and analyzer.analysis_time_range:
-                st.markdown(f"""
-                <div style="background-color: #e6f3ff; padding: 10px; border-radius: 5px; margin-bottom: 20px;">
-                    <h3 style="margin: 0;">Data Time Range</h3>
-                    <p style="margin: 5px 0;"><strong>From:</strong> {analyzer.analysis_time_range['start']} ({analyzer.analysis_time_range['timezone']})</p>
-                    <p style="margin: 5px 0;"><strong>To:</strong> {analyzer.analysis_time_range['end']} ({analyzer.analysis_time_range['timezone']})</p>
-                </div>
-                """, unsafe_allow_html=True)
-            
+            # if hasattr(analyzer, 'analysis_time_range') and analyzer.analysis_time_range:
+            #     st.markdown(f"""
+            #     <div style="background-color: #e6f3ff; padding: 10px; border-radius: 5px; margin-bottom: 20px;">
+            #         <h3 style="margin: 0;">Overall Data Time Range</h3>
+            #         <p style="margin: 5px 0;"><strong>From:</strong> {analyzer.analysis_time_range['start']} ({analyzer.analysis_time_range['timezone']})</p>
+            #         <p style="margin: 5px 0;"><strong>To:</strong> {analyzer.analysis_time_range['end']} ({analyzer.analysis_time_range['timezone']})</p>
+            #         <p style="margin: 5px 0;"><em>Detailed time ranges for each point count are shown in individual tabs</em></p>
+            #     </div>
+            #     """, unsafe_allow_html=True)
+
             # Display results for each point count (updated point counts)
             with tabs[0]:
                 create_point_count_table(analyzer, 500)
