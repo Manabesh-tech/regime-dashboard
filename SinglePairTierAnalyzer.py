@@ -153,7 +153,7 @@ def get_current_bid_ask(pair_name, use_replication=True):
             
             # Get the most recent partition table
             today = datetime.now().strftime("%Y%m%d")
-            table_name = f'oracle_order_book_level_price_data_partition_v3_{today}'
+            table_name = f'oracle_order_book_level_price_data_partition_v4_{today}'
             
             # Check if table exists
             check_table = text("""
@@ -167,7 +167,7 @@ def get_current_bid_ask(pair_name, use_replication=True):
             if not session.execute(check_table, {"table_name": table_name}).scalar():
                 # Try yesterday if today doesn't exist
                 yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
-                table_name = f'oracle_order_book_level_price_data_partition_v3_{yesterday}'
+                table_name = f'oracle_order_book_level_price_data_partition_v4_{yesterday}'
                 
                 # Check if yesterday's table exists
                 if not session.execute(check_table, {"table_name": table_name}).scalar():
@@ -175,25 +175,18 @@ def get_current_bid_ask(pair_name, use_replication=True):
             
             # Use the exact SQL you provided
             query = text(f"""
-            SELECT DISTINCT ON (p.pair_name)
-              p.pair_name,
-              TO_CHAR(p.utc8, 'YYYY-MM-DD HH24:MI:SS.MS') AS "UTC+8",
-              p.all_bid,
-              p.all_ask
-            FROM (
-              SELECT
+            SELECT 
                 pair_name,
-                (created_at + INTERVAL '8 hour') AS utc8,
+                TO_CHAR(created_at + INTERVAL '8 hour', 'YYYY-MM-DD HH24:MI:SS.MS') AS "UTC+8",
                 all_bid,
                 all_ask
-              FROM
+            FROM 
                 public."{table_name}"
-              WHERE
+            WHERE 
                 pair_name = :pair_name
-            ) AS p
-            ORDER BY
-              p.pair_name ASC,
-              p.utc8 DESC
+            ORDER BY 
+                created_at DESC
+            LIMIT 1
             """)
             
             result = session.execute(query, {"pair_name": pair_name}).fetchone()
@@ -226,11 +219,15 @@ class SimplifiedDepthTierAnalyzer:
             'price_6', 'price_7', 'price_8', 'price_9', 'price_10',
             'price_11', 'price_12', 'price_13', 'price_14', 'price_15',
             'price_16','price_17','price_18','price_19','price_20','price_21',
-            'price_22','price_23','price_24','price_25'
+            'price_22','price_23','price_24','price_25','price_26','price_27','price_28','price_29'
         ]
 
         # Map column names to actual depth values
         self.depth_tier_values = {
+            'price_26':'1k',
+            'price_27':'3k',
+            'price_28':'5k',
+            'price_29':'7k',
             'price_1': '10k',
             'price_2': '50k',
             'price_3': '100k',
@@ -256,6 +253,7 @@ class SimplifiedDepthTierAnalyzer:
             'price_23':'12000k',
             'price_24':'13000k',
             'price_25':'14000k',
+
         }
 
         # Metrics to calculate
@@ -286,7 +284,7 @@ class SimplifiedDepthTierAnalyzer:
                 
                 # Get current day's partition table (most likely to have data)
                 today = datetime.now().strftime("%Y%m%d")
-                table_name = f"oracle_order_book_level_price_data_partition_v3_{today}"
+                table_name = f"oracle_order_book_level_price_data_partition_v4_{today}"
                 
                 # Check if table exists
                 check_table = text("""
@@ -300,7 +298,7 @@ class SimplifiedDepthTierAnalyzer:
                 if not session.execute(check_table, {"table_name": table_name}).scalar():
                     # Try yesterday if today doesn't exist
                     yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
-                    table_name = f"oracle_order_book_level_price_data_partition_v3_{yesterday}"
+                    table_name = f"oracle_order_book_level_price_data_partition_v4_{yesterday}"
                     
                     # Check if yesterday's table exists
                     if not session.execute(check_table, {"table_name": table_name}).scalar():
