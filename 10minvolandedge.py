@@ -237,7 +237,7 @@ def fetch_house_edge_data(resolution_min=10):
                 created_at,
                 created_at + INTERVAL '8 hour' AS sg_time
             FROM
-                trade_fill_fresh  -- Using trade_fill_fresh instead of surfv2_trade
+                trade_fill_fresh  -- Changed from surfv2_trade to trade_fill_fresh
             WHERE
                 created_at >= NOW() - INTERVAL '24 hours'
                 AND taker_fee_mode = 2
@@ -278,8 +278,102 @@ def fetch_house_edge_data(resolution_min=10):
         if "relation" in error_msg and "does not exist" in error_msg:
             table_name = re.search(r'"([^"]*)"', error_msg)
             if table_name:
-                print(f"Table {table_name.group(1)} does not exist. Please check database schema.")
+                print(f"Table {table_name.group(1)} does not exist. Check database schema.")
+                
+            # Use alternative approach with alternative query
+            st.warning("Error with house edge calculation. Using simplified approach with available data.")
+            return fetch_simplified_house_edge(resolution_min)
             
+        return pd.DataFrame()
+
+# Simplified house edge calculation as fallback
+def fetch_simplified_house_edge(resolution_min=10):
+    """Simplified version of house edge calculation as fallback"""
+    try:
+        # First check if trade_fill_fresh exists and has required columns
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_schema = 'public' 
+                AND table_name = 'trade_fill_fresh'
+            );
+        """)
+        
+        if not cursor.fetchone()[0]:
+            print("trade_fill_fresh table does not exist")
+            return pd.DataFrame()
+        
+        # Check columns exist
+        cursor.execute("""
+            SELECT 
+                column_name
+            FROM 
+                information_schema.columns
+            WHERE 
+                table_name = 'trade_fill_fresh';
+        """)
+        
+        available_columns = [row[0] for row in cursor.fetchall()]
+        print(f"Available columns in trade_fill_fresh: {available_columns}")
+        
+        required_columns = ['pair_name', 'taker_pnl', 'collateral_price', 'created_at']
+        missing_columns = [col for col in required_columns if col.lower() not in [c.lower() for c in available_columns]]
+        
+        if missing_columns:
+            print(f"Missing required columns: {missing_columns}")
+            return pd.DataFrame()
+        
+        # Simplified query with only available columns
+        simplified_query = f"""
+        SELECT
+            tf.pair_name,
+            DATE_TRUNC('{resolution_min} minutes', tf.created_at + INTERVAL '8 hour') AS time_block,
+            
+            -- Simplified platform PNL (orders only)
+            SUM(-1 * tf.taker_pnl * tf.collateral_price) AS total_platform_pnl,
+            
+            -- Placeholder for margin amount - simplified
+            SUM(CASE WHEN tf.taker_way IN (1, 3) THEN tf.deal_vol * tf.collateral_price ELSE 0 END) AS margin_amount,
+            
+            -- Simplified house edge
+            CASE
+                WHEN SUM(CASE WHEN tf.taker_way IN (1, 3) THEN tf.deal_vol * tf.collateral_price ELSE 0 END) = 0 THEN 0
+                WHEN SUM(-1 * tf.taker_pnl * tf.collateral_price) / 
+                     NULLIF(SUM(CASE WHEN tf.taker_way IN (1, 3) THEN tf.deal_vol * tf.collateral_price ELSE 0 END), 0) > 1 THEN 1
+                WHEN SUM(-1 * tf.taker_pnl * tf.collateral_price) / 
+                     NULLIF(SUM(CASE WHEN tf.taker_way IN (1, 3) THEN tf.deal_vol * tf.collateral_price ELSE 0 END), 0) < -1 THEN -1
+                ELSE SUM(-1 * tf.taker_pnl * tf.collateral_price) / 
+                     NULLIF(SUM(CASE WHEN tf.taker_way IN (1, 3) THEN tf.deal_vol * tf.collateral_price ELSE 0 END), 0)
+            END AS house_edge
+        FROM
+            trade_fill_fresh tf
+        WHERE
+            tf.created_at >= NOW() - INTERVAL '24 hours'
+        GROUP BY
+            tf.pair_name,
+            DATE_TRUNC('{resolution_min} minutes', tf.created_at + INTERVAL '8 hour')
+        ORDER BY
+            tf.pair_name,
+            DATE_TRUNC('{resolution_min} minutes', tf.created_at + INTERVAL '8 hour')
+        """
+        
+        print("Executing simplified house edge query...")
+        start_time = time.time()
+        edge_df = pd.read_sql_query(simplified_query, conn)
+        query_time = time.time() - start_time
+        print(f"Simplified query completed in {query_time:.2f} seconds. DataFrame shape: {edge_df.shape}")
+        
+        # Convert timestamp to datetime
+        edge_df['timestamp'] = pd.to_datetime(edge_df['time_block'])
+        
+        # Format the time label (HH:MM) for later joining
+        edge_df['time_label'] = edge_df['timestamp'].dt.strftime('%H:%M')
+        
+        return edge_df
+        
+    except Exception as e:
+        print(f"Error in simplified house edge calculation: {e}")
         return pd.DataFrame()
 
 # Fetch all available tokens from DB
@@ -288,15 +382,28 @@ def fetch_all_tokens():
     """Get a list of all trading pairs/tokens"""
     try:
         cursor = conn.cursor()
-        # Query tokens from trade_fill_fresh directly
+        
+        # First check if trade_fill_fresh exists
         cursor.execute("""
-        SELECT DISTINCT pair_name 
-        FROM trade_fill_fresh 
-        WHERE created_at >= NOW() - INTERVAL '24 hours'
-        AND taker_fee_mode = 2
-        ORDER BY pair_name
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_schema = 'public' 
+                AND table_name = 'trade_fill_fresh'
+            );
         """)
-        tokens = [row[0] for row in cursor.fetchall()]
+        
+        if cursor.fetchone()[0]:
+            # Query tokens from trade_fill_fresh
+            cursor.execute("""
+            SELECT DISTINCT pair_name 
+            FROM trade_fill_fresh 
+            WHERE created_at >= NOW() - INTERVAL '24 hours'
+            ORDER BY pair_name
+            """)
+            tokens = [row[0] for row in cursor.fetchall()]
+        else:
+            tokens = []
+            
         cursor.close()
         
         if not tokens:
@@ -513,7 +620,9 @@ def combine_volatility_and_edge(volatility_results, house_edge_data):
         vol_df = volatility_results[token]
         
         # Get house edge data for this token
-        edge_df = house_edge_data[house_edge_data['pair_name'] == token].copy() if not house_edge_data.empty else pd.DataFrame()
+        edge_df = pd.DataFrame()
+        if not house_edge_data.empty:
+            edge_df = house_edge_data[house_edge_data['pair_name'] == token].copy()
         
         if vol_df is not None and not vol_df.empty:
             if not edge_df.empty:
