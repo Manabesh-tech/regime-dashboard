@@ -282,19 +282,14 @@ class ExchangeAnalyzer:
             progress_bar = st.progress(0)
             status_text = st.empty()
             
-            # Temporary dictionary to hold DataFrames for both exchanges
-            pair_data = {}
-            
-            # First, fetch all data for all pairs from both exchanges
+            # Build all queries first to minimize time between executions
+            all_queries = {}
             for i, pair in enumerate(pairs_to_analyze):
-                progress_bar.progress((i) / len(pairs_to_analyze) / 2)
-                status_text.text(f"Fetching data for {pair} ({i+1}/{len(pairs_to_analyze)})")
+                progress_bar.progress((i) / len(pairs_to_analyze) / 3)  # First third for query building
+                status_text.text(f"Building queries for {pair} ({i+1}/{len(pairs_to_analyze)})")
                 
-                pair_data[pair] = {}
-                
-                # Fetch data for both exchanges for this pair
+                all_queries[pair] = {}
                 for exchange in exchanges_to_compare:
-                    # Build appropriate query for this exchange
                     query = self._build_query_for_partition_tables(
                         partition_tables,
                         pair_name=pair,
@@ -302,8 +297,19 @@ class ExchangeAnalyzer:
                         end_time=end_time,
                         exchange=exchange
                     )
-                    
-                    # Fetch data
+                    all_queries[pair][exchange] = query
+            
+            # Execute all queries in quick succession
+            pair_data = {}
+            for i, pair in enumerate(pairs_to_analyze):
+                progress_bar.progress(0.33 + (i) / len(pairs_to_analyze) / 3)  # Second third for query execution
+                status_text.text(f"Executing queries for {pair} ({i+1}/{len(pairs_to_analyze)})")
+                
+                pair_data[pair] = {}
+                
+                # Execute rollbit and surf queries back-to-back for each pair
+                for exchange in exchanges_to_compare:
+                    query = all_queries[pair][exchange]
                     if query:
                         try:
                             df = pd.read_sql_query(query, conn)
@@ -314,19 +320,20 @@ class ExchangeAnalyzer:
                         except Exception as e:
                             st.error(f"Database query error for {exchange.upper()}_{pair}: {e}")
             
-            # Now process the data for all pairs, ensuring both exchanges are analyzed simultaneously
+            # Process the data for analysis
             for i, pair in enumerate(pairs_to_analyze):
-                progress_bar.progress(0.5 + (i) / len(pairs_to_analyze) / 2)
+                progress_bar.progress(0.67 + (i) / len(pairs_to_analyze) / 3)  # Final third for processing
                 status_text.text(f"Analyzing {pair} ({i+1}/{len(pairs_to_analyze)})")
                 
-                # Check if we have data for both exchanges
-                if pair in pair_data and len(pair_data[pair]) == 2:
-                    # Process each exchange
-                    for exchange in exchanges_to_compare:
-                        if exchange in pair_data[pair]:
-                            # Store the pair name in a way that's easier to reference later
-                            coin_key = pair.replace('/', '_')
-                            self._process_price_data(pair_data[pair][exchange], 'timestamp', 'price', coin_key, exchange)
+                # Skip if we don't have data for both exchanges
+                if pair not in pair_data or len(pair_data[pair]) != 2:
+                    continue
+                
+                # Process data for both exchanges
+                coin_key = pair.replace('/', '_')
+                for exchange in exchanges_to_compare:
+                    if exchange in pair_data[pair]:
+                        self._process_price_data(pair_data[pair][exchange], 'timestamp', 'price', coin_key, exchange)
             
             # Final progress update
             progress_bar.progress(1.0)
