@@ -343,11 +343,10 @@ def fetch_tick_data(pair_name, platform, hours=12, min_ticks=5000, progress_call
         st.error(f"Error fetching {platform} tick data: {e}")
         return None
 
-# Calculate choppiness with a more aggressive scaling to match 100-400 range
-# Calculate choppiness using the second application's formula
+# Calculate choppiness using the same formula as parameters.py
 def calculate_choppiness(df, window_size=20):
     """
-    Calculate choppiness values using the formula from the second application:
+    Calculate choppiness values using the formula from parameters.py:
     choppiness = 100 * sum_abs_changes / (price_range + epsilon)
     
     Args:
@@ -367,7 +366,7 @@ def calculate_choppiness(df, window_size=20):
     timestamps = []
     choppiness_values = []
     
-    # Avoid division by zero
+    # Small constant to avoid division by zero
     epsilon = 1e-10
     
     # Calculate rolling choppiness for each window
@@ -375,18 +374,15 @@ def calculate_choppiness(df, window_size=20):
         window_df = df.iloc[i-window_size:i].copy()
         prices = window_df['price'].values
         
-        # Calculate sum of absolute changes
+        # Calculate sum of absolute price changes
         price_changes = np.abs(np.diff(prices))
         sum_abs_changes = np.sum(price_changes)
         
         # Calculate price range in the window
         price_range = np.max(prices) - np.min(prices)
         
-        # Calculate choppiness using the second application's formula
+        # Calculate choppiness using parameters.py formula
         choppiness = 100 * sum_abs_changes / (price_range + epsilon)
-        
-        # Cap extreme values to match range of original app (100-400)
-        choppiness = max(100, min(400, choppiness))
         
         # Store results
         timestamps.append(df['timestamp_sgt'].iloc[i])
@@ -394,10 +390,11 @@ def calculate_choppiness(df, window_size=20):
     
     return timestamps, choppiness_values
 
-# Time-based aggregation function
+# Time-based aggregation function with overall average
 def aggregate_by_time(timestamps, values, interval_minutes=5):
     """
     Aggregate choppiness values into regular time intervals.
+    Also calculates the full average for comparison with parameters.py.
     
     Args:
         timestamps: List of datetime objects
@@ -405,10 +402,13 @@ def aggregate_by_time(timestamps, values, interval_minutes=5):
         interval_minutes: Time interval in minutes for aggregation
     
     Returns:
-        Tuple of (aggregated_timestamps, aggregated_values)
+        Tuple of (aggregated_timestamps, aggregated_values, stats, overall_average)
     """
     if not timestamps or not values:
-        return [], []
+        return [], [], [], None
+    
+    # Calculate overall average (this should match parameters.py)
+    overall_average = np.mean(values) if values else None
     
     # Create DataFrame for easier manipulation
     df = pd.DataFrame({'timestamp': timestamps, 'value': values})
@@ -427,8 +427,13 @@ def aggregate_by_time(timestamps, values, interval_minutes=5):
         count=('value', 'count')
     ).reset_index()
     
-    # Return the aggregated values
-    return aggregated['time_bucket'].tolist(), aggregated['value'].tolist(), aggregated[['min_value', 'max_value', 'count']].to_dict('records')
+    # Return the aggregated values and overall average
+    return (
+        aggregated['time_bucket'].tolist(),
+        aggregated['value'].tolist(),
+        aggregated[['min_value', 'max_value', 'count']].to_dict('records'),
+        overall_average
+    )
 
 # Main app
 def main():
@@ -509,13 +514,27 @@ def main():
                 # Calculate choppiness for both platforms
                 rollbit_times, rollbit_chop = calculate_choppiness(rollbit_df, window_size)
                 surf_times, surf_chop = calculate_choppiness(surf_df, window_size)
+                
+                # Calculate overall 5000-tick averages (should match parameters.py)
+                rollbit_avg_5000 = np.mean(rollbit_chop) if rollbit_chop else 0
+                surf_avg_5000 = np.mean(surf_chop) if surf_chop else 0
+                
+                # Display 5000-tick averages (these should match parameters.py)
+                st.subheader("5000-tick Choppiness Averages (Should match parameters.py)")
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("Rollbit 5000-tick Average", f"{rollbit_avg_5000:.6f}")
+                with col2:
+                    st.metric("Surf 5000-tick Average", f"{surf_avg_5000:.6f}")
             
             if len(rollbit_times) > 0 and len(surf_times) > 0:
                 # Time-based aggregation
                 with st.spinner(f"Aggregating data into {time_interval}-minute intervals..."):
                     # Aggregate data into time intervals
-                    rollbit_agg_times, rollbit_agg_values, rollbit_agg_stats = aggregate_by_time(rollbit_times, rollbit_chop, time_interval)
-                    surf_agg_times, surf_agg_values, surf_agg_stats = aggregate_by_time(surf_times, surf_chop, time_interval)
+                    rollbit_agg_times, rollbit_agg_values, rollbit_agg_stats, _ = aggregate_by_time(
+                        rollbit_times, rollbit_chop, time_interval)
+                    surf_agg_times, surf_agg_values, surf_agg_stats, _ = aggregate_by_time(
+                        surf_times, surf_chop, time_interval)
                 
                 # Create plot
                 fig = go.Figure()
@@ -546,6 +565,26 @@ def main():
                               for t, v, s in zip(surf_agg_times, surf_agg_values, surf_agg_stats)]
                 ))
                 
+                # Add horizontal line for Rollbit 5000-tick average
+                fig.add_shape(
+                    type="line",
+                    x0=min(rollbit_agg_times[0], surf_agg_times[0]) if rollbit_agg_times and surf_agg_times else 0,
+                    y0=rollbit_avg_5000,
+                    x1=max(rollbit_agg_times[-1], surf_agg_times[-1]) if rollbit_agg_times and surf_agg_times else 1,
+                    y1=rollbit_avg_5000,
+                    line=dict(color="rgba(255,0,0,0.5)", width=1, dash="dash"),
+                )
+                
+                # Add horizontal line for Surf 5000-tick average
+                fig.add_shape(
+                    type="line",
+                    x0=min(rollbit_agg_times[0], surf_agg_times[0]) if rollbit_agg_times and surf_agg_times else 0,
+                    y0=surf_avg_5000,
+                    x1=max(rollbit_agg_times[-1], surf_agg_times[-1]) if rollbit_agg_times and surf_agg_times else 1,
+                    y1=surf_avg_5000,
+                    line=dict(color="rgba(0,0,255,0.5)", width=1, dash="dash"),
+                )
+                
                 # Layout
                 fig.update_layout(
                     title=f"Choppiness Over Time: {selected_pair} ({time_interval}-Minute Intervals, Window Size: 20 ticks)",
@@ -561,7 +600,8 @@ def main():
                     height=600,
                     hovermode="closest",
                     yaxis=dict(
-                        range=[95, 405],  # Slightly wider than 100-400 to show boundary values
+                        range=[min(100, min(rollbit_avg_5000, surf_avg_5000) * 0.9), 
+                              max(400, max(rollbit_avg_5000, surf_avg_5000) * 1.1)],
                     ),
                     plot_bgcolor='white',  # White background
                     xaxis=dict(
@@ -619,6 +659,37 @@ def main():
                     opacity=0.8
                 )
                 
+                # Add annotations for 5000-tick averages
+                fig.add_annotation(
+                    x=0.01,
+                    y=0.95,
+                    xref="paper",
+                    yref="paper",
+                    text=f"Rollbit 5000-tick Avg: {rollbit_avg_5000:.2f}",
+                    showarrow=False,
+                    font=dict(size=12, color="red"),
+                    bgcolor="white",
+                    bordercolor="red",
+                    borderwidth=1,
+                    borderpad=4,
+                    opacity=0.8
+                )
+                
+                fig.add_annotation(
+                    x=0.01,
+                    y=0.90,
+                    xref="paper",
+                    yref="paper",
+                    text=f"Surf 5000-tick Avg: {surf_avg_5000:.2f}",
+                    showarrow=False,
+                    font=dict(size=12, color="blue"),
+                    bgcolor="white",
+                    bordercolor="blue",
+                    borderwidth=1,
+                    borderpad=4,
+                    opacity=0.8
+                )
+                
                 # Show plot
                 st.plotly_chart(fig, use_container_width=True)
                 
@@ -626,8 +697,6 @@ def main():
                 col1, col2 = st.columns(2)
                 
                 # Calculate metrics
-                rollbit_avg = np.mean(rollbit_chop) if rollbit_chop else 0
-                surf_avg = np.mean(surf_chop) if surf_chop else 0
                 rollbit_min = np.min(rollbit_chop) if rollbit_chop else 0
                 rollbit_max = np.max(rollbit_chop) if rollbit_chop else 0
                 surf_min = np.min(surf_chop) if surf_chop else 0
@@ -638,16 +707,16 @@ def main():
                     st.markdown("### Rollbit Metrics")
                     st.metric(
                         "Average Choppiness", 
-                        f"{rollbit_avg:.2f}", 
-                        f"{rollbit_avg - surf_avg:.2f} vs Surf"
+                        f"{rollbit_avg_5000:.2f}", 
+                        f"{rollbit_avg_5000 - surf_avg_5000:.2f} vs Surf"
                     )
                     st.markdown(f"**Range:** {rollbit_min:.2f} to {rollbit_max:.2f}")
                     st.markdown(f"**Latest Value:** {rollbit_chop[-1]:.2f}")
                     
                     # Interpret Rollbit choppiness
-                    if rollbit_avg < 175:
+                    if rollbit_avg_5000 < 175:
                         status = "Low choppiness - trending market"
-                    elif rollbit_avg < 325:
+                    elif rollbit_avg_5000 < 325:
                         status = "Moderate choppiness - normal market"
                     else:
                         status = "High choppiness - sideways/volatile market"
@@ -658,16 +727,16 @@ def main():
                     st.markdown("### Surf Metrics")
                     st.metric(
                         "Average Choppiness", 
-                        f"{surf_avg:.2f}", 
-                        f"{surf_avg - rollbit_avg:.2f} vs Rollbit"
+                        f"{surf_avg_5000:.2f}", 
+                        f"{surf_avg_5000 - rollbit_avg_5000:.2f} vs Rollbit"
                     )
                     st.markdown(f"**Range:** {surf_min:.2f} to {surf_max:.2f}")
                     st.markdown(f"**Latest Value:** {surf_chop[-1]:.2f}")
                     
                     # Interpret Surf choppiness
-                    if surf_avg < 175:
+                    if surf_avg_5000 < 175:
                         status = "Low choppiness - trending market"
-                    elif surf_avg < 325:
+                    elif surf_avg_5000 < 325:
                         status = "Moderate choppiness - normal market"
                     else:
                         status = "High choppiness - sideways/volatile market"
@@ -676,7 +745,7 @@ def main():
                 
                 # Display comparison
                 st.markdown("### Comparison Analysis")
-                difference = abs(rollbit_avg - surf_avg)
+                difference = abs(rollbit_avg_5000 - surf_avg_5000)
                 if difference < 10:
                     st.success("The choppiness levels are very similar between platforms (difference < 10)")
                 elif difference < 30:
@@ -685,7 +754,7 @@ def main():
                     st.warning(f"The choppiness levels are significantly different between platforms (difference = {difference:.2f})")
                     
                     # Identify which platform is more choppy
-                    more_choppy = "Rollbit" if rollbit_avg > surf_avg else "Surf"
+                    more_choppy = "Rollbit" if rollbit_avg_5000 > surf_avg_5000 else "Surf"
                     st.markdown(f"**{more_choppy}** shows higher price choppiness, which may indicate more frequent price reversals or market noise.")
                 
                 # Add explanation of the chart
@@ -693,13 +762,18 @@ def main():
                     st.markdown("""
                     **How Choppiness is Calculated:**
                     
-                    1. For each window of 20 ticks, we analyze the price movements
-                    2. We count the number of times the price direction changes (up to down or down to up)
-                    3. The raw count is scaled to produce values in the 100-400 range:
-                       - Values near 100 indicate low choppiness (trending market)
-                       - Values near 250 indicate moderate choppiness
-                       - Values near 400 indicate high choppiness (sideways or volatile market)
-                    4. Values are then aggregated into time intervals for clearer visualization
+                    1. Formula: `choppiness = 100 * sum_abs_changes / (price_range + epsilon)`
+                    2. For each window of 20 ticks:
+                       - Calculate the sum of absolute price changes
+                       - Calculate the price range (max - min)
+                       - Apply the formula
+                    3. The 5000-tick average is the mean of all individual window calculations
+                    4. Values are then aggregated into time intervals for visualization
+                    
+                    **Interpretation:**
+                    - Values near 100 indicate low choppiness (trending market)
+                    - Values near 250 indicate moderate choppiness
+                    - Values near 400 indicate high choppiness (sideways or volatile market)
                     
                     Higher choppiness may indicate market uncertainty, increased volatility, or resistance/support levels being tested.
                     """)
