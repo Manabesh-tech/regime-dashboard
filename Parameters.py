@@ -11,6 +11,7 @@ import pytz
 # Suppress warnings
 warnings.filterwarnings('ignore')
 
+
 # Set page config
 st.set_page_config(
     page_title="Crypto Exchange Analysis Dashboard",
