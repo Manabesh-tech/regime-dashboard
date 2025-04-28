@@ -67,7 +67,7 @@ extreme_vol_threshold = 1.0  # 100% annualized volatility
 high_edge_threshold = 0.5    # 50% house edge
 negative_edge_threshold = -0.2  # -20% house edge (system losing)
 
-# Function to get partition tables based on date range (reused from volatility code)
+# Function to get partition tables based on date range
 def get_partition_tables(conn, start_date, end_date):
     """
     Get list of partition tables that need to be queried based on date range.
@@ -120,7 +120,7 @@ def get_partition_tables(conn, start_date, end_date):
     
     return existing_tables
 
-# Function to build query across partition tables (reused from volatility code)
+# Function to build query across partition tables
 def build_query_for_partition_tables(tables, pair_name, start_time, end_time):
     """
     Build a complete UNION query for multiple partition tables.
@@ -153,7 +153,7 @@ def build_query_for_partition_tables(tables, pair_name, start_time, end_time):
     complete_query = " UNION ".join(union_parts) + " ORDER BY timestamp"
     return complete_query
 
-# Fetch all available tokens from DB (reused from volatility code)
+# Fetch all available tokens from DB
 @st.cache_data(show_spinner="Fetching tokens...")
 def fetch_all_tokens():
     # Calculate time range for the last 24 hours
@@ -184,29 +184,202 @@ def fetch_all_tokens():
     finally:
         cursor.close()
 
-# NEW: Function to query house edge data
+# Function to fetch 10-minute house edge data
 @st.cache_data(ttl=600, show_spinner="Fetching house edge data...")
 def fetch_house_edge_data():
-    # Based on the SQL query in the second file, modified for 10-minute intervals
-    query = """
+    # Calculate time range for the query
+    end_time = now_sg
+    start_time = end_time - timedelta(days=lookback_days)
+    
+    # UTC timestamps for database query
+    start_time_utc = start_time - timedelta(hours=8)  # Convert SG to UTC
+    start_time_utc_str = start_time_utc.strftime("%Y-%m-%d %H:%M:%S.000 +00:00")
+    
+    # Build the SQL query for 10-minute house edge
+    query = f"""
     SELECT
       "source"."pair_name" AS "pair_name",
       "source"."UTC+8" AS "timestamp",
-      "source"."house edge映射" AS "house_edge",
-      "source"."hours Platform PNL" AS "platform_pnl"
+      "source"."10min Platform PNL" AS "platform_pnl",
+      "source"."house_edge_mapping" AS "house_edge"
     FROM
       (
         SELECT
           "source"."pair_name" AS "pair_name",
           DATE_TRUNC('10 minutes', CAST("source"."UTC+8" AS timestamp)) AS "UTC+8",
-          SUM("source"."hours Platform PNL") AS "hours Platform PNL",
-          AVG("source"."house edge映射") AS "house edge映射"
+          SUM(-1 * "source"."1") + SUM(-1 * "source"."2") + SUM(-1 * "source"."3") AS "10min Platform PNL",
+          CASE
+            WHEN (CAST(SUM(-1 * "source"."1") + SUM(-1 * "source"."2") + SUM(-1 * "source"."3") AS float) / 
+                  NULLIF(SUM("10min_margin"."margin_amount"), 0)) > 1 THEN 1
+            WHEN (CAST(SUM(-1 * "source"."1") + SUM(-1 * "source"."2") + SUM(-1 * "source"."3") AS float) / 
+                  NULLIF(SUM("10min_margin"."margin_amount"), 0)) < -1 THEN -1
+            ELSE (CAST(SUM(-1 * "source"."1") + SUM(-1 * "source"."2") + SUM(-1 * "source"."3") AS float) / 
+                  NULLIF(SUM("10min_margin"."margin_amount"), 0))
+          END AS "house_edge_mapping"
         FROM
           (
-            -- Insert the rest of the query here (truncated for brevity)
-            -- But modify the time window to use 10-minute intervals instead of hourly
-            -- ...
+            SELECT
+              "source"."UTC+8" AS "UTC+8",
+              "source"."pair_name" AS "pair_name",
+              "source"."每分钟平台订单盈亏" AS "每分钟平台订单盈亏",
+              COALESCE("source"."每分钟平台订单盈亏", 0) AS "1",
+              COALESCE("每分钟平台资金费用盈亏 - UTC+8: 分"."每分钟平台资金费用盈亏", 0) AS "2",
+              COALESCE("每分钟平台返佣支出 - UTC+8: 分"."每分钟平台返佣支出", 0) AS "3"
+            FROM
+              (
+                SELECT
+                  DATE_TRUNC('minute', CAST("source"."UTC+8" AS timestamp)) AS "UTC+8",
+                  "source"."pair_name" AS "pair_name",
+                  SUM("source"."taker_pnl" * "source"."collateral_price") AS "每分钟平台订单盈亏"
+                FROM
+                  (
+                    SELECT
+                      "public"."surfv2_trade"."pair_name" AS "pair_name",
+                      "public"."surfv2_trade"."taker_way" AS "taker_way",
+                      "public"."surfv2_trade"."collateral_price" AS "collateral_price",
+                      "public"."surfv2_trade"."taker_fee_mode" AS "taker_fee_mode",
+                      "public"."surfv2_trade"."taker_pnl" AS "taker_pnl",
+                      "public"."surfv2_trade"."created_at" AS "created_at",
+                      ("public"."surfv2_trade"."created_at" + INTERVAL '8 hour') AS "UTC+8"
+                    FROM
+                      "public"."surfv2_trade"
+                  ) AS "source"
+                WHERE
+                  ("source"."taker_fee_mode" = 2)
+                  AND (
+                    ("source"."taker_way" = 1)
+                    OR ("source"."taker_way" = 2)
+                    OR ("source"."taker_way" = 3)
+                    OR ("source"."taker_way" = 4)
+                  )
+                  AND (
+                    "source"."UTC+8" >= timestamp with time zone '{start_time_utc_str}'
+                  )
+                GROUP BY
+                  DATE_TRUNC('minute', CAST("source"."UTC+8" AS timestamp)),
+                  "source"."pair_name"
+                ORDER BY
+                  DATE_TRUNC('minute', CAST("source"."UTC+8" AS timestamp)) ASC,
+                  "source"."pair_name" ASC
+              ) AS "source"
+              LEFT JOIN (
+                SELECT
+                  DATE_TRUNC('minute', CAST("source"."UTC+8" AS timestamp)) AS "UTC+8",
+                  "source"."pair_name" AS "pair_name",
+                  SUM(
+                    "source"."funding_fee" * "source"."collateral_price"
+                  ) AS "每分钟平台资金费用盈亏"
+                FROM
+                  (
+                    SELECT
+                      "public"."surfv2_trade"."pair_name" AS "pair_name",
+                      "public"."surfv2_trade"."taker_way" AS "taker_way",
+                      "public"."surfv2_trade"."collateral_price" AS "collateral_price",
+                      "public"."surfv2_trade"."taker_fee_mode" AS "taker_fee_mode",
+                      "public"."surfv2_trade"."funding_fee" AS "funding_fee",
+                      "public"."surfv2_trade"."created_at" AS "created_at",
+                      ("public"."surfv2_trade"."created_at" + INTERVAL '8 hour') AS "UTC+8"
+                    FROM
+                      "public"."surfv2_trade"
+                  ) AS "source"
+                WHERE
+                  ("source"."taker_fee_mode" = 2)
+                  AND ("source"."taker_way" = 0)
+                  AND (
+                    "source"."UTC+8" >= timestamp with time zone '{start_time_utc_str}'
+                  )
+                GROUP BY
+                  DATE_TRUNC('minute', CAST("source"."UTC+8" AS timestamp)),
+                  "source"."pair_name"
+                ORDER BY
+                  DATE_TRUNC('minute', CAST("source"."UTC+8" AS timestamp)) ASC,
+                  "source"."pair_name" ASC
+              ) AS "每分钟平台资金费用盈亏 - UTC+8: 分" ON (
+                DATE_TRUNC('minute', CAST("source"."UTC+8" AS timestamp)) = DATE_TRUNC(
+                  'minute',
+                  CAST("每分钟平台资金费用盈亏 - UTC+8: 分"."UTC+8" AS timestamp)
+                )
+              )
+              AND (
+                "source"."pair_name" = "每分钟平台资金费用盈亏 - UTC+8: 分"."pair_name"
+              )
+              LEFT JOIN (
+                SELECT
+                  DATE_TRUNC('minute', CAST("source"."UTC+8" AS timestamp)) AS "UTC+8",
+                  "source"."pair_name" AS "pair_name",
+                  SUM("source"."rebate" * "source"."collateral_price") AS "每分钟平台返佣支出"
+                FROM
+                  (
+                    SELECT
+                      "public"."surfv2_trade"."pair_name" AS "pair_name",
+                      "public"."surfv2_trade"."collateral_price" AS "collateral_price",
+                      "public"."surfv2_trade"."taker_fee_mode" AS "taker_fee_mode",
+                      "public"."surfv2_trade"."rebate" AS "rebate",
+                      "public"."surfv2_trade"."created_at" AS "created_at",
+                      ("public"."surfv2_trade"."created_at" + INTERVAL '8 hour') AS "UTC+8"
+                    FROM
+                      "public"."surfv2_trade"
+                  ) AS "source"
+                WHERE
+                  ("source"."taker_fee_mode" = 2)
+                  AND (
+                    "source"."UTC+8" >= timestamp with time zone '{start_time_utc_str}'
+                  )
+                GROUP BY
+                  DATE_TRUNC('minute', CAST("source"."UTC+8" AS timestamp)),
+                  "source"."pair_name"
+                ORDER BY
+                  DATE_TRUNC('minute', CAST("source"."UTC+8" AS timestamp)) ASC,
+                  "source"."pair_name" ASC
+              ) AS "每分钟平台返佣支出 - UTC+8: 分" ON (
+                DATE_TRUNC('minute', CAST("source"."UTC+8" AS timestamp)) = DATE_TRUNC(
+                  'minute',
+                  CAST("每分钟平台返佣支出 - UTC+8: 分"."UTC+8" AS timestamp)
+                )
+              )
+              AND (
+                "source"."pair_name" = "每分钟平台返佣支出 - UTC+8: 分"."pair_name"
+              )
           ) AS "source"
+          LEFT JOIN (
+            -- This subquery calculates opening margin amounts in 10-minute blocks
+            SELECT
+              DATE_TRUNC('10 minutes', CAST("source"."UTC+8" AS timestamp)) AS "UTC+8",
+              "source"."pair_name" AS "pair_name",
+              SUM("source"."deal_vol" * "source"."collateral_price") AS "margin_amount"
+            FROM
+              (
+                SELECT
+                  "public"."surfv2_trade"."pair_name" AS "pair_name",
+                  "public"."surfv2_trade"."deal_vol" AS "deal_vol",
+                  "public"."surfv2_trade"."taker_way" AS "taker_way",
+                  "public"."surfv2_trade"."collateral_price" AS "collateral_price",
+                  "public"."surfv2_trade"."taker_fee_mode" AS "taker_fee_mode",
+                  "public"."surfv2_trade"."created_at" AS "created_at",
+                  ("public"."surfv2_trade"."created_at" + INTERVAL '8 hour') AS "UTC+8"
+                FROM
+                  "public"."surfv2_trade"
+              ) AS "source"
+            WHERE
+              ("source"."UTC+8" >= timestamp with time zone '{start_time_utc_str}')
+              AND ("source"."taker_fee_mode" = 2)
+              AND (
+                ("source"."taker_way" = 1)
+                OR ("source"."taker_way" = 3)
+              )
+            GROUP BY
+              DATE_TRUNC('10 minutes', CAST("source"."UTC+8" AS timestamp)),
+              "source"."pair_name"
+            ORDER BY
+              DATE_TRUNC('10 minutes', CAST("source"."UTC+8" AS timestamp)) ASC,
+              "source"."pair_name" ASC
+          ) AS "10min_margin" ON (
+            "source"."pair_name" = "10min_margin"."pair_name"
+          )
+          AND (
+            DATE_TRUNC('10 minutes', CAST("source"."UTC+8" AS timestamp)) = 
+            DATE_TRUNC('10 minutes', CAST("10min_margin"."UTC+8" AS timestamp))
+          )
         GROUP BY
           "source"."pair_name",
           DATE_TRUNC('10 minutes', CAST("source"."UTC+8" AS timestamp))
@@ -215,56 +388,35 @@ def fetch_house_edge_data():
           DATE_TRUNC('10 minutes', CAST("source"."UTC+8" AS timestamp)) ASC
       ) AS "source"
     WHERE
-      "source"."UTC+8" >= NOW() - INTERVAL '24 hours'
+      "source"."UTC+8" >= (CURRENT_TIMESTAMP + INTERVAL '8 hour' - INTERVAL '24 hours')
+    ORDER BY 
+      "source"."pair_name" ASC,
+      "source"."UTC+8" ASC
     """
     
-    # For demonstration, we'll simulate house edge data since we can't run the actual query
-    # In production, you would use: pd.read_sql_query(query, conn)
-    
-    # Get tokens
-    tokens = fetch_all_tokens()
-    
-    # Generate aligned 10-minute time blocks for the past 24 hours
-    time_blocks = []
-    current_time = now_sg
-    
-    # Round down to the nearest 10-minute mark
-    minutes = current_time.minute
-    rounded_minutes = (minutes // 10) * 10
-    latest_complete_block = current_time.replace(minute=rounded_minutes, second=0, microsecond=0)
-    
-    for i in range(144):  # 24 hours of 10-minute blocks
-        block_time = latest_complete_block - timedelta(minutes=i*10)
-        time_blocks.append(block_time)
-    
-    # Create simulated data
-    data = []
-    for token in tokens:
-        for block_time in time_blocks:
-            # Simulate house edge between -1 and 1 with more variation
-            if token in ["BTC", "ETH"]:
-                # More stable coins tend to have better edge
-                house_edge = np.random.normal(0.2, 0.3)
-            else:
-                # More volatile coins have more variance in edge
-                house_edge = np.random.normal(0, 0.5)
-            
-            # Clamp values between -1 and 1
-            house_edge = max(-1, min(1, house_edge))
-            
-            # Simulate platform PNL
-            platform_pnl = np.random.normal(house_edge * 1000, 500)
-            
-            data.append({
-                "pair_name": token,
-                "timestamp": block_time,
-                "house_edge": house_edge,
-                "platform_pnl": platform_pnl
-            })
-    
-    return pd.DataFrame(data)
+    try:
+        print("Executing house edge query...")
+        edge_df = pd.read_sql_query(query, conn)
+        print(f"House edge query completed. DataFrame shape: {edge_df.shape}")
+        
+        if edge_df.empty:
+            print("No house edge data found.")
+            return pd.DataFrame()
+        
+        # Convert timestamp to datetime
+        edge_df['timestamp'] = pd.to_datetime(edge_df['timestamp'])
+        
+        # Format the time label (HH:MM) for later joining
+        edge_df['time_label'] = edge_df['timestamp'].dt.strftime('%H:%M')
+        
+        return edge_df
+        
+    except Exception as e:
+        st.error(f"Error fetching house edge data: {e}")
+        print(f"Error fetching house edge data: {e}")
+        return pd.DataFrame()
 
-# Function to calculate volatility metrics (adapted from existing code)
+# Function to calculate volatility metrics
 def calculate_volatility_metrics(price_series):
     if price_series is None or len(price_series) < 2:
         return {
@@ -296,7 +448,7 @@ def calculate_volatility_metrics(price_series):
             'rs_vol': np.nan
         }
 
-# Volatility classification function (reused from volatility code)
+# Volatility classification function
 def classify_volatility(vol):
     if pd.isna(vol):
         return ("UNKNOWN", 0, "Insufficient data")
@@ -309,7 +461,7 @@ def classify_volatility(vol):
     else:
         return ("EXTREME", 4, "Extreme volatility")
 
-# NEW: House edge classification function
+# House edge classification function
 def classify_house_edge(edge):
     if pd.isna(edge):
         return ("UNKNOWN", 0, "Insufficient data")
@@ -439,7 +591,7 @@ def fetch_and_calculate_volatility(token):
         print(f"[{token}] Error processing: {e}")
         return None
 
-# NEW: Function to combine volatility and house edge data
+# Function to combine volatility and house edge data
 def combine_volatility_and_edge(volatility_results, house_edge_data):
     """
     Combine volatility and house edge data into a single DataFrame for display.
@@ -664,11 +816,11 @@ if combined_results:
             total_pnl = df['platform_pnl'].sum() if 'platform_pnl' in df.columns else np.nan
             
             # Get peak volatility time
-            max_vol_idx = df['realized_vol'].idxmax() if 'realized_vol' in df.columns else None
+            max_vol_idx = df['realized_vol'].idxmax() if 'realized_vol' in df.columns and not df['realized_vol'].isna().all() else None
             max_vol_time = df.loc[max_vol_idx, 'time_label'] if max_vol_idx and 'time_label' in df.columns else "N/A"
             
             # Get best edge time
-            max_edge_idx = df['house_edge'].idxmax() if 'house_edge' in df.columns else None
+            max_edge_idx = df['house_edge'].idxmax() if 'house_edge' in df.columns and not df['house_edge'].isna().all() else None
             max_edge_time = df.loc[max_edge_idx, 'time_label'] if max_edge_idx and 'time_label' in df.columns else "N/A"
             
             summary_data.append({
@@ -738,11 +890,23 @@ if combined_results:
         
         # Create summary metrics at the top
         total_pnl = sum(row['Total PNL'] for row in summary_data if not pd.isna(row['Total PNL']))
-        avg_portfolio_edge = sum(row['Avg Edge (%)'] * row['Total PNL'] for row in summary_data if not pd.isna(row['Avg Edge (%)']) and not pd.isna(row['Total PNL'])) / sum(abs(row['Total PNL']) for row in summary_data if not pd.isna(row['Total PNL']) and not pd.isna(row['Avg Edge (%)']))
+        
+        # Calculate weighted average edge if we have valid data
+        valid_data = [(row['Avg Edge (%)'], row['Total PNL']) for row in summary_data 
+                     if not pd.isna(row['Avg Edge (%)']) and not pd.isna(row['Total PNL']) and row['Total PNL'] != 0]
+        
+        if valid_data:
+            total_abs_pnl = sum(abs(pnl) for _, pnl in valid_data)
+            if total_abs_pnl > 0:
+                avg_portfolio_edge = sum(edge * abs(pnl) for edge, pnl in valid_data) / total_abs_pnl
+            else:
+                avg_portfolio_edge = np.nan
+        else:
+            avg_portfolio_edge = np.nan
         
         col1, col2, col3 = st.columns(3)
         col1.metric("Total Portfolio PNL (24h)", f"${total_pnl:,.2f}")
-        col2.metric("Weighted Avg Edge", f"{avg_portfolio_edge:.2f}%")
+        col2.metric("Weighted Avg Edge", f"{avg_portfolio_edge:.2f}%" if not pd.isna(avg_portfolio_edge) else "N/A")
         col3.metric("Tokens Analyzed", f"{len(summary_data)}")
     else:
         st.warning("No summary data available.")
@@ -928,9 +1092,8 @@ with st.expander("Understanding the Matrix"):
     - **Red cells with dark background**: Negative edge with high volatility - avoid these
     
     #### Technical Details
-    - Volatility is calculated as the standard deviation of log returns, annualized
-    - House edge represents the average proportion of position value captured by the system
-    - The matrix uses 10-minute timeframes aligned to standard clock intervals
+    - Volatility is calculated as the standard deviation of log returns, annualized based on 10-minute intervals (144 per day)
+    - House edge represents the system's profitability, calculated as (platform PNL / total margin) for each 10-minute period
+    - Edge values range from -1 to 1, with positive values indicating system profit
     - All times are shown in Singapore timezone
-    - Missing values (gray cells) indicate insufficient data
     """)
