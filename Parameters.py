@@ -8,7 +8,6 @@ import psycopg2
 import warnings
 import pytz
 
-
 # Suppress warnings
 warnings.filterwarnings('ignore')
 
@@ -18,6 +17,9 @@ st.set_page_config(
     page_icon="📊",
     layout="wide"
 )
+
+# Always clear cache at startup to ensure fresh data
+st.cache_data.clear()
 
 # Configure database
 def init_db_connection():
@@ -90,8 +92,8 @@ class ExchangeAnalyzer:
             'trend_strength': 'Trend'
         }
         
-        # Point counts to analyze
-        self.point_counts = [500, 5000, 50000]
+        # Point counts to analyze - updated to the requested values
+        self.point_counts = [500, 1500, 2500, 5000]
         
         # The desired direction for each metric (whether higher or lower is better)
         self.metric_desired_direction = {
@@ -104,6 +106,9 @@ class ExchangeAnalyzer:
         # Initialize exchange_data structure
         for metric in self.metrics:
             self.exchange_data[metric] = {point: {} for point in self.point_counts}
+        
+        # Initialize timestamp_ranges structure
+        self.exchange_data['timestamp_ranges'] = {point: {} for point in self.point_counts}
 
     def _get_partition_tables(self, conn, start_date, end_date):
         """
@@ -116,12 +121,25 @@ class ExchangeAnalyzer:
         if isinstance(end_date, str) and end_date:
             end_date = pd.to_datetime(end_date)
         elif end_date is None:
-            end_date = datetime.now()
+            # Use explicit Singapore timezone when getting current date
+            singapore_tz = pytz.timezone('Asia/Singapore')
+            end_date = datetime.now(singapore_tz)
             
-        # Ensure timezone is removed
+        # Ensure timezone is explicitly set to Singapore
+        singapore_tz = pytz.timezone('Asia/Singapore')
+        if start_date.tzinfo is None:
+            start_date = singapore_tz.localize(start_date)
+        if end_date.tzinfo is None:
+            end_date = singapore_tz.localize(end_date)
+        
+        # Convert to Singapore time
+        start_date = start_date.astimezone(singapore_tz)
+        end_date = end_date.astimezone(singapore_tz)
+        
+        # Remove timezone after conversion for compatibility with database
         start_date = start_date.replace(tzinfo=None)
         end_date = end_date.replace(tzinfo=None)
-            
+                
         # Generate list of dates between start and end
         current_date = start_date
         dates = []
@@ -132,6 +150,9 @@ class ExchangeAnalyzer:
         
         # Create table names from dates
         table_names = [f"oracle_price_log_partition_{date}" for date in dates]
+        
+        # Debug info
+        st.write(f"Looking for tables: {table_names}")
         
         # Verify which tables actually exist in the database
         cursor = conn.cursor()
@@ -152,6 +173,8 @@ class ExchangeAnalyzer:
         
         cursor.close()
         
+        st.write(f"Found existing tables: {existing_tables}")
+        
         if not existing_tables:
             st.warning(f"No partition tables found for the date range {start_date.date()} to {end_date.date()}")
         
@@ -164,6 +187,16 @@ class ExchangeAnalyzer:
         """
         if not tables:
             return ""
+        
+        # Convert the times to datetime objects if they're strings
+        if isinstance(start_time, str):
+            start_time = pd.to_datetime(start_time)
+        if isinstance(end_time, str):
+            end_time = pd.to_datetime(end_time)
+        
+        # Format with timezone information explicitly
+        start_time_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
+        end_time_str = end_time.strftime("%Y-%m-%d %H:%M:%S")
             
         union_parts = []
         
@@ -178,8 +211,8 @@ class ExchangeAnalyzer:
                 FROM 
                     public.{table}
                 WHERE 
-                    created_at >= '{start_time}'::timestamp - INTERVAL '8 hour'
-                    AND created_at <= '{end_time}'::timestamp - INTERVAL '8 hour'
+                    created_at >= '{start_time_str}'::timestamp - INTERVAL '8 hour'
+                    AND created_at <= '{end_time_str}'::timestamp - INTERVAL '8 hour'
                     AND source_type = 0
                     AND pair_name = '{pair_name}'
                 """
@@ -193,8 +226,8 @@ class ExchangeAnalyzer:
                 FROM 
                     public.{table}
                 WHERE 
-                    created_at >= '{start_time}'::timestamp - INTERVAL '8 hour'
-                    AND created_at <= '{end_time}'::timestamp - INTERVAL '8 hour'
+                    created_at >= '{start_time_str}'::timestamp - INTERVAL '8 hour'
+                    AND created_at <= '{end_time_str}'::timestamp - INTERVAL '8 hour'
                     AND source_type = 1
                     AND pair_name = '{pair_name}'
                 """
@@ -219,32 +252,44 @@ class ExchangeAnalyzer:
         primary_exchange = 'rollbit'
         secondary_exchange = 'surf'
         
-        # Calculate times
-        end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        start_time = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+        # Use explicit Singapore timezone for all time calculations
+        singapore_tz = pytz.timezone('Asia/Singapore')
+        now = datetime.now(singapore_tz)
+        
+        # Calculate times in Singapore timezone
+        end_time = now.strftime("%Y-%m-%d %H:%M:%S")
+        start_time = (now - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
         
         st.info(f"Retrieving data from the last {hours} hours")
+        st.write(f"Start time: {start_time} (SGT)")
+        st.write(f"End time: {end_time} (SGT)")
         
         try:
             # Get relevant partition tables for this time range
             partition_tables = self._get_partition_tables(conn, start_time, end_time)
             
             if not partition_tables:
-                st.error("No data tables available for the selected time range.")
-                return None
+                # If no tables found, try looking one day earlier (for edge cases)
+                st.warning("No tables found for the specified range, trying to look back one more day...")
+                alt_start_time = (now - timedelta(hours=hours+24)).strftime("%Y-%m-%d %H:%M:%S")
+                partition_tables = self._get_partition_tables(conn, alt_start_time, end_time)
+                
+                if not partition_tables:
+                    st.error("No data tables available for the selected time range, even with extended lookback.")
+                    return None
             
             # Progress bar
             progress_bar = st.progress(0)
             status_text = st.empty()
             
-            # Process each pair for both exchanges
+            # Build all queries first to minimize time between executions
+            all_queries = {}
             for i, pair in enumerate(pairs_to_analyze):
-                progress_bar.progress((i) / len(pairs_to_analyze))
-                status_text.text(f"Analyzing {pair} ({i+1}/{len(pairs_to_analyze)})")
+                progress_bar.progress((i) / len(pairs_to_analyze) / 3)  # First third for query building
+                status_text.text(f"Building queries for {pair} ({i+1}/{len(pairs_to_analyze)})")
                 
-                # Process each exchange
+                all_queries[pair] = {}
                 for exchange in exchanges_to_compare:
-                    # Build appropriate query for this exchange
                     query = self._build_query_for_partition_tables(
                         partition_tables,
                         pair_name=pair,
@@ -252,19 +297,43 @@ class ExchangeAnalyzer:
                         end_time=end_time,
                         exchange=exchange
                     )
-                    
-                    # Fetch data
+                    all_queries[pair][exchange] = query
+            
+            # Execute all queries in quick succession
+            pair_data = {}
+            for i, pair in enumerate(pairs_to_analyze):
+                progress_bar.progress(0.33 + (i) / len(pairs_to_analyze) / 3)  # Second third for query execution
+                status_text.text(f"Executing queries for {pair} ({i+1}/{len(pairs_to_analyze)})")
+                
+                pair_data[pair] = {}
+                
+                # Execute rollbit and surf queries back-to-back for each pair
+                for exchange in exchanges_to_compare:
+                    query = all_queries[pair][exchange]
                     if query:
                         try:
                             df = pd.read_sql_query(query, conn)
                             if len(df) > 0:
-                                # Store the pair name in a way that's easier to reference later
-                                coin_key = pair.replace('/', '_')
-                                self._process_price_data(df, 'timestamp', 'price', coin_key, exchange)
+                                pair_data[pair][exchange] = df
                             else:
                                 st.warning(f"No data found for {exchange.upper()}_{pair}")
                         except Exception as e:
                             st.error(f"Database query error for {exchange.upper()}_{pair}: {e}")
+            
+            # Process the data for analysis
+            for i, pair in enumerate(pairs_to_analyze):
+                progress_bar.progress(0.67 + (i) / len(pairs_to_analyze) / 3)  # Final third for processing
+                status_text.text(f"Analyzing {pair} ({i+1}/{len(pairs_to_analyze)})")
+                
+                # Skip if we don't have data for both exchanges
+                if pair not in pair_data or len(pair_data[pair]) != 2:
+                    continue
+                
+                # Process data for both exchanges
+                coin_key = pair.replace('/', '_')
+                for exchange in exchanges_to_compare:
+                    if exchange in pair_data[pair]:
+                        self._process_price_data(pair_data[pair][exchange], 'timestamp', 'price', coin_key, exchange)
             
             # Final progress update
             progress_bar.progress(1.0)
@@ -307,6 +376,14 @@ class ExchangeAnalyzer:
                     # Use the most recent N points
                     sample = prices.iloc[:point_count]
                     
+                    # Get timestamp range information (first the timestamp column must exist)
+                    if timestamp_col in filtered_df.columns:
+                        sample_timestamps = filtered_df[timestamp_col].iloc[:point_count]
+                        start_time = sample_timestamps.iloc[-1] if not sample_timestamps.empty else None
+                        end_time = sample_timestamps.iloc[0] if not sample_timestamps.empty else None
+                    else:
+                        start_time, end_time = None, None
+                    
                     # Calculate mean price for ATR percentage calculation
                     mean_price = sample.mean()
                     
@@ -331,11 +408,21 @@ class ExchangeAnalyzer:
                         self.exchange_data['tick_atr_pct'][point_count][coin_key] = {}
                     if coin_key not in self.exchange_data['trend_strength'][point_count]:
                         self.exchange_data['trend_strength'][point_count][coin_key] = {}
+                    if coin_key not in self.exchange_data['timestamp_ranges'][point_count]:
+                        self.exchange_data['timestamp_ranges'][point_count][coin_key] = {}
                     
+                    # Store metrics
                     self.exchange_data['direction_changes'][point_count][coin_key][exchange] = direction_changes
                     self.exchange_data['choppiness'][point_count][coin_key][exchange] = choppiness
                     self.exchange_data['tick_atr_pct'][point_count][coin_key][exchange] = tick_atr_pct
                     self.exchange_data['trend_strength'][point_count][coin_key][exchange] = trend_strength
+                    
+                    # Store timestamp range
+                    self.exchange_data['timestamp_ranges'][point_count][coin_key][exchange] = {
+                        'start': start_time,
+                        'end': end_time,
+                        'count': len(sample)
+                    }
         except Exception as e:
             st.error(f"Error processing {coin_key}: {e}")
     
@@ -566,12 +653,53 @@ class ExchangeAnalyzer:
             return comparison_df
         else:
             return None
+    
+    def create_timestamp_range_table(self, point_count, pairs):
+        """Create a table showing the time range for data collection."""
+        if point_count not in self.exchange_data['timestamp_ranges']:
+            return None
+            
+        # Collect timestamp data
+        time_data = []
+        for pair in pairs:
+            coin_key = pair.replace('/', '_')
+            if coin_key in self.exchange_data['timestamp_ranges'][point_count]:
+                row = {'Pair': pair}
+                
+                # Add rollbit data if available
+                if 'rollbit' in self.exchange_data['timestamp_ranges'][point_count][coin_key]:
+                    rollbit_range = self.exchange_data['timestamp_ranges'][point_count][coin_key]['rollbit']
+                    row['Rollbit Start'] = rollbit_range['start']
+                    row['Rollbit End'] = rollbit_range['end']
+                    row['Rollbit Count'] = rollbit_range['count']
+                
+                # Add surf data if available
+                if 'surf' in self.exchange_data['timestamp_ranges'][point_count][coin_key]:
+                    surf_range = self.exchange_data['timestamp_ranges'][point_count][coin_key]['surf']
+                    row['Surf Start'] = surf_range['start']
+                    row['Surf End'] = surf_range['end']
+                    row['Surf Count'] = surf_range['count']
+                
+                time_data.append(row)
+        
+        # Create dataframe
+        if time_data:
+            time_df = pd.DataFrame(time_data)
+            
+            # Format datetime columns to be more readable
+            for col in time_df.columns:
+                if 'Start' in col or 'End' in col:
+                    try:
+                        time_df[col] = pd.to_datetime(time_df[col]).dt.strftime('%Y-%m-%d %H:%M:%S')
+                    except:
+                        pass
+                        
+            return time_df
+        
+        return None
 
 
 # Setup sidebar with simplified options
-# Replace the quick selection buttons with form-compatible elements
-# Here's what you need to change in the form section:
-
 with st.sidebar:
     st.header("Analysis Parameters")
     all_pairs = [
@@ -619,10 +747,7 @@ with st.sidebar:
             help="How many hours of historical data to retrieve. This ensures enough data for point-based analysis."
         )
         
-        st.info("Analysis will be performed on the most recent data points: 500, 5000, and 50000 points regardless of time span.")
-        
-        # List of all available pairs
-
+        st.info("Analysis will be performed on the most recent data points: 500, 1500, 2500, and 5000 points regardless of time span.")
         
         # Create multiselect for pairs
         selected_pairs = st.multiselect(
@@ -647,6 +772,9 @@ with st.sidebar:
 
 # When form is submitted
 if submit_button:
+    # Clear cache at start of analysis to ensure fresh data
+    st.cache_data.clear()
+    
     if not conn:
         st.error("Database connection not available.")
     elif not pairs:
@@ -696,6 +824,20 @@ if submit_button:
                         file_name=f"parameter_comparison_rollbit_vs_surf.csv",
                         mime="text/csv"
                     )
+                    
+                    # Add time range information
+                    st.subheader("Data Collection Time Ranges")
+                    st.write("This shows the exact time range for data analyzed at each point count:")
+                    
+                    for point_count in analyzer.point_counts:
+                        st.write(f"#### {point_count} Points")
+                        time_df = analyzer.create_timestamp_range_table(point_count, pairs)
+                        
+                        if time_df is not None:
+                            st.dataframe(time_df, use_container_width=True)
+                            st.info("Note: 'Start' is the oldest data point, 'End' is the most recent data point in the analysis.")
+                        else:
+                            st.warning(f"No timestamp data available for {point_count} points")
                 else:
                     st.warning("No comparison data available.")
             
@@ -729,6 +871,14 @@ if submit_button:
                                     except:
                                         pass
                                     return ''
+                                
+                                # Display data collection time range
+                                st.subheader("Data Collection Time Ranges")
+                                time_df = analyzer.create_timestamp_range_table(point_count, pairs)
+                                
+                                if time_df is not None:
+                                    st.dataframe(time_df, height=300, use_container_width=True)
+                                    st.info("Note: 'Start' is the oldest data point, 'End' is the most recent data point in the analysis.")
                                 
                                 # Display the data
                                 st.subheader(f"Relative Performance: {point_count} Points")
@@ -866,7 +1016,7 @@ This dashboard analyzes cryptocurrency prices between Rollbit and Surf exchanges
 - **Tick ATR %**: Average True Range as percentage of mean price
 - **Trend Strength**: Measures directional price strength
 
-The dashboard compares these metrics and provides rankings and visualizations for various point counts (500, 5000, and 50000).
+The dashboard compares these metrics and provides rankings and visualizations for various point counts (500, 1500, 2500, and 5000).
 """)
 
 # Add footer
