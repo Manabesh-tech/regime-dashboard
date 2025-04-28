@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
+import pytz
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from contextlib import contextmanager
@@ -214,7 +215,11 @@ class SimplifiedDepthTierAnalyzer:
     """
 
     def __init__(self):
+        # Update point counts to match the other file
         self.point_counts = [500, 1500, 2500, 5000]
+        
+        # Initialize analysis time range
+        self.analysis_time_range = None
 
         # Define depth tiers
         self.depth_tier_columns = [
@@ -285,6 +290,29 @@ class SimplifiedDepthTierAnalyzer:
                 if not session:
                     return False
                 
+                # Calculate time range in Singapore time
+                singapore_tz = pytz.timezone('Asia/Singapore')
+                now = datetime.now(singapore_tz)
+                start_time = now - timedelta(hours=hours)
+                
+                # Format for display
+                start_str_display = start_time.strftime("%Y-%m-%d %H:%M:%S")
+                end_str_display = now.strftime("%Y-%m-%d %H:%M:%S")
+                
+                # Store the time range for display later
+                self.analysis_time_range = {
+                    'start': start_str_display,
+                    'end': end_str_display,
+                    'timezone': 'SGT'
+                }
+                
+                # Format for database query (without timezone)
+                start_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
+                
+                # Display the exact time range being analyzed
+                if progress_bar:
+                    progress_bar.progress(0.05, text=f"Analyzing data from {start_str_display} to {end_str_display} (SGT)")
+                
                 # Get current day's partition table (most likely to have data)
                 today = datetime.now().strftime("%Y%m%d")
                 table_name = f"oracle_order_book_level_price_data_partition_v4_{today}"
@@ -300,7 +328,7 @@ class SimplifiedDepthTierAnalyzer:
                 
                 # Debug information about table checking
                 if progress_bar:
-                    progress_bar.progress(0.05, text=f"Checking for table: {table_name}")
+                    progress_bar.progress(0.1, text=f"Checking for table: {table_name}")
                 
                 table_exists = session.execute(check_table, {"table_name": table_name}).scalar()
                 
@@ -310,20 +338,16 @@ class SimplifiedDepthTierAnalyzer:
                     table_name = f"oracle_order_book_level_price_data_partition_v4_{yesterday}"
                     
                     if progress_bar:
-                        progress_bar.progress(0.05, text=f"Today's table not found, checking: {table_name}")
+                        progress_bar.progress(0.1, text=f"Today's table not found, checking: {table_name}")
                     
                     # Check if yesterday's table exists
                     if not session.execute(check_table, {"table_name": table_name}).scalar():
                         if progress_bar:
-                            progress_bar.progress(0.05, text="No data tables found for analysis")
+                            progress_bar.progress(0.1, text="No data tables found for analysis")
                         return False
                 
-                # Calculate time range
-                start_time = datetime.now() - timedelta(hours=hours)
-                start_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
-                
                 if progress_bar:
-                    progress_bar.progress(0.1, text=f"Fetching data from {start_str} to now...")
+                    progress_bar.progress(0.15, text=f"Fetching data from {table_name} for {pair_name}...")
                 
                 # Fetch all data at once with a single query for the max point count
                 max_points = max(self.point_counts)
@@ -357,16 +381,16 @@ class SimplifiedDepthTierAnalyzer:
                 
                 if not all_data:
                     if progress_bar:
-                        progress_bar.progress(0.1, text="No data found for the specified pair")
+                        progress_bar.progress(0.2, text="No data found for the specified pair")
                     return False
                     
                 if len(all_data) < min(self.point_counts):
                     if progress_bar:
-                        progress_bar.progress(0.1, text=f"Insufficient data: found {len(all_data)} rows, need at least {min(self.point_counts)}")
+                        progress_bar.progress(0.2, text=f"Insufficient data: found {len(all_data)} rows, need at least {min(self.point_counts)}")
                     return False
                 
                 if progress_bar:
-                    progress_bar.progress(0.2, text=f"Processing {len(all_data)} data points...")
+                    progress_bar.progress(0.3, text=f"Processing {len(all_data)} data points...")
                 
                 # Convert to DataFrame for faster processing
                 all_df = pd.DataFrame(all_data, columns=columns)
@@ -374,7 +398,7 @@ class SimplifiedDepthTierAnalyzer:
                 # Process each point count using the pre-fetched data
                 for i, point_count in enumerate(self.point_counts):
                     if progress_bar:
-                        progress_bar.progress((i / len(self.point_counts)) * 0.7 + 0.2, 
+                        progress_bar.progress((i / len(self.point_counts)) * 0.6 + 0.3, 
                                           text=f"Processing {point_count} points...")
                     
                     if len(all_df) >= point_count:
@@ -503,6 +527,14 @@ def create_point_count_table(analyzer, point_count):
         st.info(f"No data available for {point_count} points analysis.")
         return
 
+    # Display the time range for this analysis if available
+    if hasattr(analyzer, 'analysis_time_range') and analyzer.analysis_time_range:
+        st.markdown(f"""
+        <p style="font-size:14px; color:#666;">
+            Data time range: {analyzer.analysis_time_range['start']} to {analyzer.analysis_time_range['end']} ({analyzer.analysis_time_range['timezone']})
+        </p>
+        """, unsafe_allow_html=True)
+
     df = analyzer.results[point_count]
 
     # Make a clean copy for display
@@ -564,12 +596,16 @@ def format_number(num):
         return str(num)
 
 def main():
+    # Get current Singapore time
+    singapore_tz = pytz.timezone('Asia/Singapore')
+    now_sg = datetime.now(singapore_tz)
+    current_time_sg = now_sg.strftime("%Y-%m-%d %H:%M:%S")
+
     # Main layout - super streamlined
     st.markdown("<h1 style='text-align: center; font-size:28px; margin-bottom: 10px;'>Liquidity Depth Tier Analyzer</h1>", unsafe_allow_html=True)
 
-    # Display current time to confirm updates
-    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    st.markdown(f"<p style='text-align: center; font-size:14px; color:gray;'>Last updated: {current_time}</p>", unsafe_allow_html=True)
+    # Display current Singapore time to confirm updates
+    st.markdown(f"<p style='text-align: center; font-size:14px; color:gray;'>Last updated: {current_time_sg} (SGT)</p>", unsafe_allow_html=True)
 
     # Get available pairs from the database
     available_pairs = get_available_pairs()
@@ -592,9 +628,9 @@ def main():
         # Clear cache before analysis to ensure fresh data
         st.cache_data.clear()
         
-        # Show analysis time
-        analysis_start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        st.markdown(f"<p style='text-align: center; font-size:14px; color:green;'>Analysis started at: {analysis_start_time}</p>", unsafe_allow_html=True)
+        # Show analysis time in Singapore timezone
+        analysis_start_time = datetime.now(singapore_tz).strftime("%Y-%m-%d %H:%M:%S")
+        st.markdown(f"<p style='text-align: center; font-size:14px; color:green;'>Analysis started at: {analysis_start_time} (SGT)</p>", unsafe_allow_html=True)
         
         # Get current bid/ask data
         bid_ask_data = get_current_bid_ask(selected_pair)
@@ -616,8 +652,8 @@ def main():
         Higher values of the first three metrics and lower values of Trend Strength typically indicate better trading conditions.
         """)
 
-        # Set up tabs for results
-        tabs = st.tabs(["500 POINTS", "1500 POINTS", "2,500 POINTS", "5,000 POINTS"])
+        # Set up tabs for results - updated to match point counts
+        tabs = st.tabs(["500 POINTS", "1,500 POINTS", "2,500 POINTS", "5,000 POINTS"])
 
         # Create progress bar
         progress_bar = st.progress(0, text="Starting analysis...")
@@ -627,22 +663,32 @@ def main():
         success = analyzer.fetch_and_analyze(selected_pair, 24, progress_bar)
 
         if success:
-            # Display results for each point count
+            # Display the time range used for analysis
+            if hasattr(analyzer, 'analysis_time_range') and analyzer.analysis_time_range:
+                st.markdown(f"""
+                <div style="background-color: #e6f3ff; padding: 10px; border-radius: 5px; margin-bottom: 20px;">
+                    <h3 style="margin: 0;">Data Time Range</h3>
+                    <p style="margin: 5px 0;"><strong>From:</strong> {analyzer.analysis_time_range['start']} ({analyzer.analysis_time_range['timezone']})</p>
+                    <p style="margin: 5px 0;"><strong>To:</strong> {analyzer.analysis_time_range['end']} ({analyzer.analysis_time_range['timezone']})</p>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            # Display results for each point count (updated point counts)
             with tabs[0]:
                 create_point_count_table(analyzer, 500)
 
             with tabs[1]:
-                create_point_count_table(analyzer, 5000)
+                create_point_count_table(analyzer, 1500)
 
             with tabs[2]:
-                create_point_count_table(analyzer, 10000)
+                create_point_count_table(analyzer, 2500)
 
             with tabs[3]:
-                create_point_count_table(analyzer, 50000)
+                create_point_count_table(analyzer, 5000)
 
-            # Show analysis completion time
-            analysis_end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            st.markdown(f"<p style='text-align: center; font-size:14px; color:green;'>Analysis completed at: {analysis_end_time}</p>", unsafe_allow_html=True)
+            # Show analysis completion time in Singapore timezone
+            analysis_end_time = datetime.now(singapore_tz).strftime("%Y-%m-%d %H:%M:%S")
+            st.markdown(f"<p style='text-align: center; font-size:14px; color:green;'>Analysis completed at: {analysis_end_time} (SGT)</p>", unsafe_allow_html=True)
 
         else:
             progress_bar.empty()
