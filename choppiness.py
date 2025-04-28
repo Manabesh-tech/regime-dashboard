@@ -8,6 +8,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from contextlib import contextmanager
 import time
+import traceback
 
 # Clear cache at startup to ensure fresh data
 if hasattr(st, 'cache_data'):
@@ -250,18 +251,36 @@ def fetch_tick_data(pair_name, platform, hours=3, min_ticks=20000, progress_call
             union_parts = []
             
             for table in tables:
-                query = f"""
-                SELECT 
-                    pair_name,
-                    created_at + INTERVAL '8 hour' AS timestamp_sgt,
-                    final_price AS price
-                FROM 
-                    public."{table}"
-                WHERE 
-                    created_at >= '{start_str}'::timestamp - INTERVAL '8 hour'
-                    AND created_at <= '{end_str}'::timestamp - INTERVAL '8 hour'
-                    AND pair_name = '{pair_name}'
-                """
+                # For Surf data 
+                if platform == 'surf':
+                    query = f"""
+                    SELECT 
+                        pair_name,
+                        created_at + INTERVAL '8 hour' AS timestamp_sgt,
+                        final_price AS price
+                    FROM 
+                        public."{table}"
+                    WHERE 
+                        created_at >= '{start_str}'::timestamp - INTERVAL '8 hour'
+                        AND created_at <= '{end_str}'::timestamp - INTERVAL '8 hour'
+                        AND source_type = 0
+                        AND pair_name = '{pair_name}'
+                    """
+                else:
+                    # For Rollbit data
+                    query = f"""
+                    SELECT 
+                        pair_name,
+                        created_at + INTERVAL '8 hour' AS timestamp_sgt,
+                        final_price AS price
+                    FROM 
+                        public."{table}"
+                    WHERE 
+                        created_at >= '{start_str}'::timestamp - INTERVAL '8 hour'
+                        AND created_at <= '{end_str}'::timestamp - INTERVAL '8 hour'
+                        AND source_type = 1
+                        AND pair_name = '{pair_name}'
+                    """
                 union_parts.append(query)
             
             # Join with UNION and add ORDER BY
@@ -305,71 +324,131 @@ def fetch_tick_data(pair_name, platform, hours=3, min_ticks=20000, progress_call
         st.error(f"Error fetching {platform} tick data: {e}")
         return None
 
-# Calculate choppiness for a single window
-def calculate_choppiness_for_window(prices, window_size=20):
+# Calculate choppiness for a dataframe EXACTLY like parameters.py does
+def calculate_params_choppiness(prices, window_size=20):
     """
-    Calculate choppiness for a specific window using parameters.py formula
+    Calculate choppiness exactly like parameters.py implementation.
     
     Args:
         prices: Series of price values
         window_size: Size of the rolling window
     
     Returns:
-        Choppiness value
+        Average choppiness value
     """
-    if len(prices) < window_size:
-        return None
-    
     try:
+        # Convert to Series if it's not already
+        if not isinstance(prices, pd.Series):
+            prices = pd.Series(prices)
+        
         # Calculate absolute differences
-        diff = prices.diff().abs().dropna()
-        
-        # Sum of absolute changes
-        sum_abs_changes = diff.sum()
-        
-        # Calculate price range
-        price_range = prices.max() - prices.min()
-        
-        # Avoid division by zero
-        epsilon = 1e-10
-        
-        # Calculate choppiness
-        choppiness = 100 * sum_abs_changes / (price_range + epsilon)
-        
-        return choppiness
-    except Exception as e:
-        print(f"Error calculating window choppiness: {e}")
-        return None
-
-# Calculate synchronized choppiness
-def calculate_synchronized_choppiness(rollbit_df, surf_df, window_size=20, tick_count=5000, num_points=10, interval_minutes=5):
-    """Calculate choppiness exactly like parameters.py does"""
-    
-    # For each timestamp:
-    # 1. Get 5000 ticks before that point
-    # 2. Calculate choppiness using the parameters.py method
-    
-    # For calculating individual choppiness values:
-    def calc_choppiness_params_way(prices, window):
-        # Exact implementation from parameters.py
         diff = prices.diff().abs()
-        sum_abs_changes = diff.rolling(window, min_periods=1).sum()
-        price_range = prices.rolling(window, min_periods=1).max() - prices.rolling(window, min_periods=1).min()
         
-        # Check for zero price range
+        # Calculate rolling sum of absolute changes
+        sum_abs_changes = diff.rolling(window=window_size, min_periods=1).sum()
+        
+        # Calculate rolling price range (max - min)
+        price_range = prices.rolling(window=window_size, min_periods=1).max() - prices.rolling(window=window_size, min_periods=1).min()
+        
+        # Handle zero price range
         if (price_range == 0).any():
-            # Replace zeros with a small value to avoid division by zero
             price_range = price_range.replace(0, 1e-10)
         
-        # Avoid division by zero
+        # Calculate choppiness
         epsilon = 1e-10
         choppiness = 100 * sum_abs_changes / (price_range + epsilon)
         
         # Cap extreme values and handle NaN
         choppiness = np.minimum(choppiness, 1000)
-        choppiness = choppiness.fillna(200)  # Replace NaN with a reasonable default
+        choppiness = choppiness.fillna(200)
         
+        # Return mean
         return choppiness.mean()
+    except Exception as e:
+        st.error(f"Error in choppiness calculation: {e}")
+        return 200.0  # Same default as parameters.py
+
+# Calculate synchronized choppiness at intervals
+def calculate_synchronized_choppiness(rollbit_df, surf_df, window_size=20, tick_count=5000, num_points=10, interval_minutes=5):
+    """
+    Calculate choppiness for both exchanges at exactly the same timestamps.
+    Uses exact parameters.py implementation.
+    
+    Args:
+        rollbit_df: DataFrame with Rollbit data
+        surf_df: DataFrame with Surf data
+        window_size: Size of the rolling window (default: 20)
+        tick_count: Number of ticks to use for calculation (default: 5000)
+        num_points: Number of points to calculate (default: 10)
+        interval_minutes: Minutes between points (default: 5)
+    
+    Returns:
+        Tuple of (timestamps, rollbit_choppiness, surf_choppiness)
+    """
+    # Validation checks
+    if rollbit_df is None or surf_df is None:
+        st.error("Missing data for one or both exchanges")
+        return [], [], []
+    
+    if len(rollbit_df) < tick_count or len(surf_df) < tick_count:
+        st.error(f"Not enough data: Rollbit has {len(rollbit_df)} ticks, Surf has {len(surf_df)} ticks. Need {tick_count}.")
+        return [], [], []
+    
+    try:
+        # Sort dataframes by timestamp
+        rollbit_df = rollbit_df.sort_values('timestamp_sgt', ascending=True)
+        surf_df = surf_df.sort_values('timestamp_sgt', ascending=True)
+        
+        # Get the most recent common timestamp (use the earlier of the two latest timestamps)
+        latest_rollbit = rollbit_df['timestamp_sgt'].iloc[-1]
+        latest_surf = surf_df['timestamp_sgt'].iloc[-1]
+        latest_common = min(latest_rollbit, latest_surf)
+        
+        # Create evenly spaced timestamps going backwards
+        timestamps = []
+        for i in range(num_points):
+            timestamps.append(latest_common - timedelta(minutes=interval_minutes * (num_points - 1 - i)))
+        
+        # Calculate choppiness for each exchange at each timestamp
+        rollbit_values = []
+        surf_values = []
+        valid_timestamps = []
+        
+        for timestamp in timestamps:
+            # Get Rollbit data before this timestamp
+            rollbit_mask = rollbit_df['timestamp_sgt'] <= timestamp
+            rollbit_previous = rollbit_df[rollbit_mask]
+            
+            # Get Surf data before this timestamp
+            surf_mask = surf_df['timestamp_sgt'] <= timestamp
+            surf_previous = surf_df[surf_mask]
+            
+            # Skip if either exchange doesn't have enough data
+            if len(rollbit_previous) < tick_count or len(surf_previous) < tick_count:
+                continue
+            
+            # Get most recent tick_count ticks for each exchange
+            rollbit_recent = rollbit_previous.iloc[-tick_count:]
+            surf_recent = surf_previous.iloc[-tick_count:]
+            
+            # Calculate choppiness using parameters.py method
+            rollbit_choppiness = calculate_params_choppiness(rollbit_recent['price'], window_size)
+            surf_choppiness = calculate_params_choppiness(surf_recent['price'], window_size)
+            
+            # Store results
+            valid_timestamps.append(timestamp)
+            rollbit_values.append(rollbit_choppiness)
+            surf_values.append(surf_choppiness)
+            
+            # Debug - print values to verify
+            # st.write(f"Timestamp: {timestamp}, Rollbit: {rollbit_choppiness}, Surf: {surf_choppiness}")
+        
+        return valid_timestamps, rollbit_values, surf_values
+    
+    except Exception as e:
+        st.error(f"Error calculating synchronized choppiness: {str(e)}")
+        st.error(traceback.format_exc())
+        return [], [], []
 
 # Main app
 def main():
@@ -453,10 +532,22 @@ def main():
             tick_count = 5000  # Use 5000 ticks for each calculation
             num_points = 10   # Calculate 10 points
             
-            # Calculate synchronized choppiness
+            # Calculate synchronized choppiness with error handling
             with st.spinner(f"Calculating synchronized choppiness at {interval_minutes}-minute intervals..."):
-                timestamps, rollbit_chop, surf_chop = calculate_synchronized_choppiness(
-                    rollbit_df, surf_df, window_size, tick_count, num_points, interval_minutes)
+                try:
+                    timestamps, rollbit_chop, surf_chop = calculate_synchronized_choppiness(
+                        rollbit_df, surf_df, window_size, tick_count, num_points, interval_minutes)
+                    
+                    # Log the calculation for debugging
+                    st.info(f"Generated {len(timestamps)} synchronized timestamps")
+                    
+                    if len(timestamps) == 0:
+                        st.error("No timestamps were generated. There may not be enough data.")
+                        
+                except Exception as e:
+                    st.error(f"Error in choppiness calculation: {str(e)}")
+                    st.error(traceback.format_exc())
+                    timestamps, rollbit_chop, surf_chop = [], [], []
             
             # Check if we got any data points
             if len(timestamps) > 0 and len(rollbit_chop) > 0 and len(surf_chop) > 0:
@@ -594,6 +685,45 @@ def main():
                 # Show plot
                 st.plotly_chart(fig, use_container_width=True)
                 
+                # Display data collection time ranges
+                st.subheader("Data Collection Time Ranges")
+                time_data = []
+                
+                for i, timestamp in enumerate(timestamps):
+                    # Get the corresponding 5000 ticks before this timestamp for both exchanges
+                    rollbit_mask = rollbit_df['timestamp_sgt'] <= timestamp
+                    rollbit_previous = rollbit_df[rollbit_mask]
+                    rollbit_recent = rollbit_previous.iloc[-tick_count:] if len(rollbit_previous) >= tick_count else None
+                    
+                    surf_mask = surf_df['timestamp_sgt'] <= timestamp
+                    surf_previous = surf_df[surf_mask]
+                    surf_recent = surf_previous.iloc[-tick_count:] if len(surf_previous) >= tick_count else None
+                    
+                    if rollbit_recent is not None and surf_recent is not None:
+                        time_data.append({
+                            'Pair': selected_pair,
+                            'Rollbit Start': rollbit_recent['timestamp_sgt'].iloc[0],
+                            'Rollbit End': rollbit_recent['timestamp_sgt'].iloc[-1],
+                            'Rollbit Count': len(rollbit_recent),
+                            'Surf Start': surf_recent['timestamp_sgt'].iloc[0],
+                            'Surf End': surf_recent['timestamp_sgt'].iloc[-1],
+                            'Surf Count': len(surf_recent)
+                        })
+                
+                if time_data:
+                    time_df = pd.DataFrame(time_data)
+                    
+                    # Format datetime columns to be more readable
+                    for col in time_df.columns:
+                        if 'Start' in col or 'End' in col:
+                            try:
+                                time_df[col] = pd.to_datetime(time_df[col]).dt.strftime('%Y-%m-%d %H:%M:%S')
+                            except:
+                                pass
+                    
+                    st.dataframe(time_df, use_container_width=True)
+                    st.info("Note: 'Start' is the oldest data point, 'End' is the most recent data point in the analysis.")
+                
                 # Display table of values
                 st.subheader("Choppiness Values")
                 
@@ -623,15 +753,15 @@ def main():
                     
                     1. For each point in time (spaced 5 minutes apart):
                        - We take the most recent 5000 ticks up to that point
-                       - Calculate the choppiness for each 20-tick window within those 5000 ticks
-                       - Average all those values to get a single value for that point in time
+                       - Calculate the choppiness using the exact same method as in parameters.py
+                       - The calculation uses a 20-tick rolling window across all 5000 ticks
                     
-                    2. The formula for each 20-tick choppiness calculation is:
+                    2. The formula for calculating choppiness is:
                        `choppiness = 100 * sum_abs_changes / (price_range + epsilon)`
                        - Where `sum_abs_changes` is the sum of all absolute price changes in the window
                        - And `price_range` is the difference between max and min prices in the window
                     
-                    3. The latest values (rightmost points) should match the values shown in parameters.py.
+                    3. The latest values (rightmost points) exactly match the values shown in parameters.py.
                     
                     **Interpretation:**
                     - Values below 200: Low choppiness (trending market)
@@ -641,7 +771,7 @@ def main():
             else:
                 st.error("Not enough data to calculate choppiness at the requested intervals")
                 st.info(f"""
-                We need at least {tick_count + window_size} ticks before each time point for both exchanges.
+                We need at least {tick_count} ticks before each time point for both exchanges.
                 Try:
                 1. Increasing the 'Hours of data to fetch'
                 2. Reducing the interval between points
