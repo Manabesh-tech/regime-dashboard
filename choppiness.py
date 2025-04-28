@@ -213,7 +213,7 @@ def get_partition_tables(session, platform, start_date, end_date):
     return existing_tables
 
 # Fetch tick data with timestamps for a specific time period
-def fetch_tick_data(pair_name, platform, hours=3, min_ticks=10000, progress_callback=None):
+def fetch_tick_data(pair_name, platform, hours=3, min_ticks=20000, progress_callback=None):
     """
     Fetch tick data for a specific pair from the specified platform.
     Ensures we get at least min_ticks data points or data from the last hours, whichever is more.
@@ -341,72 +341,93 @@ def calculate_choppiness_for_window(prices, window_size=20):
         print(f"Error calculating window choppiness: {e}")
         return None
 
-# Calculate choppiness at regular 5-minute intervals
-def calculate_choppiness_at_intervals(df, window_size=20, tick_count=5000, num_points=10, interval_minutes=5):
+# Calculate synchronized choppiness
+def calculate_synchronized_choppiness(rollbit_df, surf_df, window_size=20, tick_count=5000, num_points=10, interval_minutes=5):
     """
-    Calculate choppiness at regular 5-minute intervals.
-    Each point represents the average 20-tick choppiness across the previous 5000 ticks.
+    Calculate choppiness for both exchanges at exactly the same timestamps.
     
     Args:
-        df: DataFrame with timestamp_sgt and price columns
+        rollbit_df: DataFrame with Rollbit data
+        surf_df: DataFrame with Surf data
         window_size: Size of the rolling window (default: 20)
         tick_count: Number of ticks to use for calculation (default: 5000)
         num_points: Number of points to calculate (default: 10)
         interval_minutes: Minutes between points (default: 5)
     
     Returns:
-        Tuple of (timestamps, choppiness_values)
+        Tuple of (timestamps, rollbit_choppiness, surf_choppiness)
     """
-    if df is None or len(df) < window_size + 1:
-        return [], []
-    
-    # Ensure data is sorted by timestamp (ascending)
-    df = df.sort_values('timestamp_sgt', ascending=True)
-    
-    # Get the most recent timestamp
-    latest_time = df['timestamp_sgt'].iloc[-1]
-    
-    # Create a list of timestamps at regular intervals, going backwards from the latest
-    target_times = []
-    for i in range(num_points):
-        target_time = latest_time - timedelta(minutes=interval_minutes * i)
-        target_times.append(target_time)
-    
-    # Reverse so they're in chronological order
-    target_times.reverse()
-    
-    # For storing results
-    timestamps = []
-    choppiness_values = []
-    
-    # For each target timestamp
-    for target_time in target_times:
-        # Get all ticks up to this timestamp
-        mask = df['timestamp_sgt'] <= target_time
-        previous_ticks = df[mask]
+    # Ensure both dataframes exist and have enough data
+    if rollbit_df is None or surf_df is None:
+        return [], [], []
         
-        # Skip if we don't have enough data
-        if len(previous_ticks) < tick_count + window_size:
+    if len(rollbit_df) < tick_count + window_size or len(surf_df) < tick_count + window_size:
+        st.warning(f"Not enough data: Rollbit has {len(rollbit_df)} ticks, Surf has {len(surf_df)} ticks")
+        return [], [], []
+    
+    # Sort dataframes by timestamp
+    rollbit_df = rollbit_df.sort_values('timestamp_sgt', ascending=True)
+    surf_df = surf_df.sort_values('timestamp_sgt', ascending=True)
+    
+    # Get the most recent common timestamp (use the earlier of the two latest timestamps)
+    latest_rollbit = rollbit_df['timestamp_sgt'].iloc[-1]
+    latest_surf = surf_df['timestamp_sgt'].iloc[-1]
+    latest_common = min(latest_rollbit, latest_surf)
+    
+    # Create evenly spaced timestamps going backwards
+    timestamps = []
+    for i in range(num_points):
+        timestamps.append(latest_common - timedelta(minutes=interval_minutes * (num_points - 1 - i)))
+    
+    # Calculate choppiness for each exchange at each timestamp
+    rollbit_values = []
+    surf_values = []
+    valid_timestamps = []
+    
+    for timestamp in timestamps:
+        # Get Rollbit data before this timestamp
+        rollbit_mask = rollbit_df['timestamp_sgt'] <= timestamp
+        rollbit_previous = rollbit_df[rollbit_mask]
+        
+        # Get Surf data before this timestamp
+        surf_mask = surf_df['timestamp_sgt'] <= timestamp
+        surf_previous = surf_df[surf_mask]
+        
+        # Skip if either exchange doesn't have enough data
+        if len(rollbit_previous) < tick_count or len(surf_previous) < tick_count:
+            st.info(f"Skipping {timestamp} - insufficient data (Rollbit: {len(rollbit_previous)}, Surf: {len(surf_previous)})")
             continue
         
-        # Get the most recent tick_count ticks up to this timestamp
-        recent_ticks = previous_ticks.iloc[-tick_count:]
+        # Get most recent tick_count ticks for each exchange
+        rollbit_recent = rollbit_previous.iloc[-tick_count:]
+        surf_recent = surf_previous.iloc[-tick_count:]
         
-        # Calculate choppiness for each 20-tick window
-        chop_values = []
-        for i in range(window_size, len(recent_ticks)):
-            window = recent_ticks['price'].iloc[i-window_size:i]
+        # Calculate choppiness for Rollbit
+        rollbit_chop_values = []
+        for i in range(window_size, len(rollbit_recent)):
+            window = rollbit_recent['price'].iloc[i-window_size:i]
             chop = calculate_choppiness_for_window(window, window_size)
             if chop is not None:
-                chop_values.append(chop)
+                rollbit_chop_values.append(chop)
         
-        # Calculate average choppiness for this timestamp
-        if chop_values:
-            avg_choppiness = sum(chop_values) / len(chop_values)
-            timestamps.append(target_time)
-            choppiness_values.append(avg_choppiness)
+        # Calculate choppiness for Surf
+        surf_chop_values = []
+        for i in range(window_size, len(surf_recent)):
+            window = surf_recent['price'].iloc[i-window_size:i]
+            chop = calculate_choppiness_for_window(window, window_size)
+            if chop is not None:
+                surf_chop_values.append(chop)
+        
+        # Calculate averages and add to results
+        if rollbit_chop_values and surf_chop_values:
+            rollbit_avg = sum(rollbit_chop_values) / len(rollbit_chop_values)
+            surf_avg = sum(surf_chop_values) / len(surf_chop_values)
+            
+            valid_timestamps.append(timestamp)
+            rollbit_values.append(rollbit_avg)
+            surf_values.append(surf_avg)
     
-    return timestamps, choppiness_values
+    return valid_timestamps, rollbit_values, surf_values
 
 # Main app
 def main():
@@ -425,7 +446,7 @@ def main():
     available_pairs = get_available_pairs()
     
     # Create columns for layout
-    col1, col2 = st.columns([2, 1])
+    col1, col2, col3 = st.columns([2, 1, 1])
     
     with col1:
         # Selection UI
@@ -443,6 +464,16 @@ def main():
             max_value=30,
             value=5,
             help="Time interval between data points (minutes)"
+        )
+        
+    with col3:
+        # Hours to fetch
+        hours_to_fetch = st.number_input(
+            "Hours of data to fetch",
+            min_value=1,
+            max_value=24,
+            value=3,
+            help="How many hours of historical data to fetch"
         )
     
     # Create plot button
@@ -464,17 +495,12 @@ def main():
             def update_surf(progress, text):
                 progress_bar_surf.progress(progress, text)
         
-        # Calculate how many hours of data we need
-        # For 10 points at 5-minute intervals, we need at least (10-1)*5 minutes = 45 minutes
-        # Plus extra for the 5000 ticks window, let's get 3 hours to be safe
-        hours_needed = max(3, (10 * interval_minutes) / 60 * 2)
-        
         # Fetch data for both platforms
-        with st.spinner(f"Fetching {hours_needed} hours of tick data..."):
-            # We need enough data for 10 points at the specified interval plus 5000 ticks for each point
-            min_ticks_needed = 10000  # Start with enough for one 5000-tick calculation
-            rollbit_df = fetch_tick_data(selected_pair, 'rollbit', int(hours_needed), min_ticks_needed, update_rollbit)
-            surf_df = fetch_tick_data(selected_pair, 'surf', int(hours_needed), min_ticks_needed, update_surf)
+        with st.spinner(f"Fetching {hours_to_fetch} hours of tick data..."):
+            # We want to fetch enough data for all our points plus 5000 ticks for each
+            min_ticks_needed = max(20000, (interval_minutes * 10) * 100)  # Estimate roughly 100 ticks per minute
+            rollbit_df = fetch_tick_data(selected_pair, 'rollbit', hours_to_fetch, min_ticks_needed, update_rollbit)
+            surf_df = fetch_tick_data(selected_pair, 'surf', hours_to_fetch, min_ticks_needed, update_surf)
         
         # Process data if available
         if rollbit_df is not None and surf_df is not None:
@@ -485,15 +511,13 @@ def main():
             tick_count = 5000  # Use 5000 ticks for each calculation
             num_points = 10   # Calculate 10 points
             
-            # Calculate choppiness at intervals
-            with st.spinner(f"Calculating choppiness at {interval_minutes}-minute intervals..."):
-                rollbit_times, rollbit_chop = calculate_choppiness_at_intervals(
-                    rollbit_df, window_size, tick_count, num_points, interval_minutes)
-                surf_times, surf_chop = calculate_choppiness_at_intervals(
-                    surf_df, window_size, tick_count, num_points, interval_minutes)
+            # Calculate synchronized choppiness
+            with st.spinner(f"Calculating synchronized choppiness at {interval_minutes}-minute intervals..."):
+                timestamps, rollbit_chop, surf_chop = calculate_synchronized_choppiness(
+                    rollbit_df, surf_df, window_size, tick_count, num_points, interval_minutes)
             
             # Check if we got any data points
-            if len(rollbit_times) > 0 and len(surf_times) > 0:
+            if len(timestamps) > 0 and len(rollbit_chop) > 0 and len(surf_chop) > 0:
                 # Calculate the most recent (latest) values
                 rollbit_latest = rollbit_chop[-1] if rollbit_chop else None
                 surf_latest = surf_chop[-1] if surf_chop else None
@@ -504,26 +528,25 @@ def main():
                 with col1:
                     st.metric(
                         "Rollbit",
-                        f"{rollbit_latest:.2f}" if rollbit_latest else "N/A", 
-                        f"{rollbit_latest - surf_latest:.2f} vs Surf" if rollbit_latest and surf_latest else "N/A"
+                        f"{rollbit_latest:.2f}" if rollbit_latest is not None else "N/A", 
+                        f"{rollbit_latest - surf_latest:.2f} vs Surf" if (rollbit_latest is not None and surf_latest is not None) else "N/A"
                     )
                 with col2:
                     st.metric(
                         "Surf",
-                        f"{surf_latest:.2f}" if surf_latest else "N/A",
-                        f"{surf_latest - rollbit_latest:.2f} vs Rollbit" if rollbit_latest and surf_latest else "N/A"
+                        f"{surf_latest:.2f}" if surf_latest is not None else "N/A",
+                        f"{surf_latest - rollbit_latest:.2f} vs Rollbit" if (rollbit_latest is not None and surf_latest is not None) else "N/A"
                     )
                 
                 # Create plot
                 fig = go.Figure()
                 
                 # Format timestamps for better display
-                formatted_rollbit_times = [t.strftime("%H:%M:%S") for t in rollbit_times]
-                formatted_surf_times = [t.strftime("%H:%M:%S") for t in surf_times]
+                formatted_timestamps = [t.strftime("%H:%M:%S") for t in timestamps]
                 
                 # Add Rollbit line
                 fig.add_trace(go.Scatter(
-                    x=formatted_rollbit_times,
+                    x=formatted_timestamps,
                     y=rollbit_chop,
                     mode='lines+markers',
                     name='Rollbit Choppiness',
@@ -531,12 +554,12 @@ def main():
                     marker=dict(size=10, color='red'),
                     hoverinfo='text',
                     hovertext=[f'Time: {t}<br>Choppiness: {v:.2f}' 
-                              for t, v in zip(formatted_rollbit_times, rollbit_chop)]
+                              for t, v in zip(formatted_timestamps, rollbit_chop)]
                 ))
                 
                 # Add Surf line
                 fig.add_trace(go.Scatter(
-                    x=formatted_surf_times,
+                    x=formatted_timestamps,
                     y=surf_chop,
                     mode='lines+markers',
                     name='Surf Choppiness',
@@ -544,7 +567,7 @@ def main():
                     marker=dict(size=10, color='blue'),
                     hoverinfo='text',
                     hovertext=[f'Time: {t}<br>Choppiness: {v:.2f}' 
-                              for t, v in zip(formatted_surf_times, surf_chop)]
+                              for t, v in zip(formatted_timestamps, surf_chop)]
                 ))
                 
                 # Add horizontal line for reference value 250
@@ -565,6 +588,37 @@ def main():
                     max_val = max(all_values) * 1.1
                 else:
                     min_val, max_val = 100, 400
+                
+                # Add annotations for latest values on the chart
+                fig.add_annotation(
+                    xref='paper',
+                    x=1.0,
+                    y=rollbit_latest,
+                    text=f"Latest Rollbit: {rollbit_latest:.2f}",
+                    showarrow=True,
+                    arrowhead=7,
+                    ax=50,
+                    ay=0,
+                    font=dict(color="red"),
+                    bgcolor="white",
+                    bordercolor="red",
+                    borderwidth=1
+                )
+                
+                fig.add_annotation(
+                    xref='paper',
+                    x=1.0,
+                    y=surf_latest,
+                    text=f"Latest Surf: {surf_latest:.2f}",
+                    showarrow=True,
+                    arrowhead=7,
+                    ax=50,
+                    ay=0,
+                    font=dict(color="blue"),
+                    bgcolor="white",
+                    bordercolor="blue",
+                    borderwidth=1
+                )
                 
                 # Layout
                 fig.update_layout(
@@ -595,41 +649,6 @@ def main():
                     margin=dict(l=50, r=50, t=80, b=50),
                 )
                 
-                # Add annotations for latest values
-                if rollbit_latest:
-                    fig.add_annotation(
-                        x=1,
-                        y=0.95,
-                        xref="paper",
-                        yref="paper",
-                        text=f"Latest Rollbit: {rollbit_latest:.2f}",
-                        showarrow=False,
-                        align="right",
-                        font=dict(size=12, color="red"),
-                        bgcolor="white",
-                        bordercolor="red",
-                        borderwidth=1,
-                        borderpad=4,
-                        opacity=0.8
-                    )
-                
-                if surf_latest:
-                    fig.add_annotation(
-                        x=1,
-                        y=0.90,
-                        xref="paper",
-                        yref="paper",
-                        text=f"Latest Surf: {surf_latest:.2f}",
-                        showarrow=False,
-                        align="right",
-                        font=dict(size=12, color="blue"),
-                        bgcolor="white",
-                        bordercolor="blue",
-                        borderwidth=1,
-                        borderpad=4,
-                        opacity=0.8
-                    )
-                
                 # Show plot
                 st.plotly_chart(fig, use_container_width=True)
                 
@@ -639,29 +658,16 @@ def main():
                 # Create a dataframe with all the data points
                 data = []
                 
-                # Combine the data from both exchanges
-                all_times = sorted(list(set(rollbit_times + surf_times)))
-                
-                for time_point in all_times:
-                    formatted_time = time_point.strftime("%H:%M:%S")
-                    
-                    # Find the corresponding values for this timestamp
-                    rollbit_value = None
-                    surf_value = None
-                    
-                    if time_point in rollbit_times:
-                        idx = rollbit_times.index(time_point)
-                        rollbit_value = rollbit_chop[idx]
-                    
-                    if time_point in surf_times:
-                        idx = surf_times.index(time_point)
-                        surf_value = surf_chop[idx]
+                for i in range(len(timestamps)):
+                    formatted_time = timestamps[i].strftime("%H:%M:%S")
+                    rollbit_value = rollbit_chop[i]
+                    surf_value = surf_chop[i]
                     
                     data.append({
                         "Time": formatted_time,
-                        "Rollbit": f"{rollbit_value:.2f}" if rollbit_value is not None else "N/A",
-                        "Surf": f"{surf_value:.2f}" if surf_value is not None else "N/A",
-                        "Difference": f"{(rollbit_value - surf_value):.2f}" if (rollbit_value is not None and surf_value is not None) else "N/A"
+                        "Rollbit": f"{rollbit_value:.2f}",
+                        "Surf": f"{surf_value:.2f}",
+                        "Difference": f"{(rollbit_value - surf_value):.2f}"
                     })
                 
                 # Create a DataFrame and display it
@@ -693,11 +699,11 @@ def main():
             else:
                 st.error("Not enough data to calculate choppiness at the requested intervals")
                 st.info(f"""
-                We need at least {tick_count + window_size} ticks before each time point.
+                We need at least {tick_count + window_size} ticks before each time point for both exchanges.
                 Try:
-                1. Reducing the interval between points
-                2. Selecting a more actively traded pair
-                3. Checking if there's enough recent data for your selected pair
+                1. Increasing the 'Hours of data to fetch'
+                2. Reducing the interval between points
+                3. Selecting a more actively traded pair
                 """)
         else:
             if rollbit_df is None:
