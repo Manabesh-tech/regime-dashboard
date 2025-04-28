@@ -344,10 +344,18 @@ def fetch_tick_data(pair_name, platform, hours=12, min_ticks=5000, progress_call
         return None
 
 # Calculate choppiness with a more aggressive scaling to match 100-400 range
+# Calculate choppiness using the second application's formula
 def calculate_choppiness(df, window_size=20):
     """
-    Calculate choppiness values using a rolling window of 20.
-    Designed to produce values in the 100-400 range like the other file.
+    Calculate choppiness values using the formula from the second application:
+    choppiness = 100 * sum_abs_changes / (price_range + epsilon)
+    
+    Args:
+        df: DataFrame with price data
+        window_size: Size of the rolling window
+    
+    Returns:
+        Tuple of (timestamps, choppiness_values)
     """
     if df is None or len(df) < window_size + 1:
         return [], []
@@ -359,29 +367,30 @@ def calculate_choppiness(df, window_size=20):
     timestamps = []
     choppiness_values = []
     
+    # Avoid division by zero
+    epsilon = 1e-10
+    
     # Calculate rolling choppiness for each window
     for i in range(window_size, len(df)):
         window_df = df.iloc[i-window_size:i].copy()
         prices = window_df['price'].values
         
-        # Calculate direction changes
-        price_changes = np.diff(prices)
-        signs = np.sign(price_changes)
-        signs = signs[signs != 0]  # Remove zeros
+        # Calculate sum of absolute changes
+        price_changes = np.abs(np.diff(prices))
+        sum_abs_changes = np.sum(price_changes)
         
-        # Count direction changes
-        direction_changes = np.sum(np.abs(np.diff(signs))) / 2
+        # Calculate price range in the window
+        price_range = np.max(prices) - np.min(prices)
         
-        # Scale to match 100-400 range
-        # Using 250 as the base and scaling factor of 15
-        scaled_choppiness = 250 + (direction_changes - 10) * 15
+        # Calculate choppiness using the second application's formula
+        choppiness = 100 * sum_abs_changes / (price_range + epsilon)
         
-        # Ensure the value is in the 100-400 range
-        scaled_choppiness = max(100, min(400, scaled_choppiness))
+        # Cap extreme values to match range of original app (100-400)
+        choppiness = max(100, min(400, choppiness))
         
         # Store results
         timestamps.append(df['timestamp_sgt'].iloc[i])
-        choppiness_values.append(scaled_choppiness)
+        choppiness_values.append(choppiness)
     
     return timestamps, choppiness_values
 
