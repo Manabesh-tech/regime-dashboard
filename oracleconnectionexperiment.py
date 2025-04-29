@@ -278,7 +278,7 @@ def analyze_tiers(pair_name, progress_bar=None):
                     if len(prices) < 100:
                         continue
                     
-                    # 3. Calculate choppiness - using same algorithm as singlepairtieranalyzer.py
+                    # 3. Calculate choppiness
                     window = min(20, len(prices) // 10)
                     diff = prices.diff().dropna()
                     
@@ -301,22 +301,7 @@ def analyze_tiers(pair_name, progress_bar=None):
                     # Calculate mean choppiness
                     choppiness = choppiness_values.mean()
                     
-                    # 4. Calculate direction changes (%)
-                    signs = np.sign(diff)
-                    direction_changes = (signs.shift(1) != signs).sum()
-                    direction_change_pct = (direction_changes / (len(signs) - 1)) * 100 if len(signs) > 1 else 0
-                    
-                    # 5. Calculate tick ATR %
-                    mean_price = prices.mean()
-                    tick_atr = diff.abs().mean()
-                    tick_atr_pct = (tick_atr / mean_price) * 100
-                    
-                    # 6. Calculate corrected efficiency score: run_rate * (100-dropout_rate)
-                    # Run rate = % of time the tier has valid data (opposite of dropout rate)
-                    run_rate = 100 - dropout_rate
-                    efficiency = (run_rate * choppiness) / 100
-                    
-                    # 7. Calculate win rate
+                    # 4. Calculate win rate
                     win_rates = []
                     for tf in timeframes:
                         if len(prices) <= tf:
@@ -335,19 +320,23 @@ def analyze_tiers(pair_name, progress_bar=None):
                     # Average winrate across different timeframes
                     avg_win_rate = sum(win_rates) / len(win_rates) if win_rates else 50.0
                     
+                    # 5. Calculate run rate (% time with valid data)
+                    run_rate = 100 - dropout_rate
+                    
+                    # 6. Calculate efficiency score: win_rate * (100-dropout_rate)/100
+                    efficiency = (avg_win_rate * run_rate) / 100
+                    
                     # Store result
                     results.append({
                         'exchange': exchange,
                         'tier': tier_name,
                         'exchange_tier': f"{exchange}:{tier_name}",
                         'choppiness': choppiness,
-                        'direction_changes': direction_change_pct,
-                        'tick_atr_pct': tick_atr_pct,
                         'dropout_rate': dropout_rate,
-                        'run_rate': run_rate,
-                        'efficiency': efficiency,
                         'win_rate': avg_win_rate,
-                        'valid_points': len(prices)
+                        'efficiency': efficiency,
+                        'valid_points': len(prices),
+                        'rank': 0  # Will be filled in later
                     })
             
             if progress_bar:
@@ -361,8 +350,9 @@ def analyze_tiers(pair_name, progress_bar=None):
                 
             results_df = pd.DataFrame(results)
             
-            # Sort by efficiency, then by win_rate as secondary factor
-            results_df = results_df.sort_values(['efficiency', 'win_rate'], ascending=[False, False])
+            # Sort by efficiency score and assign ranks
+            results_df = results_df.sort_values('efficiency', ascending=False)
+            results_df['rank'] = range(1, len(results_df) + 1)
             
             if progress_bar:
                 progress_bar.progress(1.0, text="Analysis complete!")
@@ -383,16 +373,14 @@ def format_column(value, column_name):
     if pd.isna(value):
         return "N/A"
         
-    if column_name in ['run_rate', 'dropout_rate', 'direction_changes', 'win_rate']:
+    if column_name in ['dropout_rate', 'win_rate', 'efficiency']:
         return f"{value:.1f}%"
-    elif column_name == 'tick_atr_pct':
-        return f"{value:.4f}"
     elif column_name == 'choppiness':
         return f"{value:.1f}"
-    elif column_name == 'efficiency':
-        return f"{value:.2f}"
     elif column_name == 'valid_points':
         return f"{int(value):,}"
+    elif column_name == 'rank':
+        return f"{int(value)}"
     else:
         return str(value)
 
@@ -429,12 +417,10 @@ def main():
     # Explanation of metrics
     st.markdown("""
     **Key Metrics:**
-    - **Efficiency Score:** Choppiness × Run Rate % (higher is better)
-    - **Run Rate:** Percentage of time tier has valid data (opposite of Dropout Rate)
-    - **Choppiness:** Measures price oscillation intensity (higher means more active)
+    - **Efficiency Score:** Win Rate % × (100% - Dropout Rate %)
+    - **Choppiness:** Measures price oscillation intensity
     - **Win Rate:** Percentage of profitable price movements across multiple timeframes
-    - **Direction Changes:** Frequency of price direction reversals (%)
-    - **Tick ATR %:** Average tick-to-tick price change percentage
+    - **Dropout Rate:** Percentage of time tier has missing or invalid data
     """)
     
     # Run analysis
@@ -455,7 +441,7 @@ def main():
         if rankings is not None and not rankings.empty:
             # Show results
             st.header("Global Tier Rankings")
-            st.markdown("**Efficiency Formula:** Choppiness × Run Rate %")
+            st.markdown("**Efficiency Formula:** Win Rate % × (100% - Dropout Rate %)")
             
             # Format for display
             display_df = rankings.copy()
@@ -466,22 +452,19 @@ def main():
                 'efficiency': 'Efficiency Score',
                 'choppiness': 'Choppiness',
                 'dropout_rate': 'Dropout Rate (%)',
-                'run_rate': 'Run Rate (%)',
                 'win_rate': 'Win Rate (%)',
-                'direction_changes': 'Direction Changes (%)',
-                'tick_atr_pct': 'Tick ATR %',
-                'valid_points': 'Valid Points'
+                'valid_points': 'Valid Points',
+                'rank': 'Rank'
             })
             
             # Select columns for display
             display_columns = [
+                'Rank',
                 'Exchange:Tier', 
-                'Efficiency Score', 
-                'Run Rate (%)',
-                'Choppiness', 
+                'Efficiency Score',
                 'Win Rate (%)',
-                'Direction Changes (%)',
-                'Tick ATR %',
+                'Dropout Rate (%)',
+                'Choppiness',
                 'Valid Points'
             ]
             
@@ -509,9 +492,9 @@ def main():
             
             for i in range(top_count):
                 if i == 0:
-                    st.markdown(f"**Primary Tier:** {top_tiers.iloc[i]['Exchange:Tier']}")
+                    st.markdown(f"**Primary Tier:** {top_tiers.iloc[i]['Exchange:Tier']} (Rank {top_tiers.iloc[i]['Rank']})")
                 else:
-                    st.markdown(f"**Fallback Tier {i}:** {top_tiers.iloc[i]['Exchange:Tier']}")
+                    st.markdown(f"**Fallback Tier {i}:** {top_tiers.iloc[i]['Exchange:Tier']} (Rank {top_tiers.iloc[i]['Rank']})")
             
             # Display analysis completion time
             analysis_end_time = datetime.now(singapore_tz).strftime("%Y-%m-%d %H:%M:%S")
