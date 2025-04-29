@@ -263,12 +263,34 @@ with tab1:
     edge_df = pd.DataFrame(edge_data)
     
     # Reindex with ordered time labels
-    available_times = set(edge_df.index)
-    ordered_times = [t for t in time_labels if t in available_times]
-    if not ordered_times and available_times:
-        ordered_times = sorted(list(available_times), reverse=True)
+    available_times = edge_df.index.tolist()
     
-    edge_df = edge_df.reindex(ordered_times)
+    # Find which time labels we have data for
+    ordered_times = []
+    for t in time_labels:
+        if t in available_times:
+            ordered_times.append(t)
+    
+    # Fallback if no matches
+    if not ordered_times and available_times:
+        # Remove duplicates while preserving order
+        seen = set()
+        ordered_times = [x for x in sorted(available_times, reverse=True) 
+                        if not (x in seen or seen.add(x))]
+    
+    # Ensure ordered_times has no duplicates
+    seen = set()
+    ordered_times = [x for x in ordered_times if not (x in seen or seen.add(x))]
+    
+    # Create a new DataFrame with the ordered times
+    new_edge_df = pd.DataFrame(index=ordered_times, columns=edge_df.columns)
+    
+    # Fill in data
+    for time_label in ordered_times:
+        if time_label in edge_df.index:
+            new_edge_df.loc[time_label] = edge_df.loc[time_label]
+    
+    edge_df = new_edge_df
     
     # Create heatmap
     fig = go.Figure()
@@ -331,7 +353,15 @@ with tab2:
     
     # Create DataFrame
     vol_df = pd.DataFrame(vol_data)
-    vol_df = vol_df.reindex(ordered_times)
+    # Create a new DataFrame with the ordered times
+    new_vol_df = pd.DataFrame(index=ordered_times, columns=vol_df.columns)
+    
+    # Fill in data
+    for time_label in ordered_times:
+        if time_label in vol_df.index:
+            new_vol_df.loc[time_label] = vol_df.loc[time_label]
+    
+    vol_df = new_vol_df
     
     # Create heatmap
     fig = go.Figure()
@@ -399,7 +429,15 @@ with tab3:
     
     # Create DataFrame
     combined_df = pd.DataFrame(combined_data)
-    combined_df = combined_df.reindex(ordered_times)
+    # Create a new DataFrame with the ordered times
+    new_combined_df = pd.DataFrame(index=ordered_times, columns=combined_df.columns)
+    
+    # Fill in data
+    for time_label in ordered_times:
+        if time_label in combined_df.index:
+            new_combined_df.loc[time_label] = combined_df.loc[time_label]
+    
+    combined_df = new_combined_df
     
     # Create visualization
     fig = go.Figure()
