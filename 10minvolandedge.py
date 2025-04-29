@@ -206,7 +206,7 @@ def fetch_edge_and_volatility_data(pair_name):
         # For time slots with no trades (and thus no collateral), set edge to None
         df.loc[df['total_collateral'] == 0, 'edge'] = None
         
-        # Calculate volatility - convert price arrays to pandas series
+                    # Calculate volatility - convert price arrays to pandas series
         df['volatility'] = df.apply(lambda row: calculate_volatility(row['price_array']), axis=1)
         
         # Format time label to match our aligned blocks (HH:MM format)
@@ -225,34 +225,7 @@ def calculate_volatility(price_array):
     
     try:
         # Convert PostgreSQL array to Python list of floats
-        if isinstance(price_array, str):
-            # If returned as string (e.g., '{1,2,3}'), strip braces and split
-            price_array = price_array.strip('{}').split(',')
-            prices = [float(p) for p in price_array if p]
-        else:
-            # If returned as list
-            prices = [float(p) for p in price_array if p]
-        
-        if len(prices) < 2:
-            return None
-            
-        # Convert to numpy array
-        prices = np.array(prices)
-        
-        # Calculate log returns
-        log_returns = np.diff(np.log(prices))
-        
-        # Calculate standard deviation of returns
-        std_dev = np.std(log_returns)
-        
-        # Annualize (10-minute intervals -> 6*24*365 intervals per year)
-        annualized_vol = std_dev * np.sqrt(6 * 24 * 365)
-        
-        return annualized_vol
-    
-    except Exception as e:
-        print(f"Error in volatility calculation: {e}")
-        return None
+        if isinstance(price_
 
 # Define color scales and thresholds
 def map_edge_to_color(edge_value):
@@ -464,7 +437,7 @@ if pair_results:
             # Reorder columns
             formatted_summary = formatted_summary[['Mean Edge', 'Median Edge', 'Min Edge', 'Max Edge', 'Std Dev', 'Win Rate', 'Positive Count', 'Negative Count', 'Data Points']]
             
-            # Color cells based on values
+                            # Color cells based on values
             def color_edge_cells(val, column):
                 if 'Edge' in column and '%' in str(val):
                     try:
@@ -477,7 +450,7 @@ if pair_results:
                             return 'background-color: rgba(255, 150, 150, 0.3)'
                         else:
                             return 'background-color: rgba(255, 0, 0, 0.3)'
-                    except:
+                    except Exception:
                         return ''
                 elif column == 'Win Rate' and '%' in str(val):
                     try:
@@ -490,7 +463,7 @@ if pair_results:
                             return 'background-color: rgba(255, 255, 150, 0.3)'
                         else:
                             return 'background-color: rgba(255, 150, 150, 0.3)'
-                    except:
+                    except Exception:
                         return ''
                 return ''
             
