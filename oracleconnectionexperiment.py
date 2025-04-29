@@ -252,8 +252,23 @@ def analyze_tiers(pair_name, progress_bar=None):
                 time_span_seconds = (newest_timestamp - oldest_timestamp).total_seconds()
                 time_span_hours = time_span_seconds / 3600
                 
+                # Calculate average interval between data points
+                avg_interval_ms = (time_span_seconds * 1000) / len(all_data)
+                
+                # Count total data points per exchange
+                exchange_counts = {}
+                for row in all_data:
+                    exchange = row[0]  # exchange_name is the first column
+                    if exchange not in exchange_counts:
+                        exchange_counts[exchange] = 0
+                    exchange_counts[exchange] += 1
+                    
+                # Get exchange with most data points
+                max_exchange = max(exchange_counts.items(), key=lambda x: x[1])
+                
                 if progress_bar:
-                    progress_bar.progress(0.3, text=f"Processing {len(all_data)} data points spanning {time_span_hours:.2f} hours...")
+                    progress_bar.progress(0.3, text=f"Processing {len(all_data):,} data points spanning {time_span_hours:.2f} hours (avg interval: {avg_interval_ms:.1f}ms)")
+                    progress_bar.progress(0.31, text=f"Largest exchange: {max_exchange[0]} with {max_exchange[1]:,} data points")
             else:
                 if progress_bar:
                     progress_bar.progress(0.3, text=f"Processing {len(all_data)} data points...")
@@ -592,15 +607,50 @@ def main():
             st.header("Global Tier Rankings")
             st.markdown("**Efficiency Formula:** Win Rate % × (100% - Dropout Rate %)")
             
-            # Display time span analyzed along with data metrics
+            # Display detailed time and data coverage information
+            st.header("Analysis Coverage Details")
+            
             if 'time_span_hours' in locals():
-                st.markdown(f"**Analysis Coverage:** {time_span_hours:.2f} hours of data analyzed ({len(all_data):,} total data points)")
+                # Create columns for metrics
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    st.metric("Time Period Analyzed", f"{time_span_hours:.2f} hours")
+                    
+                with col2:
+                    st.metric("Total Data Points", f"{len(all_data):,}")
+                
+                with col3:
+                    if 'avg_interval_ms' in locals():
+                        st.metric("Avg Data Interval", f"{avg_interval_ms:.1f}ms")
+                
+                # Show exchange-specific counts
+                if 'exchange_counts' in locals():
+                    st.subheader("Data Points per Exchange")
+                    exchange_data = []
+                    for exchange, count in exchange_counts.items():
+                        # Calculate average interval for this exchange
+                        exchange_interval = (time_span_seconds * 1000) / count if count > 0 else 0
+                        exchange_data.append({
+                            "Exchange": exchange,
+                            "Data Points": f"{count:,}",
+                            "Avg Interval": f"{exchange_interval:.1f}ms",
+                            "Coverage %": f"{(count / (time_span_seconds * 2)) * 100:.1f}%"
+                        })
+                    
+                    # Create dataframe and display
+                    exchange_df = pd.DataFrame(exchange_data)
+                    st.dataframe(exchange_df, use_container_width=True, hide_index=True)
                 
                 # Calculate theoretical vs actual data coverage
                 theoretical_max = int(time_span_seconds * 2)  # 2 ticks per second (500ms)
                 coverage_percent = (len(all_data) / theoretical_max) * 100 if theoretical_max > 0 else 0
-                st.markdown(f"**Data Density:** {coverage_percent:.1f}% of theoretical maximum ({theoretical_max:,} points at 500ms intervals)")
+                st.markdown(f"**Overall Data Density:** {coverage_percent:.1f}% of theoretical maximum ({theoretical_max:,} points at 500ms intervals)")
                 
+            # Show Global Tier Rankings header
+            st.header("Global Tier Rankings")
+            st.markdown("**Efficiency Formula:** Win Rate % × (100% - Dropout Rate %)")
+            
             # Verify win rates sum to approximately 100%
             total_win_rate = rankings['win_rate'].sum()
             st.markdown(f"**Total Win Rate:** {total_win_rate:.1f}% (Should be approximately 100%)")
