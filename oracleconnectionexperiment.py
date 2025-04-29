@@ -156,10 +156,14 @@ def get_available_pairs():
             if not session:
                 return default_pairs
 
+            # Get current date for table name
+            current_date = datetime.now().strftime("%Y%m%d")
+            table_name = f"oracle_exchange_price_partition_v1_{current_date}"
+            print(table_name)
             # Query the oracle_exchange_price table to get unique pairs
-            query = text("""
+            query = text(f"""
                 SELECT DISTINCT pair_name 
-                FROM oracle_exchange_price_partition_v1_20250429
+                FROM {table_name}
                 ORDER BY pair_name
             """)
             
@@ -225,7 +229,11 @@ class ExchangeAnalyzer:
                     progress_bar.progress(0.05, text=f"Fetching data for {pair_name}...")
 
                 # Query to fetch data from all exchanges for this pair
-                query = text("""
+                current_date = datetime.now().strftime("%Y%m%d")
+                table_name = f"oracle_exchange_price_partition_v1_{current_date}"
+                print(table_name)
+                
+                query = text(f"""
                     SELECT 
                         source as exchange_name,
                         pair_name,
@@ -235,7 +243,7 @@ class ExchangeAnalyzer:
                         all_bid,
                         all_ask
                     FROM 
-                        oracle_exchange_price_partition_v1_20250429
+                        {table_name}
                     WHERE 
                         pair_name = :pair_name
                     ORDER BY 
