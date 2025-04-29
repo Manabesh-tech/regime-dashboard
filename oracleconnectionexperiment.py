@@ -390,7 +390,7 @@ def format_column(value, column_name):
     elif column_name == 'choppiness':
         return f"{value:.1f}"
     elif column_name == 'efficiency':
-        return f"{value:.1f}"
+        return f"{value:.2f}"
     elif column_name == 'valid_points':
         return f"{int(value):,}"
     else:
