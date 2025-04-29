@@ -386,6 +386,7 @@ def analyze_tiers(pair_name, progress_bar=None):
                         if dropout_rate > 90:
                             continue
                         
+                        # Make sure we have enough consecutive valid prices
                         # Get valid prices
                         prices = window_df[tier_col].dropna()
                         prices = prices[prices > 0]
@@ -394,28 +395,37 @@ def analyze_tiers(pair_name, progress_bar=None):
                         if len(prices) < 0.8 * window_size:
                             continue
                         
-                        # Calculate choppiness with 20-tick window
+                        # Calculate choppiness with 20-tick window - improved to match SQL
                         window_size_choppiness = 20
-                        diff = prices.diff().dropna()
+                        all_choppiness_values = []
                         
-                        if len(diff) < window_size_choppiness:
-                            continue
+                        # Process each valid 20-tick window (similar to SQL approach)
+                        for i in range(len(prices) - window_size_choppiness + 1):
+                            window_prices = prices.iloc[i:i+window_size_choppiness]
+                            
+                            # Skip if not a complete window
+                            if len(window_prices) < window_size_choppiness:
+                                continue
+                                
+                            # Calculate sum of absolute changes
+                            diff = window_prices.diff().dropna().abs()
+                            sum_abs_changes = diff.sum()
+                            
+                            # Calculate price range
+                            price_range = window_prices.max() - window_prices.min()
+                            
+                            # Avoid division by zero
+                            if price_range > 0:
+                                # Calculate choppiness and cap at 1000
+                                choppiness = 100 * sum_abs_changes / price_range
+                                choppiness = min(choppiness, 1000)
+                                all_choppiness_values.append(choppiness)
                         
-                        # Calculate sum of absolute changes
-                        sum_abs_changes = diff.abs().rolling(window_size_choppiness, min_periods=1).sum()
-                        
-                        # Calculate price range
-                        price_range = prices.rolling(window_size_choppiness, min_periods=1).max() - prices.rolling(window_size_choppiness, min_periods=1).min()
-                        
-                        # Avoid division by zero
-                        epsilon = 1e-10
-                        choppiness_values = 100 * sum_abs_changes / (price_range + epsilon)
-                        
-                        # Cap extreme values at 1000
-                        choppiness_values = np.minimum(choppiness_values, 1000)
-                        
-                        # Calculate mean choppiness for this window
-                        avg_choppiness = choppiness_values.mean()
+                        # Calculate average choppiness across all valid windows
+                        if all_choppiness_values:
+                            avg_choppiness = sum(all_choppiness_values) / len(all_choppiness_values)
+                        else:
+                            avg_choppiness = 0
                         
                         # Store for diagnostics
                         window_tier_choppiness[tier_name] = avg_choppiness
