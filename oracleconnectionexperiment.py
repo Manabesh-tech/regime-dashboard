@@ -178,12 +178,19 @@ def analyze_tiers(pair_name, progress_bar=None):
             singapore_tz = pytz.timezone('Asia/Singapore')
             now_sg = datetime.now(singapore_tz)
             
+            # Explicitly set the exact 24-hour period we want to analyze
+            end_time = now_sg.replace(tzinfo=None)
+            start_time = end_time - timedelta(hours=24)
+            
+            if progress_bar:
+                progress_bar.progress(0.05, text=f"Analyzing data from {start_time} to {end_time} (24 hour period)")
+            
             # Get current date in Singapore time
             current_date_sg = now_sg.strftime("%Y%m%d")
             
-            # Add 2 days prior for data collection
+            # Add 3 days prior for data collection to ensure we get 24 hours coverage
             dates_to_check = []
-            for i in range(3):  # Today, yesterday, day before
+            for i in range(4):  # Today, yesterday, day before, and day before that
                 check_date = (now_sg - timedelta(days=i)).strftime("%Y%m%d")
                 dates_to_check.append(check_date)
             
@@ -210,12 +217,9 @@ def analyze_tiers(pair_name, progress_bar=None):
                         progress_bar.progress(0.1, text=f"Table {table_name} does not exist, trying next date...")
                     continue
                 
-                # Query to fetch data from this table - fetch all data from the table
+                # Query to fetch data with explicit start and end times
                 if progress_bar:
-                    progress_bar.progress(0.1, text=f"Fetching data from {table_name}...")
-                
-                # Get timestamp from 24 hours ago in UTC
-                utc_24h_ago = now_sg.replace(tzinfo=None) - timedelta(hours=24)
+                    progress_bar.progress(0.1, text=f"Fetching data from {table_name} for exact 24-hour period...")
                 
                 query = text(f"""
                     WITH latest_data AS (
@@ -228,9 +232,10 @@ def analyze_tiers(pair_name, progress_bar=None):
                         WHERE 
                             pair_name = :pair_name
                             AND created_at >= :start_time
+                            AND created_at <= :end_time
                         ORDER BY 
                             created_at DESC
-                        LIMIT 500000
+                        LIMIT 1000000
                     )
                     SELECT * FROM latest_data
                     ORDER BY 
@@ -238,7 +243,7 @@ def analyze_tiers(pair_name, progress_bar=None):
                         created_at DESC
                 """)
                 
-                result = session.execute(query, {"pair_name": pair_name, "start_time": utc_24h_ago})
+                result = session.execute(query, {"pair_name": pair_name, "start_time": start_time, "end_time": end_time})
                 table_data = result.fetchall()
                 
                 if table_data:
@@ -246,8 +251,8 @@ def analyze_tiers(pair_name, progress_bar=None):
                     if progress_bar:
                         progress_bar.progress(0.2, text=f"Found {len(table_data)} rows in {table_name}")
                         
-                # Stop if we have enough data - increased to 400,000 to get more complete coverage
-                if len(all_data) >= 400000:  # This should be enough for multiple 5000-tick windows
+                # Stop if we have enough data - increased to 600,000 to get more complete coverage
+                if len(all_data) >= 600000:  # Increased to ensure full 24-hour coverage
                     break
             
             if not all_data:
