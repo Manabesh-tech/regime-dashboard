@@ -225,7 +225,34 @@ def calculate_volatility(price_array):
     
     try:
         # Convert PostgreSQL array to Python list of floats
-        if isinstance(price_
+        if isinstance(price_array, str):
+            # If returned as string (e.g., '{1,2,3}'), strip braces and split
+            price_array = price_array.strip('{}').split(',')
+            prices = [float(p) for p in price_array if p]
+        else:
+            # If returned as list
+            prices = [float(p) for p in price_array if p]
+        
+        if len(prices) < 2:
+            return None
+            
+        # Convert to numpy array
+        prices = np.array(prices)
+        
+        # Calculate log returns
+        log_returns = np.diff(np.log(prices))
+        
+        # Calculate standard deviation of returns
+        std_dev = np.std(log_returns)
+        
+        # Annualize (10-minute intervals -> 6*24*365 intervals per year)
+        annualized_vol = std_dev * np.sqrt(6 * 24 * 365)
+        
+        return annualized_vol
+    
+    except Exception as e:
+        print(f"Error in volatility calculation: {e}")
+        return None
 
 # Define color scales and thresholds
 def map_edge_to_color(edge_value):
@@ -612,7 +639,7 @@ if pair_results:
                             return 'background-color: rgba(255, 165, 0, 0.3)'
                         else:
                             return 'background-color: rgba(255, 0, 0, 0.3)'
-                    except:
+                    except Exception:
                         return ''
                 elif column == 'High Vol %' and '%' in str(val):
                     try:
@@ -625,7 +652,7 @@ if pair_results:
                             return 'background-color: rgba(255, 165, 0, 0.3)'
                         else:
                             return 'background-color: rgba(255, 0, 0, 0.3)'
-                    except:
+                    except Exception:
                         return ''
                 return ''
             
