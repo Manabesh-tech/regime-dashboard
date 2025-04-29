@@ -145,20 +145,20 @@ def analyze_tiers(pair_name, progress_bar=None):
             
             tier_values = {
                 'price_1': '10k',
-                'price_2': '50k',
-                'price_3': '100k',
-                'price_4': '200k',
-                'price_5': '300k',
-                'price_6': '400k',
-                'price_7': '500k',
-                'price_8': '600k',
-                'price_9': '700k',
-                'price_10': '800k',
-                'price_11': '900k',
-                'price_12': '1M',
-                'price_13': '2M',
-                'price_14': '3M',
-                'price_15': '4M',
+                'price_2': '30k',
+                'price_3': '50k',
+                'price_4': '1M',
+                'price_5': '1.5M',
+                'price_6': '2M',
+                'price_7': '2.5M',
+                'price_8': '3M',
+                'price_9': '3.5M',
+                'price_10': '4M',
+                'price_11': '4.5M',
+                'price_12': '5M',
+                'price_13': '5.5M',
+                'price_14': '6M',
+                'price_15': '6.5M',
             }
             
             # Join all tier columns for the query
@@ -205,15 +205,22 @@ def analyze_tiers(pair_name, progress_bar=None):
                     progress_bar.progress(0.1, text=f"Fetching data from {table_name}...")
                 
                 query = text(f"""
-                    SELECT 
-                        source as exchange_name,
-                        created_at,
-                        {price_columns}
-                    FROM 
-                        {table_name}
-                    WHERE 
-                        pair_name = :pair_name
+                    WITH latest_data AS (
+                        SELECT 
+                            source as exchange_name,
+                            created_at,
+                            {price_columns}
+                        FROM 
+                            {table_name}
+                        WHERE 
+                            pair_name = :pair_name
+                        ORDER BY 
+                            created_at DESC
+                        LIMIT 50000
+                    )
+                    SELECT * FROM latest_data
                     ORDER BY 
+                        exchange_name,
                         created_at DESC
                 """)
                 
@@ -242,7 +249,7 @@ def analyze_tiers(pair_name, progress_bar=None):
             df = pd.DataFrame(all_data, columns=columns)
             
             # Sort by timestamp to ensure proper order
-            df.sort_values('created_at', ascending=False, inplace=True)
+            # df.sort_values('created_at', ascending=False, inplace=True)
             
             # Convert numeric columns
             for col in tier_columns:
@@ -258,7 +265,6 @@ def analyze_tiers(pair_name, progress_bar=None):
             window_size = 5000
             total_points = len(df)
             num_windows = total_points // window_size
-            
             # Lower the minimum window size requirement if needed
             if num_windows < 3 and total_points >= 1000:
                 # If we don't have enough data for 5000-tick windows, try smaller ones
@@ -310,12 +316,10 @@ def analyze_tiers(pair_name, progress_bar=None):
                 # Track best choppiness for this window
                 best_choppiness = 0
                 best_tier = None
-                
                 # Process each exchange and tier in this window
                 for exchange in exchanges:
                     # Filter for this exchange
                     exchange_df = window_df[window_df['exchange_name'] == exchange].copy()
-                    
                     if len(exchange_df) < 0.8 * window_size:  # Need at least 80% of data points
                         continue
                     
