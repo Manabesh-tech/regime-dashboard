@@ -131,10 +131,20 @@ def get_available_pairs():
 
 def analyze_tiers(pair_name, progress_bar=None):
     """Analyze all exchange-tier combinations with time-based windows"""
+    # Setup metadata dictionary to return
+    metadata = {
+        'time_span_hours': 0,
+        'time_span_seconds': 0,
+        'total_data_points': 0,
+        'avg_interval_ms': 0,
+        'exchange_counts': {},
+        'theoretical_max': 0
+    }
+    
     try:
         with get_session() as session:
             if not session:
-                return None
+                return None, metadata
 
             # Define tier columns and mapping
             tier_columns = [
@@ -243,42 +253,46 @@ def analyze_tiers(pair_name, progress_bar=None):
             if not all_data:
                 if progress_bar:
                     progress_bar.progress(1.0, text=f"No data found for {pair_name}")
-                return None
-                
-            # Calculate total time span of analyzed data
+                return None, metadata
+            
+            # Update metadata with data points count
+            metadata['total_data_points'] = len(all_data)
+            
+            # Calculate time span info
             if len(all_data) > 0:
                 newest_timestamp = max(row[1] for row in all_data)
                 oldest_timestamp = min(row[1] for row in all_data)
-                time_span_seconds = (newest_timestamp - oldest_timestamp).total_seconds()
-                time_span_hours = time_span_seconds / 3600
                 
-                # Calculate average interval between data points
-                avg_interval_ms = (time_span_seconds * 1000) / len(all_data)
+                # Update time span in metadata
+                metadata['time_span_seconds'] = (newest_timestamp - oldest_timestamp).total_seconds()
+                metadata['time_span_hours'] = metadata['time_span_seconds'] / 3600
+                metadata['avg_interval_ms'] = (metadata['time_span_seconds'] * 1000) / len(all_data)
+                metadata['theoretical_max'] = int(metadata['time_span_seconds'] * 2)  # 2 ticks per second (500ms)
                 
-                # Count total data points per exchange
+                # Count data points per exchange
                 exchange_counts = {}
                 for row in all_data:
                     exchange = row[0]  # exchange_name is the first column
                     if exchange not in exchange_counts:
                         exchange_counts[exchange] = 0
                     exchange_counts[exchange] += 1
-                    
-                # Get exchange with most data points
-                max_exchange = max(exchange_counts.items(), key=lambda x: x[1])
                 
-                if progress_bar:
-                    progress_bar.progress(0.3, text=f"Processing {len(all_data):,} data points spanning {time_span_hours:.2f} hours (avg interval: {avg_interval_ms:.1f}ms)")
-                    progress_bar.progress(0.31, text=f"Largest exchange: {max_exchange[0]} with {max_exchange[1]:,} data points")
-            else:
-                if progress_bar:
-                    progress_bar.progress(0.3, text=f"Processing {len(all_data)} data points...")
+                metadata['exchange_counts'] = exchange_counts
+                
+                # Find largest exchange by data count
+                if exchange_counts:
+                    max_exchange = max(exchange_counts.items(), key=lambda x: x[1])
+                    
+                    if progress_bar:
+                        progress_bar.progress(0.3, 
+                            text=f"Processing {len(all_data):,} data points spanning {metadata['time_span_hours']:.2f} hours " + 
+                                 f"(avg interval: {metadata['avg_interval_ms']:.1f}ms)")
+                        progress_bar.progress(0.31, 
+                            text=f"Largest exchange: {max_exchange[0]} with {max_exchange[1]:,} data points")
             
             # Create DataFrame
             columns = ['exchange_name', 'created_at'] + tier_columns
             df = pd.DataFrame(all_data, columns=columns)
-            
-            # Sort by timestamp to ensure proper order
-            # df.sort_values('created_at', ascending=False, inplace=True)
             
             # Convert numeric columns
             for col in tier_columns:
@@ -339,7 +353,7 @@ def analyze_tiers(pair_name, progress_bar=None):
                     # Track all choppiness values for diagnostic
                     window_tier_choppiness = {}
                     
-            # Process each tier
+                    # Process each tier
                     for tier_col in tier_columns:
                         if tier_col not in window_df.columns:
                             continue
@@ -392,7 +406,7 @@ def analyze_tiers(pair_name, progress_bar=None):
                         epsilon = 1e-10
                         choppiness_values = 100 * sum_abs_changes / (price_range + epsilon)
                         
-                        # Cap extreme values
+                        # Cap extreme values at 1000
                         choppiness_values = np.minimum(choppiness_values, 1000)
                         
                         # Calculate mean choppiness for this window
@@ -434,7 +448,7 @@ def analyze_tiers(pair_name, progress_bar=None):
             if total_wins == 0:
                 if progress_bar:
                     progress_bar.progress(1.0, text="No valid winners found in any window")
-                return None
+                return None, metadata
             
             # Create average choppiness across all exchanges for each tier
             tier_to_avg_choppiness = {}
@@ -456,7 +470,7 @@ def analyze_tiers(pair_name, progress_bar=None):
             sorted_tiers = sorted(tier_avg_choppiness.items(), key=lambda x: x[1], reverse=True)
             
             # Log the top tiers by average choppiness
-            if progress_bar:
+            if progress_bar and sorted_tiers:
                 top_tiers_str = ", ".join([f"{tier}: {chop:.1f}" for tier, chop in sorted_tiers[:5]])
                 progress_bar.progress(0.95, text=f"Top 5 tiers by avg choppiness: {top_tiers_str}")
             
@@ -489,6 +503,9 @@ def analyze_tiers(pair_name, progress_bar=None):
                 efficiency = (win_rate * (100 - avg_dropout)) / 100
                 efficiency = round(efficiency, 1)
                 
+                # Get valid points
+                valid_points = exchange_tier_valid_points.get(exchange_tier_key, 0)
+                
                 # Parse exchange and tier from the key
                 exchange, tier = exchange_tier_key.split(':', 1)
                 
@@ -502,7 +519,7 @@ def analyze_tiers(pair_name, progress_bar=None):
                     'dropout_rate': avg_dropout,
                     'win_rate': win_rate,
                     'efficiency': efficiency,
-                    'valid_points': exchange_tier_valid_points.get(exchange_tier_key, 0),
+                    'valid_points': valid_points,
                     'rank': 0  # Will be filled in later
                 })
             
@@ -510,7 +527,7 @@ def analyze_tiers(pair_name, progress_bar=None):
             if not results:
                 if progress_bar:
                     progress_bar.progress(1.0, text="No valid tiers found")
-                return None
+                return None, metadata
                 
             results_df = pd.DataFrame(results)
             
@@ -521,7 +538,7 @@ def analyze_tiers(pair_name, progress_bar=None):
             if progress_bar:
                 progress_bar.progress(1.0, text="Analysis complete!")
                 
-            return results_df
+            return results_df, metadata
             
     except Exception as e:
         if progress_bar:
@@ -529,7 +546,7 @@ def analyze_tiers(pair_name, progress_bar=None):
         st.error(f"Analysis error: {e}")
         import traceback
         st.error(traceback.format_exc())
-        return None
+        return None, metadata
 
 # Format numbers for display
 def format_column(value, column_name):
@@ -539,7 +556,7 @@ def format_column(value, column_name):
         
     if column_name in ['dropout_rate', 'win_rate', 'efficiency']:
         return f"{value:.1f}%"
-    elif column_name == 'choppiness':
+    elif column_name in ['current_choppiness', 'avg_choppiness']:
         return f"{value:.1f}"
     elif column_name == 'valid_points':
         return f"{int(value):,}"
@@ -583,8 +600,10 @@ def main():
     **Key Metrics:**
     - **Win Rate:** Percentage of 5000-tick windows where this tier had the highest choppiness
     - **Efficiency Score:** Win Rate % × (100% - Dropout Rate %)
-    - **Choppiness:** Average value using 20-tick rolling window calculation
+    - **Current Choppiness:** Most recent choppiness value using 20-tick rolling window
+    - **Avg Choppiness:** Average choppiness across all windows
     - **Dropout Rate:** Percentage of time tier has missing or invalid data
+    - **Valid Ticks:** Number of valid data points analyzed for this tier
     """)
     
     # Run analysis
@@ -600,54 +619,62 @@ def main():
         progress_bar = st.progress(0, text="Starting analysis...")
         
         # Run analysis
-        rankings = analyze_tiers(selected_pair, progress_bar)
+        rankings, analysis_metadata = analyze_tiers(selected_pair, progress_bar)
         
         if rankings is not None and not rankings.empty:
-            # Show results
-            st.header("Global Tier Rankings")
-            st.markdown("**Efficiency Formula:** Win Rate % × (100% - Dropout Rate %)")
-            
             # Display detailed time and data coverage information
             st.header("Analysis Coverage Details")
             
-            if 'time_span_hours' in locals():
-                # Create columns for metrics
-                col1, col2, col3 = st.columns(3)
+            # Create columns for metrics
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.metric("Time Period Analyzed", f"{analysis_metadata.get('time_span_hours', 0):.2f} hours")
+            
+            with col2:
+                st.metric("Total Data Points", f"{analysis_metadata.get('total_data_points', 0):,}")
+            
+            with col3:
+                st.metric("Avg Data Interval", f"{analysis_metadata.get('avg_interval_ms', 0):.1f}ms")
+            
+            # Show exchange-specific counts
+            if analysis_metadata.get('exchange_counts'):
+                st.subheader("Data Points per Exchange")
+                exchange_data = []
+                time_span_seconds = analysis_metadata.get('time_span_seconds', 0)
                 
-                with col1:
-                    st.metric("Time Period Analyzed", f"{time_span_hours:.2f} hours")
+                for exchange, count in analysis_metadata.get('exchange_counts', {}).items():
+                    # Calculate average interval for this exchange
+                    exchange_interval = 0
+                    if time_span_seconds > 0 and count > 0:
+                        exchange_interval = (time_span_seconds * 1000) / count
                     
-                with col2:
-                    st.metric("Total Data Points", f"{len(all_data):,}")
-                
-                with col3:
-                    if 'avg_interval_ms' in locals():
-                        st.metric("Avg Data Interval", f"{avg_interval_ms:.1f}ms")
-                
-                # Show exchange-specific counts
-                if 'exchange_counts' in locals():
-                    st.subheader("Data Points per Exchange")
-                    exchange_data = []
-                    for exchange, count in exchange_counts.items():
-                        # Calculate average interval for this exchange
-                        exchange_interval = (time_span_seconds * 1000) / count if count > 0 else 0
-                        exchange_data.append({
-                            "Exchange": exchange,
-                            "Data Points": f"{count:,}",
-                            "Avg Interval": f"{exchange_interval:.1f}ms",
-                            "Coverage %": f"{(count / (time_span_seconds * 2)) * 100:.1f}%"
-                        })
+                    # Calculate coverage percentage
+                    coverage_pct = 0
+                    if time_span_seconds > 0:
+                        theoretical_max_for_exchange = time_span_seconds * 2  # 2 ticks per second
+                        coverage_pct = (count / theoretical_max_for_exchange) * 100
                     
+                    exchange_data.append({
+                        "Exchange": exchange,
+                        "Data Points": f"{count:,}",
+                        "Avg Interval": f"{exchange_interval:.1f}ms",
+                        "Coverage %": f"{coverage_pct:.1f}%"
+                    })
+                
+                if exchange_data:
                     # Create dataframe and display
                     exchange_df = pd.DataFrame(exchange_data)
                     st.dataframe(exchange_df, use_container_width=True, hide_index=True)
-                
-                # Calculate theoretical vs actual data coverage
-                theoretical_max = int(time_span_seconds * 2)  # 2 ticks per second (500ms)
-                coverage_percent = (len(all_data) / theoretical_max) * 100 if theoretical_max > 0 else 0
+            
+            # Calculate theoretical vs actual data coverage
+            theoretical_max = analysis_metadata.get('theoretical_max', 0)
+            if theoretical_max > 0:
+                total_points = analysis_metadata.get('total_data_points', 0)
+                coverage_percent = (total_points / theoretical_max) * 100
                 st.markdown(f"**Overall Data Density:** {coverage_percent:.1f}% of theoretical maximum ({theoretical_max:,} points at 500ms intervals)")
-                
-            # Show Global Tier Rankings header
+            
+            # Show results
             st.header("Global Tier Rankings")
             st.markdown("**Efficiency Formula:** Win Rate % × (100% - Dropout Rate %)")
             
