@@ -269,15 +269,19 @@ def analyze_tiers(pair_name, progress_bar=None):
                     progress_bar.progress(0.5 + (0.4 * window_idx / num_windows), 
                                          text=f"Analyzing window {window_idx+1}/{num_windows}")
                 
-                # Calculate start and end indices for this window
-                start_idx = window_idx * step_size
-                end_idx = start_idx + window_size
+                # Calculate start and end indices for this window (non-overlapping)
+                start_idx = window_idx * window_size
+                end_idx = (window_idx + 1) * window_size
                 
                 if end_idx > total_points:
-                    break  # Stop if we run out of data
+                    end_idx = total_points  # Use whatever data is left
                 
                 # Get the data for this window
-                window_df = df.iloc[start_idx:end_idx]
+                window_df = df.iloc[start_idx:end_idx].copy()
+                
+                # Skip if window is too small
+                if len(window_df) < 0.8 * window_size:  # Need at least 80% of full window
+                    continue
                 
                 # Track best choppiness for this window
                 best_choppiness = 0
