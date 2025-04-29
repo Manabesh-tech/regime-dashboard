@@ -11,7 +11,6 @@ import threading
 
 # Clear cache at startup to ensure fresh data
 st.cache_data.clear()
-
 # Page configuration
 st.set_page_config(
     page_title="Exchange Efficiency Analyzer",
