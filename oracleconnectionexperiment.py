@@ -143,23 +143,23 @@ def analyze_tiers(pair_name, progress_bar=None):
                 'price_11', 'price_12', 'price_13', 'price_14', 'price_15'
             ]
             
-            tier_values = {
-    'price_1': '100k',
-    'price_2': '300k',
-    'price_3': '500k',
-    'price_4': '1M',
-    'price_5': '1.5M',
-    'price_6': '2M',
-    'price_7': '2.5M',
-    'price_8': '3M',
-    'price_9': '3.5M',
-    'price_10': '4M',
-    'price_11': '4.5M',
-    'price_12': '5M',
-    'price_13': '5.5M',
-    'price_14': '6M',
-    'price_15': '6.5M',
-}
+            tier_values = { 
+                'price_1': '100k', 
+                'price_2': '300k', 
+                'price_3': '500k', 
+                'price_4': '1M', 
+                'price_5': '1.5M', 
+                'price_6': '2M', 
+                'price_7': '2.5M', 
+                'price_8': '3M', 
+                'price_9': '3.5M', 
+                'price_10': '4M', 
+                'price_11': '4.5M', 
+                'price_12': '5M', 
+                'price_13': '5.5M', 
+                'price_14': '6M', 
+                'price_15': '6.5M'
+            }
             
             # Join all tier columns for the query
             price_columns = ", ".join(tier_columns)
@@ -261,10 +261,11 @@ def analyze_tiers(pair_name, progress_bar=None):
             if progress_bar:
                 progress_bar.progress(0.4, text=f"Found {len(exchanges)} exchanges")
             
-            # Initialize variables to track tier performance
+            # Initialize trackers
             win_counts = {}  # To count how many times each tier wins
             exchange_tier_choppiness = {}  # Store the overall choppiness average
             exchange_tier_dropout = {}     # Store the overall dropout rate
+            exchange_tier_valid_points = {}  # Store the count of valid data points
             
             # Process each exchange separately
             for exchange in exchanges:
@@ -309,7 +310,7 @@ def analyze_tiers(pair_name, progress_bar=None):
                     # Track all choppiness values for diagnostic
                     window_tier_choppiness = {}
                     
-                    # Process each tier
+            # Process each tier
                     for tier_col in tier_columns:
                         if tier_col not in window_df.columns:
                             continue
@@ -320,12 +321,19 @@ def analyze_tiers(pair_name, progress_bar=None):
                         # Calculate dropout rate for this window
                         total_points_in_window = len(window_df)
                         nan_or_zero = (window_df[tier_col].isna() | (window_df[tier_col] <= 0)).sum()
+                        valid_points = total_points_in_window - nan_or_zero
                         dropout_rate = (nan_or_zero / total_points_in_window) * 100
                         
                         # Track overall dropout rate
                         if exchange_tier_key not in exchange_tier_dropout:
                             exchange_tier_dropout[exchange_tier_key] = []
+                            exchange_tier_valid_points = {}
                         exchange_tier_dropout[exchange_tier_key].append(dropout_rate)
+                        
+                        # Track valid points count
+                        if exchange_tier_key not in exchange_tier_valid_points:
+                            exchange_tier_valid_points = {}
+                        exchange_tier_valid_points[exchange_tier_key] = valid_points
                         
                         # Skip if dropout rate is too high
                         if dropout_rate > 90:
@@ -466,6 +474,7 @@ def analyze_tiers(pair_name, progress_bar=None):
                     'dropout_rate': avg_dropout,
                     'win_rate': win_rate,
                     'efficiency': efficiency,
+                    'valid_points': exchange_tier_valid_points.get(exchange_tier_key, 0),
                     'rank': 0  # Will be filled in later
                 })
             
@@ -585,6 +594,7 @@ def main():
                 'avg_choppiness': 'Avg Choppiness',
                 'dropout_rate': 'Dropout Rate (%)',
                 'win_rate': 'Win Rate (%)',
+                'valid_points': 'Valid Ticks',
                 'rank': 'Rank'
             })
             
@@ -596,7 +606,8 @@ def main():
                 'Win Rate (%)',
                 'Dropout Rate (%)',
                 'Current Choppiness',
-                'Avg Choppiness'
+                'Avg Choppiness',
+                'Valid Ticks'
             ]
             
             # Filter to columns that exist
