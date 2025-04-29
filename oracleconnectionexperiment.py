@@ -14,7 +14,7 @@ st.cache_data.clear()
 
 # Page configuration
 st.set_page_config(
-    page_title="Exchange Analyzer",
+    page_title="Exchange Efficiency Analyzer",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -65,20 +65,32 @@ st.markdown("""
         font-weight: bold;
         margin-right: 5px;
     }
-    .exchange-binance {
+    .exchange-binancefuture {
         background-color: #f3ba2f;
         color: black;
     }
-    .exchange-hyperliquid {
+    .exchange-hyperliquidfuture {
         background-color: #333333;
         color: white;
     }
-    .exchange-bybit {
+    .exchange-bybitfuture {
         background-color: #b50c5c;
         color: white;
     }
-    .exchange-okx {
+    .exchange-okxfuture {
         background-color: #121212;
+        color: white;
+    }
+    .exchange-mexcfuture {
+        background-color: #0052FF;
+        color: white;
+    }
+    .exchange-gatefuture {
+        background-color: #3366CC;
+        color: white;
+    }
+    .exchange-bitgetfuture {
+        background-color: #FF6600;
         color: white;
     }
 </style>
@@ -86,26 +98,18 @@ st.markdown("""
 
 # Create database engine
 @st.cache_resource
-def get_engine(db_name='report_dev'):
+def get_engine():
     """Create database engine
-    Args:
-        db_name (str): Database name, default is 'report_dev'
     Returns:
         engine: SQLAlchemy engine
     """
     try:
-        # Get database credentials from Streamlit secrets
-        user = st.secrets["database"]["user"]
-        password = st.secrets["database"]["password"]
-        host = st.secrets["database"]["host"]
-        
-        # Handle potentially empty port - default to 5432 if empty
-        try:
-            port = int(st.secrets["database"]["port"])
-        except (ValueError, TypeError):
-            port = 5432  # Default PostgreSQL port
-            
-        database = st.secrets["database"]["database"]
+        # Use the correct database details
+        user = "metabase"
+        password = "aTJ92^kl04hllk"
+        host = "aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com"
+        port = 5432
+        database = "report_dev"
         
         # Construct connection URL
         db_url = f"postgresql://{user}:{password}@{host}:{port}/{database}"
@@ -115,14 +119,12 @@ def get_engine(db_name='report_dev'):
         return None
 
 @contextmanager
-def get_session(db_name='report_dev'):
+def get_session():
     """Database session context manager
-    Args:
-        db_name (str): Database name, default is 'report_dev'
     Yields:
         session: SQLAlchemy session
     """
-    engine = get_engine(db_name)
+    engine = get_engine()
     if not engine:
         yield None
         return
@@ -156,7 +158,6 @@ def get_available_pairs():
             query = text("""
                 SELECT DISTINCT pair_name 
                 FROM oracle_exchange_price_partition_v1_20250429
-                WHERE created_at >= NOW() - INTERVAL '24 hours'
                 ORDER BY pair_name
             """)
             
@@ -199,7 +200,7 @@ class ExchangeAnalyzer:
                 if not session:
                     return False
 
-                # Calculate time range
+                # Calculate time range (for display only)
                 singapore_tz = pytz.timezone('Asia/Singapore')
                 now = datetime.now(singapore_tz)
                 start_time = now - timedelta(hours=hours)
@@ -218,11 +219,8 @@ class ExchangeAnalyzer:
                 # Store last updated time
                 self.last_updated = now.strftime("%Y-%m-%d %H:%M:%S")
 
-                # Format for database query (without timezone)
-                start_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
-
                 if progress_bar:
-                    progress_bar.progress(0.05, text=f"Fetching data from {start_str_display} to {end_str_display} (SGT)")
+                    progress_bar.progress(0.05, text=f"Fetching data for {pair_name}...")
 
                 # Query to fetch data from all exchanges for this pair
                 query = text("""
@@ -238,9 +236,9 @@ class ExchangeAnalyzer:
                         oracle_exchange_price_partition_v1_20250429
                     WHERE 
                         pair_name = :pair_name
-                        AND created_at >= :start_time
                     ORDER BY 
                         created_at DESC
+                    LIMIT 5000
                 """)
                 
                 # Execute query with parameters
@@ -250,8 +248,7 @@ class ExchangeAnalyzer:
                 result = session.execute(
                     query,
                     {
-                        "pair_name": pair_name,
-                        "start_time": start_str
+                        "pair_name": pair_name
                     }
                 )
                 
@@ -754,7 +751,7 @@ def main():
                 time_range = st.session_state.analyzer.analysis_time_range
                 st.markdown(f"""
                 <div style="background-color: #e6f3ff; padding: 10px; border-radius: 5px; margin-bottom: 20px;">
-                    <h3 style="margin: 0;">Analysis Time Range</h3>
+                    <h3 style="margin: 0;">Analysis Time Range (For Reference)</h3>
                     <p style="margin: 5px 0;"><strong>From:</strong> {time_range['start']} ({time_range['timezone']})</p>
                     <p style="margin: 5px 0;"><strong>To:</strong> {time_range['end']} ({time_range['timezone']})</p>
                     <p style="margin: 5px 0;"><strong>Last Updated:</strong> {st.session_state.analyzer.last_updated} ({time_range['timezone']})</p>
@@ -793,7 +790,11 @@ def main():
         3. **Fallback Strategy**: Recommends primary and fallback exchanges
         4. **Auto-Refresh**: Updates analysis every 10 minutes when enabled
         
-        **Note**: Data is fetched from the `oracle_exchange_price_partition_v1_20250429` table with a 24-hour lookback period.
+        The analyzer focuses on 5000-point analysis to evaluate exchange performance based on:
+        - **Choppiness**: Higher values indicate more trading opportunities
+        - **Dropout Rate**: Percentage of missing/zero values in the data feed
+        
+        Our ranking metric (Efficiency Score) balances win rate and data reliability to recommend the best exchange for each pair.
         """)
 
 if __name__ == "__main__":
