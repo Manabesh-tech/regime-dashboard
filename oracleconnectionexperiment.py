@@ -264,7 +264,7 @@ def analyze_tiers(pair_name, progress_bar=None):
             # Initialize trackers
             win_counts = {}  # To count how many times each tier wins
             exchange_tier_choppiness = {}  # Store the overall choppiness average
-            exchange_tier_dropout = {}     # Store the overall dropout rate
+            exchange_tier_dropout = {}  # Store the overall dropout rate
             exchange_tier_valid_points = {}  # Store the count of valid data points
             
             # Process each exchange separately
@@ -327,13 +327,12 @@ def analyze_tiers(pair_name, progress_bar=None):
                         # Track overall dropout rate
                         if exchange_tier_key not in exchange_tier_dropout:
                             exchange_tier_dropout[exchange_tier_key] = []
-                            exchange_tier_valid_points = {}
                         exchange_tier_dropout[exchange_tier_key].append(dropout_rate)
                         
                         # Track valid points count
                         if exchange_tier_key not in exchange_tier_valid_points:
-                            exchange_tier_valid_points = {}
-                        exchange_tier_valid_points[exchange_tier_key] = valid_points
+                            exchange_tier_valid_points[exchange_tier_key] = 0
+                        exchange_tier_valid_points[exchange_tier_key] += valid_points
                         
                         # Skip if dropout rate is too high
                         if dropout_rate > 90:
