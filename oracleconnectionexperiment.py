@@ -102,19 +102,9 @@ def get_engine(db_name='report_dev'):
         engine: SQLAlchemy engine
     """
     try:
-        # Use Streamlit's secrets management to get database credentials
-        # These should be stored in .streamlit/secrets.toml
-        if 'database' not in st.secrets:
-            st.error("Database credentials not found in secrets.")
-            return None
-            
-        db_username = st.secrets["database"]["username"]
-        db_password = st.secrets["database"]["password"]
-        db_host = st.secrets["database"]["host"]
-        
-        # Construct the connection URL
-        db_url = f"postgresql://{db_username}:{db_password}@{db_host}:5432/{db_name}"
-        
+        # For now, use direct connection details to avoid setup complexity
+        # In production, these should be moved to Streamlit secrets
+        db_url = "postgresql://public_rw:aTJ92^kl04hllk@aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com:5432/report_dev"
         return create_engine(db_url, pool_size=5, max_overflow=10)
     except Exception as e:
         st.error(f"Error creating database engine: {e}")
