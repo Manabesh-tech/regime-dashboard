@@ -104,8 +104,8 @@ def get_engine():
         engine: SQLAlchemy engine
     """
     try:
-        # Use the correct database details
-        user = "metabase"
+        # Use the correct database details from the working SQL connection
+        user = "public_rw"  # Using public_rw instead of metabase
         password = "aTJ92^kl04hllk"
         host = "aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com"
         port = 5432
@@ -681,8 +681,15 @@ def main():
     # Display current time
     st.markdown(f"<p style='text-align: center; font-size:14px; color:gray;'>Current time: {current_time_sg} (SGT)</p>", unsafe_allow_html=True)
 
-    # Get available pairs with default fallback
-    available_pairs = get_available_pairs()
+    # Get available pairs but handle error case better
+    try:
+        available_pairs = get_available_pairs()
+    except:
+        available_pairs = ["BTC", "SOL", "ETH", "TRUMP"]  # Default fallback
+    
+    # Ensure we have a valid list
+    if not available_pairs or not isinstance(available_pairs, list):
+        available_pairs = ["BTC", "SOL", "ETH", "TRUMP"]  # Emergency fallback
 
     # Top controls area
     col1, col2, col3 = st.columns([2, 1, 1])
@@ -701,7 +708,7 @@ def main():
             st.session_state.selected_pair = selected_pair
         except Exception as e:
             st.error(f"Error displaying pairs: {e}")
-            selected_pair = None if not available_pairs else available_pairs[0]
+            selected_pair = "BTC"  # Force a default selection
             st.write(f"Using default pair: {selected_pair}")
             st.session_state.selected_pair = selected_pair
 
