@@ -13,17 +13,24 @@ st.cache_data.clear()
 
 # Page configuration
 st.set_page_config(
-    page_title="Global Tier Analyzer",
+    page_title="Enhanced Global Tier Analyzer",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
 
-# Basic CSS
+# Enhanced CSS for better visual presentation
 st.markdown("""
 <style>
+    .block-container {padding: 0 !important;}
+    .main .block-container {max-width: 98% !important;}
+    h1, h2, h3 {margin: 0 !important; padding: 0 !important;}
+    .stButton > button {width: 100%; font-weight: bold; height: 46px; font-size: 18px;}
+    div.stProgress > div > div {height: 5px !important;}
+    
+    /* Better table styling */
     .dataframe {
-        font-size: 16px !important;
+        font-size: 18px !important;
         width: 100% !important;
     }
     .dataframe th {
@@ -32,6 +39,22 @@ st.markdown("""
     }
     .dataframe td {
         font-weight: 500 !important;
+    }
+    
+    /* Highlight top tiers */
+    .dataframe tr:first-child {
+        background-color: #e6f7ff !important;
+    }
+    
+    /* Highlight cells based on value */
+    .highlight-cell-high {
+        background-color: #d4f7d4 !important;  /* Light green */
+    }
+    .highlight-cell-medium {
+        background-color: #ffffd4 !important;  /* Light yellow */
+    }
+    .highlight-cell-low {
+        background-color: #ffd4d4 !important;  /* Light red */
     }
 </style>
 """, unsafe_allow_html=True)
@@ -78,7 +101,7 @@ def get_session():
 # Get available pairs from the database
 def get_available_pairs():
     """Fetch available trading pairs"""
-    default_pairs = ["BTC", "SOL", "ETH", "TRUMP"]
+    default_pairs = ["BTC/USDT", "SOL/USDT", "ETH/USDT", "DOGE/USDT", "XRP/USDT"]
     
     try:
         with get_session() as session:
@@ -99,6 +122,18 @@ def get_available_pairs():
             result = session.execute(query)
             pairs = [row[0] for row in result]
             
+            # If current date doesn't have data, try yesterday
+            if not pairs:
+                yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
+                table_name = f"oracle_exchange_price_partition_v1_{yesterday}"
+                query = text(f"""
+                    SELECT DISTINCT pair_name 
+                    FROM {table_name}
+                    ORDER BY pair_name
+                """)
+                result = session.execute(query)
+                pairs = [row[0] for row in result]
+            
             return sorted(pairs) if pairs else default_pairs
 
     except Exception as e:
@@ -116,7 +151,27 @@ def analyze_tiers(pair_name, progress_bar=None):
             current_date = datetime.now().strftime("%Y%m%d")
             table_name = f"oracle_exchange_price_partition_v1_{current_date}"
             
-            # Define tier columns and mapping
+            # Check if today's table exists
+            table_exists_query = text(f"""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_schema = 'public' 
+                    AND table_name = :table_name
+                );
+            """)
+            
+            if not session.execute(table_exists_query, {"table_name": table_name}).scalar():
+                # Try yesterday if today doesn't exist
+                yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
+                table_name = f"oracle_exchange_price_partition_v1_{yesterday}"
+                
+                # Check if yesterday's table exists
+                if not session.execute(table_exists_query, {"table_name": table_name}).scalar():
+                    if progress_bar:
+                        progress_bar.progress(1.0, text="No data tables found")
+                    return None
+            
+            # Define tier columns and mapping (using the same scheme as in singlepairtieranalyzer.py)
             tier_columns = [
                 'price_1', 'price_2', 'price_3', 'price_4', 'price_5',
                 'price_6', 'price_7', 'price_8', 'price_9', 'price_10',
@@ -135,10 +190,10 @@ def analyze_tiers(pair_name, progress_bar=None):
                 'price_9': '700k',
                 'price_10': '800k',
                 'price_11': '900k',
-                'price_12': '1000k',
-                'price_13': '2000k',
-                'price_14': '3000k',
-                'price_15': '4000k',
+                'price_12': '1M',
+                'price_13': '2M',
+                'price_14': '3M',
+                'price_15': '4M',
             }
             
             # Join all tier columns for the query
@@ -147,10 +202,11 @@ def analyze_tiers(pair_name, progress_bar=None):
             if progress_bar:
                 progress_bar.progress(0.1, text="Fetching data...")
             
-            # Query to fetch data
+            # Query to fetch data, also get created_at for time-based analysis
             query = text(f"""
                 SELECT 
                     source as exchange_name,
+                    created_at,
                     {price_columns}
                 FROM 
                     {table_name}
@@ -165,16 +221,18 @@ def analyze_tiers(pair_name, progress_bar=None):
             all_data = result.fetchall()
             
             if not all_data:
+                if progress_bar:
+                    progress_bar.progress(1.0, text=f"No data found for {pair_name}")
                 return None
             
             if progress_bar:
-                progress_bar.progress(0.3, text="Processing data...")
+                progress_bar.progress(0.3, text=f"Processing {len(all_data)} data points...")
             
             # Create DataFrame
-            columns = ['exchange_name'] + tier_columns
+            columns = ['exchange_name', 'created_at'] + tier_columns
             df = pd.DataFrame(all_data, columns=columns)
             
-            # Convert numeric
+            # Convert numeric columns
             for col in tier_columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
             
@@ -184,7 +242,16 @@ def analyze_tiers(pair_name, progress_bar=None):
             # Process each exchange and tier
             results = []
             
-            for exchange in exchanges:
+            # Calculate time intervals for win rate
+            timeframes = [10, 20, 50, 100, 200]
+            
+            total_exchanges = len(exchanges)
+            for i, exchange in enumerate(exchanges):
+                # Update progress
+                if progress_bar:
+                    progress_bar.progress(0.3 + (0.6 * i / total_exchanges), 
+                                         text=f"Analyzing {exchange} ({i+1}/{total_exchanges})")
+                
                 # Filter for this exchange
                 exchange_df = df[df['exchange_name'] == exchange].copy()
                 
@@ -194,9 +261,9 @@ def analyze_tiers(pair_name, progress_bar=None):
                     tier_name = tier_values.get(tier_col, tier_col)
                     
                     # Calculate metrics
-                    # 1. Dropout rate
+                    # 1. Dropout rate - percentage of missing or zero values
                     total_points = len(exchange_df)
-                    nan_or_zero = (exchange_df[tier_col].isna() | (exchange_df[tier_col] == 0)).sum()
+                    nan_or_zero = (exchange_df[tier_col].isna() | (exchange_df[tier_col] <= 0)).sum()
                     dropout_rate = (nan_or_zero / total_points) * 100 if total_points > 0 else 100
                     
                     # Skip completely empty tiers
@@ -211,23 +278,62 @@ def analyze_tiers(pair_name, progress_bar=None):
                     if len(prices) < 100:
                         continue
                     
-                    # 3. Calculate choppiness
+                    # 3. Calculate choppiness - using same algorithm as singlepairtieranalyzer.py
                     window = min(20, len(prices) // 10)
                     diff = prices.diff().dropna()
                     
                     if len(diff) < window:
                         continue
-                        
+                    
+                    # Calculate sum of absolute changes
                     sum_abs_changes = diff.abs().rolling(window, min_periods=1).sum()
+                    
+                    # Calculate price range
                     price_range = prices.rolling(window, min_periods=1).max() - prices.rolling(window, min_periods=1).min()
                     
                     # Avoid division by zero
                     epsilon = 1e-10
                     choppiness_values = 100 * sum_abs_changes / (price_range + epsilon)
+                    
+                    # Cap extreme values
+                    choppiness_values = np.minimum(choppiness_values, 1000)
+                    
+                    # Calculate mean choppiness
                     choppiness = choppiness_values.mean()
                     
-                    # 4. Calculate efficiency
-                    efficiency = choppiness * ((100 - dropout_rate) / 100)
+                    # 4. Calculate direction changes (%)
+                    signs = np.sign(diff)
+                    direction_changes = (signs.shift(1) != signs).sum()
+                    direction_change_pct = (direction_changes / (len(signs) - 1)) * 100 if len(signs) > 1 else 0
+                    
+                    # 5. Calculate tick ATR %
+                    mean_price = prices.mean()
+                    tick_atr = diff.abs().mean()
+                    tick_atr_pct = (tick_atr / mean_price) * 100
+                    
+                    # 6. Calculate corrected efficiency score: run_rate * (100-dropout_rate)
+                    # Run rate = % of time the tier has valid data (opposite of dropout rate)
+                    run_rate = 100 - dropout_rate
+                    efficiency = (run_rate * choppiness) / 100
+                    
+                    # 7. Calculate win rate
+                    win_rates = []
+                    for tf in timeframes:
+                        if len(prices) <= tf:
+                            continue
+                            
+                        # Calculate price changes over this timeframe
+                        price_shifts = prices.shift(-tf) - prices
+                        increases = (price_shifts > 0).sum()
+                        decreases = (price_shifts < 0).sum()
+                        total = increases + decreases
+                        
+                        if total > 0:
+                            win_rate = (increases / total) * 100
+                            win_rates.append(win_rate)
+                    
+                    # Average winrate across different timeframes
+                    avg_win_rate = sum(win_rates) / len(win_rates) if win_rates else 50.0
                     
                     # Store result
                     results.append({
@@ -235,47 +341,77 @@ def analyze_tiers(pair_name, progress_bar=None):
                         'tier': tier_name,
                         'exchange_tier': f"{exchange}:{tier_name}",
                         'choppiness': choppiness,
+                        'direction_changes': direction_change_pct,
+                        'tick_atr_pct': tick_atr_pct,
                         'dropout_rate': dropout_rate,
+                        'run_rate': run_rate,
                         'efficiency': efficiency,
+                        'win_rate': avg_win_rate,
                         'valid_points': len(prices)
                     })
             
             if progress_bar:
-                progress_bar.progress(0.8, text="Ranking results...")
+                progress_bar.progress(0.9, text="Ranking results...")
             
             # Convert to DataFrame and sort
             if not results:
+                if progress_bar:
+                    progress_bar.progress(1.0, text="No valid tiers found")
                 return None
                 
             results_df = pd.DataFrame(results)
-            results_df = results_df.sort_values('efficiency', ascending=False)
+            
+            # Sort by efficiency, then by win_rate as secondary factor
+            results_df = results_df.sort_values(['efficiency', 'win_rate'], ascending=[False, False])
             
             if progress_bar:
-                progress_bar.progress(1.0, text="Done!")
+                progress_bar.progress(1.0, text="Analysis complete!")
                 
             return results_df
             
     except Exception as e:
+        if progress_bar:
+            progress_bar.progress(1.0, text=f"Error: {str(e)}")
         st.error(f"Analysis error: {e}")
         import traceback
         st.error(traceback.format_exc())
         return None
 
+# Format numbers for display
+def format_column(value, column_name):
+    """Format numbers according to their type"""
+    if pd.isna(value):
+        return "N/A"
+        
+    if column_name in ['run_rate', 'dropout_rate', 'direction_changes', 'win_rate']:
+        return f"{value:.1f}%"
+    elif column_name == 'tick_atr_pct':
+        return f"{value:.4f}"
+    elif column_name == 'choppiness':
+        return f"{value:.1f}"
+    elif column_name == 'efficiency':
+        return f"{value:.1f}"
+    elif column_name == 'valid_points':
+        return f"{int(value):,}"
+    else:
+        return str(value)
+
 # Main function
 def main():
-    st.title("Global Tier Analyzer")
-    
-    # Get current time
+    # Get current time in Singapore
     singapore_tz = pytz.timezone('Asia/Singapore')
     now_sg = datetime.now(singapore_tz)
     current_time_sg = now_sg.strftime("%Y-%m-%d %H:%M:%S")
-    st.write(f"Current time: {current_time_sg} (SGT)")
+    
+    # Page header
+    st.markdown("<h1 style='text-align: center; font-size:28px; margin-bottom: 10px;'>Enhanced Global Tier Analyzer</h1>", unsafe_allow_html=True)
+    st.markdown(f"<p style='text-align: center; font-size:14px; color:gray;'>Last updated: {current_time_sg} (SGT)</p>", unsafe_allow_html=True)
     
     # Try to get available pairs
     try:
         available_pairs = get_available_pairs()
     except:
-        available_pairs = ["BTC", "SOL", "ETH", "TRUMP"]
+        available_pairs = ["BTC/USDT", "SOL/USDT", "ETH/USDT", "DOGE/USDT", "XRP/USDT"]
     
     # Pair selection
     col1, col2 = st.columns([2, 1])
@@ -290,8 +426,27 @@ def main():
     with col2:
         run_analysis = st.button("ANALYZE NOW", use_container_width=True)
     
+    # Explanation of metrics
+    st.markdown("""
+    **Key Metrics:**
+    - **Efficiency Score:** Choppiness × Run Rate % (higher is better)
+    - **Run Rate:** Percentage of time tier has valid data (opposite of Dropout Rate)
+    - **Choppiness:** Measures price oscillation intensity (higher means more active)
+    - **Win Rate:** Percentage of profitable price movements across multiple timeframes
+    - **Direction Changes:** Frequency of price direction reversals (%)
+    - **Tick ATR %:** Average tick-to-tick price change percentage
+    """)
+    
     # Run analysis
     if run_analysis and selected_pair:
+        # Clear any cached data before new analysis
+        st.cache_data.clear()
+        
+        # Show analysis start time in Singapore timezone
+        analysis_start_time = datetime.now(singapore_tz).strftime("%Y-%m-%d %H:%M:%S")
+        st.markdown(f"<p style='text-align: center; font-size:14px; color:green;'>Analysis started at: {analysis_start_time} (SGT)</p>", unsafe_allow_html=True)
+        
+        # Create progress bar
         progress_bar = st.progress(0, text="Starting analysis...")
         
         # Run analysis
@@ -300,39 +455,71 @@ def main():
         if rankings is not None and not rankings.empty:
             # Show results
             st.header("Global Tier Rankings")
-            st.markdown("**Efficiency Formula:** Choppiness × (100% - Dropout Rate)")
+            st.markdown("**Efficiency Formula:** Choppiness × Run Rate %")
             
             # Format for display
             display_df = rankings.copy()
-            display_df['Exchange:Tier'] = display_df['exchange_tier']
             
-            # Rename columns
+            # Rename and select columns for display
             display_df = display_df.rename(columns={
+                'exchange_tier': 'Exchange:Tier',
                 'efficiency': 'Efficiency Score',
                 'choppiness': 'Choppiness',
                 'dropout_rate': 'Dropout Rate (%)',
+                'run_rate': 'Run Rate (%)',
+                'win_rate': 'Win Rate (%)',
+                'direction_changes': 'Direction Changes (%)',
+                'tick_atr_pct': 'Tick ATR %',
                 'valid_points': 'Valid Points'
             })
             
+            # Select columns for display
+            display_columns = [
+                'Exchange:Tier', 
+                'Efficiency Score', 
+                'Run Rate (%)',
+                'Choppiness', 
+                'Win Rate (%)',
+                'Direction Changes (%)',
+                'Tick ATR %',
+                'Valid Points'
+            ]
+            
+            # Filter to columns that exist
+            available_columns = [col for col in display_columns if col in display_df.columns]
+            display_df = display_df[available_columns]
+            
+            # Format numeric columns
+            for col in display_df.columns:
+                if col != 'Exchange:Tier':
+                    col_name = col.lower().replace(' ', '_').replace('(%)', '').replace(':', '_')
+                    display_df[col] = display_df[col].apply(lambda x: format_column(x, col_name))
+            
             # Show table
             st.dataframe(
-                display_df[['Exchange:Tier', 'Efficiency Score', 'Choppiness', 'Dropout Rate (%)', 'Valid Points']],
-                use_container_width=True
+                display_df,
+                use_container_width=True,
+                height=min(800, 100 + (len(display_df) * 35))  # Adaptive height
             )
             
             # Show top recommendations
             st.header("Recommended Tiers")
-            top_tiers = display_df.iloc[:3]
+            top_count = min(3, len(display_df))
+            top_tiers = display_df.iloc[:top_count]
             
-            st.markdown(f"""
-            **Primary Tier:** {top_tiers.iloc[0]['Exchange:Tier']}  
-            **Fallback Tier 1:** {top_tiers.iloc[1]['Exchange:Tier']}  
-            **Fallback Tier 2:** {top_tiers.iloc[2]['Exchange:Tier']}
-            """)
+            for i in range(top_count):
+                if i == 0:
+                    st.markdown(f"**Primary Tier:** {top_tiers.iloc[i]['Exchange:Tier']}")
+                else:
+                    st.markdown(f"**Fallback Tier {i}:** {top_tiers.iloc[i]['Exchange:Tier']}")
+            
+            # Display analysis completion time
+            analysis_end_time = datetime.now(singapore_tz).strftime("%Y-%m-%d %H:%M:%S")
+            st.markdown(f"<p style='text-align: center; font-size:14px; color:green;'>Analysis completed at: {analysis_end_time} (SGT)</p>", unsafe_allow_html=True)
         else:
-            st.error("No valid data found for analysis.")
+            st.error(f"No valid data found for {selected_pair}. Please try another pair.")
     else:
-        st.info("Select a pair and click ANALYZE NOW.")
+        st.info("Select a pair and click ANALYZE NOW to find the optimal exchange and depth tier combination.")
 
 if __name__ == "__main__":
     main()
