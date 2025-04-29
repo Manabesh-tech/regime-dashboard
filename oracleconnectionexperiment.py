@@ -1,31 +1,4 @@
-# Process tier columns definition before querying
-    # Define tier columns and mapping
-    tier_columns = [
-        'price_1', 'price_2', 'price_3', 'price_4', 'price_5',
-        'price_6', 'price_7', 'price_8', 'price_9', 'price_10',
-        'price_11', 'price_12', 'price_13', 'price_14', 'price_15'
-    ]
-    
-    tier_values = {
-        'price_1': '10k',
-        'price_2': '50k',
-        'price_3': '100k',
-        'price_4': '200k',
-        'price_5': '300k',
-        'price_6': '400k',
-        'price_7': '500k',
-        'price_8': '600k',
-        'price_9': '700k',
-        'price_10': '800k',
-        'price_11': '900k',
-        'price_12': '1M',
-        'price_13': '2M',
-        'price_14': '3M',
-        'price_15': '4M',
-    }
-    
-    # Join all tier columns for the query
-    price_columns = ", ".join(tier_columns)import streamlit as st
+import streamlit as st
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -163,30 +136,6 @@ def analyze_tiers(pair_name, progress_bar=None):
             if not session:
                 return None
 
-            # Get current date for table name
-            current_date = datetime.now().strftime("%Y%m%d")
-            table_name = f"oracle_exchange_price_partition_v1_{current_date}"
-            
-            # Check if today's table exists
-            table_exists_query = text(f"""
-                SELECT EXISTS (
-                    SELECT FROM information_schema.tables 
-                    WHERE table_schema = 'public' 
-                    AND table_name = :table_name
-                );
-            """)
-            
-            if not session.execute(table_exists_query, {"table_name": table_name}).scalar():
-                # Try yesterday if today doesn't exist
-                yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
-                table_name = f"oracle_exchange_price_partition_v1_{yesterday}"
-                
-                # Check if yesterday's table exists
-                if not session.execute(table_exists_query, {"table_name": table_name}).scalar():
-                    if progress_bar:
-                        progress_bar.progress(1.0, text="No data tables found")
-                    return None
-            
             # Define tier columns and mapping
             tier_columns = [
                 'price_1', 'price_2', 'price_3', 'price_4', 'price_5',
@@ -215,49 +164,85 @@ def analyze_tiers(pair_name, progress_bar=None):
             # Join all tier columns for the query
             price_columns = ", ".join(tier_columns)
             
-            if progress_bar:
-                progress_bar.progress(0.1, text="Fetching data...")
+            # Get Singapore time for proper date handling
+            singapore_tz = pytz.timezone('Asia/Singapore')
+            now_sg = datetime.now(singapore_tz)
             
-            # For 24 hours of data, fetch significantly more data points than 5000
-            # Calculate how many data points we need for 24 hours with overlapping windows
-            # If ticks are approximately 500ms apart, 24 hours = 172800 ticks
-            query = text(f"""
-                SELECT 
-                    source as exchange_name,
-                    created_at,
-                    {price_columns}
-                FROM 
-                    {table_name}
-                WHERE 
-                    pair_name = :pair_name
-                    AND created_at >= NOW() - INTERVAL '24 hours'
-                ORDER BY 
-                    created_at DESC
-                LIMIT 180000
-            """)
+            # Get current date in Singapore time
+            current_date_sg = now_sg.strftime("%Y%m%d")
+            
+            # Add 2 days prior for data collection
+            dates_to_check = []
+            for i in range(3):  # Today, yesterday, day before
+                check_date = (now_sg - timedelta(days=i)).strftime("%Y%m%d")
+                dates_to_check.append(check_date)
             
             if progress_bar:
-                progress_bar.progress(0.2, text="Fetching 24 hours of data...")
+                progress_bar.progress(0.1, text=f"Checking tables for dates: {', '.join(dates_to_check)}")
+            
+            # Check which tables exist and collect data from all of them
+            all_data = []
+            
+            for date in dates_to_check:
+                table_name = f"oracle_exchange_price_partition_v1_{date}"
                 
-            result = session.execute(query, {"pair_name": pair_name})
-            all_data = result.fetchall()
+                # Check if table exists
+                table_exists_query = text(f"""
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.tables 
+                        WHERE table_schema = 'public' 
+                        AND table_name = :table_name
+                    );
+                """)
+                
+                if not session.execute(table_exists_query, {"table_name": table_name}).scalar():
+                    if progress_bar:
+                        progress_bar.progress(0.1, text=f"Table {table_name} does not exist, trying next date...")
+                    continue
+                
+                # Query to fetch data from this table - fetch all data from the table
+                if progress_bar:
+                    progress_bar.progress(0.1, text=f"Fetching data from {table_name}...")
+                
+                query = text(f"""
+                    SELECT 
+                        source as exchange_name,
+                        created_at,
+                        {price_columns}
+                    FROM 
+                        {table_name}
+                    WHERE 
+                        pair_name = :pair_name
+                    ORDER BY 
+                        created_at DESC
+                """)
+                
+                result = session.execute(query, {"pair_name": pair_name})
+                table_data = result.fetchall()
+                
+                if table_data:
+                    all_data.extend(table_data)
+                    if progress_bar:
+                        progress_bar.progress(0.2, text=f"Found {len(table_data)} rows in {table_name}")
+                        
+                # Stop if we have enough data
+                if len(all_data) >= 50000:  # This should be enough for multiple 5000-tick windows
+                    break
             
             if not all_data:
                 if progress_bar:
                     progress_bar.progress(1.0, text=f"No data found for {pair_name}")
                 return None
                 
-            if len(all_data) < 5000:
-                if progress_bar:
-                    progress_bar.progress(1.0, text=f"Insufficient data for {pair_name}: found {len(all_data)} rows, need at least 5000")
-                return None
-            
             if progress_bar:
                 progress_bar.progress(0.3, text=f"Processing {len(all_data)} data points...")
             
             # Create DataFrame
             columns = ['exchange_name', 'created_at'] + tier_columns
             df = pd.DataFrame(all_data, columns=columns)
+            
+            # Sort by timestamp to ensure proper order
+            df.sort_values('created_at', ascending=False, inplace=True)
             
             # Convert numeric columns
             for col in tier_columns:
@@ -269,21 +254,27 @@ def analyze_tiers(pair_name, progress_bar=None):
             if progress_bar:
                 progress_bar.progress(0.4, text=f"Found {len(exchanges)} exchanges")
             
-            # Calculate how many 5000-tick windows we can create with our data
-            # Use a step size to create approximately 30-40 windows in the 24-hour period
-            total_points = len(df)
+            # Non-overlapping 5000-tick windows
             window_size = 5000
+            total_points = len(df)
+            num_windows = total_points // window_size
             
-            # Calculate step size to get around 30-40 windows
-            target_windows = 35  # Aim for the middle of 30-40
-            step_size = max(1, (total_points - window_size) // (target_windows - 1))
+            # Lower the minimum window size requirement if needed
+            if num_windows < 5 and total_points >= 2500:
+                # If we don't have enough 5000-tick windows but have sufficient data,
+                # try using a smaller window size
+                window_size = 2500
+                num_windows = total_points // window_size
+                if progress_bar:
+                    progress_bar.progress(0.5, text=f"Using smaller window size ({window_size}). Created {num_windows} windows.")
             
-            # Calculate actual number of windows
-            num_windows = 1 + (total_points - window_size) // step_size
-            num_windows = min(num_windows, 40)  # Cap at 40 windows
-            
+            if num_windows == 0:
+                if progress_bar:
+                    progress_bar.progress(1.0, text=f"Insufficient data: found {total_points} points, need at least {window_size}")
+                return None
+                
             if progress_bar:
-                progress_bar.progress(0.5, text=f"Creating {num_windows} analysis windows...")
+                progress_bar.progress(0.5, text=f"Creating {num_windows} non-overlapping windows...")
                 
             # Initialize variables to track tier performance
             win_counts = {}  # To count how many times each tier wins
