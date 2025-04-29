@@ -502,7 +502,7 @@ with tab3:
             vol_text = format_value(vol_val, 'volatility') if not pd.isna(vol_val) else '-'
             hover_texts.append(f"Edge: {edge_text}<br>Vol: {vol_text}")
         
-        # Add invisible trace for hover
+        # Add invisible trace for hover (corrected)
         fig.add_trace(go.Scatter(
             x=ordered_times,
             y=[0] * len(ordered_times),
@@ -510,9 +510,8 @@ with tab3:
             marker=dict(size=0, color='rgba(0,0,0,0)'),
             hoverinfo='text',
             text=hover_texts,
-            hovertemplate='<b>%{y}</b><br>Time: %{x}<br>%{text}<extra></extra>',
-            showlegend=False,
-            yaxis=f"y{len(fig.data)-1}"
+            hovertemplate=f'<b>{pair}</b><br>Time: %{{x}}<br>%{{text}}<extra></extra>',
+            showlegend=False
         ))
     
     # Layout
