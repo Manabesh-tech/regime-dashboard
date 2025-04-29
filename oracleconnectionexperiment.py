@@ -7,7 +7,6 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from contextlib import contextmanager
 import time
-import altair as alt
 import threading
 
 # Clear cache at startup to ensure fresh data
@@ -15,7 +14,7 @@ st.cache_data.clear()
 
 # Page configuration
 st.set_page_config(
-    page_title="Cross-Exchange Depth Tier Analyzer",
+    page_title="Exchange Analyzer",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -84,13 +83,6 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
-
-# Database configuration
-DB_CONFIG = {
-    'report_dev': {
-        'url': "postgresql://[DB_USERNAME]:[DB_PASSWORD]@[DB_HOST]:5432/report_dev"
-    }
-}
 
 # Create database engine
 @st.cache_resource
@@ -172,272 +164,208 @@ def get_available_pairs():
         st.error(f"Error fetching available pairs: {e}")
         return default_pairs  # Return default pairs on error
 
-# Get available exchanges from the database
-@st.cache_data(ttl=300)  # Cache for 5 minutes
-def get_available_exchanges():
-    """Fetch available exchanges from the database
-    Returns:
-        list: List of available exchanges
-    """
-    try:
-        with get_session() as session:
-            if not session:
-                return []
-
-            # Query the oracle_exchange_price table to get unique exchanges
-            query = text("""
-                SELECT DISTINCT exchange_name 
-                FROM uat_oracle_exchange_price_partition_v1_20250429
-                WHERE created_at >= NOW() - INTERVAL '24 hours'
-                ORDER BY exchange_name
-            """)
-            
-            result = session.execute(query)
-            exchanges = [row[0] for row in result]
-            return exchanges if exchanges else []
-
-    except Exception as e:
-        st.error(f"Error fetching available exchanges: {e}")
-        return []
-
-# Class to handle cross-exchange depth tier analysis
-class CrossExchangeAnalyzer:
-    """Analyzer for depth tiers across multiple exchanges"""
+# Class to handle exchange analysis
+class ExchangeAnalyzer:
+    """Analyzer for exchanges"""
     
     def __init__(self):
         # Fixed point count (5000 points as requested)
         self.point_count = 5000
         
-        # Map depth tiers to their nominal values
-        self.depth_tier_values = {
-            '1k': 1000,
-            '3k': 3000,
-            '5k': 5000,
-            '7k': 7000,
-            '10k': 10000,
-            '50k': 50000,
-            '100k': 100000,
-            '200k': 200000,
-            '300k': 300000,
-            '400k': 400000,
-            '500k': 500000,
-            '600k': 600000,
-            '700k': 700000,
-            '800k': 800000,
-            '900k': 900000,
-            '1000k': 1000000,
-            '2000k': 2000000,
-            '3000k': 3000000,
-            '4000k': 4000000,
-            '5000k': 5000000,
-            '6000k': 6000000,
-            '7000k': 7000000,
-            '8000k': 8000000,
-            '9000k': 9000000,
-            '10000k': 10000000,
-        }
-        
-        # Reverse mapping for easier lookup
-        self.nominal_to_tier = {v: k for k, v in self.depth_tier_values.items()}
-        
         # Store analysis results
         self.results = None
         self.analysis_time_range = None
         self.last_updated = None
-        
+    
     def fetch_and_analyze(self, pair_name, hours=24, progress_bar=None):
-    """Fetch data and analyze depth tiers across all exchanges
-    
-    Args:
-        pair_name: Cryptocurrency pair to analyze
-        hours: Hours of data to look back (default 24 hours)
-        progress_bar: Optional progress bar to update
-    
-    Returns:
-        bool: Success status
-    """
-    try:
-        with get_session() as session:
-            if not session:
-                return False
+        """Fetch data and analyze exchanges
+        
+        Args:
+            pair_name: Cryptocurrency pair to analyze
+            hours: Hours of data to look back (default 24 hours)
+            progress_bar: Optional progress bar to update
+        
+        Returns:
+            bool: Success status
+        """
+        try:
+            with get_session() as session:
+                if not session:
+                    return False
 
-            # Calculate time range
-            singapore_tz = pytz.timezone('Asia/Singapore')
-            now = datetime.now(singapore_tz)
-            start_time = now - timedelta(hours=hours)
+                # Calculate time range
+                singapore_tz = pytz.timezone('Asia/Singapore')
+                now = datetime.now(singapore_tz)
+                start_time = now - timedelta(hours=hours)
 
-            # Format for display
-            start_str_display = start_time.strftime("%Y-%m-%d %H:%M:%S")
-            end_str_display = now.strftime("%Y-%m-%d %H:%M:%S")
+                # Format for display
+                start_str_display = start_time.strftime("%Y-%m-%d %H:%M:%S")
+                end_str_display = now.strftime("%Y-%m-%d %H:%M:%S")
 
-            # Store time range for display
-            self.analysis_time_range = {
-                'start': start_str_display,
-                'end': end_str_display,
-                'timezone': 'SGT'
-            }
-            
-            # Store last updated time
-            self.last_updated = now.strftime("%Y-%m-%d %H:%M:%S")
-
-            # Format for database query (without timezone)
-            start_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
-
-            if progress_bar:
-                progress_bar.progress(0.05, text=f"Fetching data from {start_str_display} to {end_str_display} (SGT)")
-
-            # Query to fetch data from all exchanges for this pair
-            query = text("""
-                SELECT 
-                    source as exchange_name,
-                    pair_name,
-                    price_1,
-                    created_at,
-                    TO_CHAR(created_at + INTERVAL '8 hour', 'YYYY-MM-DD HH24:MI:SS.MS') AS timestamp_sgt,
-                    all_bid,
-                    all_ask
-                FROM 
-                    oracle_exchange_price_partition_v1_20250429
-                WHERE 
-                    pair_name = :pair_name
-                    AND created_at >= :start_time
-                ORDER BY 
-                    created_at DESC
-            """)
-            
-            # Execute query with parameters
-            if progress_bar:
-                progress_bar.progress(0.1, text="Executing database query...")
-            
-            result = session.execute(
-                query,
-                {
-                    "pair_name": pair_name,
-                    "start_time": start_str
+                # Store time range for display
+                self.analysis_time_range = {
+                    'start': start_str_display,
+                    'end': end_str_display,
+                    'timezone': 'SGT'
                 }
-            )
-            
-            # Convert to DataFrame
-            all_data = result.fetchall()
-            
-            if not all_data:
+                
+                # Store last updated time
+                self.last_updated = now.strftime("%Y-%m-%d %H:%M:%S")
+
+                # Format for database query (without timezone)
+                start_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
+
                 if progress_bar:
-                    progress_bar.progress(1.0, text="No data found for the specified pair")
-                return False
-            
-            if progress_bar:
-                progress_bar.progress(0.2, text=f"Processing {len(all_data)} data points...")
-            
-            # Create DataFrame from the query results
-            columns = ['exchange_name', 'pair_name', 'price', 'created_at', 'timestamp_sgt', 'all_bid', 'all_ask']
-            df = pd.DataFrame(all_data, columns=columns)
-            
-            # Convert columns to appropriate types
-            df['price'] = pd.to_numeric(df['price'], errors='coerce')
-            df['all_bid'] = pd.to_numeric(df['all_bid'], errors='coerce')
-            df['all_ask'] = pd.to_numeric(df['all_ask'], errors='coerce')
-            
-            # Get unique exchanges
-            exchanges = df['exchange_name'].unique()
-            
-            if progress_bar:
-                progress_bar.progress(0.3, text=f"Analyzing {len(exchanges)} exchanges...")
-            
-            # Process data for each exchange and tier
-            results = []
-            
-            # Track global choppiness winners for win rate calculation
-            choppiness_winners = []
-            
-            # First pass: Calculate choppiness for each exchange and depth
-            for exchange in exchanges:
-                exchange_df = df[df['exchange_name'] == exchange].copy()
+                    progress_bar.progress(0.05, text=f"Fetching data from {start_str_display} to {end_str_display} (SGT)")
+
+                # Query to fetch data from all exchanges for this pair
+                query = text("""
+                    SELECT 
+                        source as exchange_name,
+                        pair_name,
+                        price_1 as price,
+                        created_at,
+                        TO_CHAR(created_at + INTERVAL '8 hour', 'YYYY-MM-DD HH24:MI:SS.MS') AS timestamp_sgt,
+                        all_bid,
+                        all_ask
+                    FROM 
+                        oracle_exchange_price_partition_v1_20250429
+                    WHERE 
+                        pair_name = :pair_name
+                        AND created_at >= :start_time
+                    ORDER BY 
+                        created_at DESC
+                """)
                 
-                # Skip if insufficient data
-                if len(exchange_df) < self.point_count * 0.6:
-                    continue
-                    
-                # Calculate metrics for this exchange
-                metrics = self._calculate_metrics(exchange_df, 'price', self.point_count)
-                
-                if not metrics:
-                    continue
-                    
-                # Store results with exchange info
-                metrics['exchange'] = exchange
-                metrics['tier'] = exchange  # Use exchange as tier for simplicity
-                metrics['data_points'] = len(exchange_df)
-                
-                # Calculate win rate separately in second pass
-                metrics['win_rate'] = 0
-                
-                # Calculate total liquidity
-                metrics['total_liquidity'] = metrics.get('avg_liquidity', 0)
-                
-                # Store choppiness for determining winners
-                choppiness_winners.append({
-                    'exchange': exchange,
-                    'choppiness': metrics['choppiness']
-                })
-                
-                # Add to results
-                results.append(metrics)
-            
-            if not results:
+                # Execute query with parameters
                 if progress_bar:
-                    progress_bar.progress(1.0, text="Insufficient data for analysis")
-                return False
-            
-            # Sort choppiness winners by choppiness (highest first)
-            choppiness_winners = sorted(choppiness_winners, key=lambda x: x['choppiness'], reverse=True)
-            
-            if progress_bar:
-                progress_bar.progress(0.5, text="Calculating win rates and efficiency scores...")
-            
-            # Create a map for quick lookup of exchange
-            metrics_map = {m['exchange']: m for m in results}
-            
-            # Assign win rate based on choppiness ranking
-            total_exchanges = len(choppiness_winners)
-            for i, winner in enumerate(choppiness_winners):
-                # Calculate win rate (100% for top tier, decreasing for others)
-                win_rate = 100.0 - (i / total_exchanges * 100.0)
+                    progress_bar.progress(0.1, text="Executing database query...")
                 
-                # Update the metrics
-                exchange = winner['exchange']
-                if exchange in metrics_map:
-                    metrics_map[exchange]['win_rate'] = win_rate
-            
-            # Calculate efficiency scores
-            for metrics in results:
-                # Ensure minimum dropout rate to avoid division by zero
-                dropout_rate = max(0.1, metrics['dropout_rate'])
+                result = session.execute(
+                    query,
+                    {
+                        "pair_name": pair_name,
+                        "start_time": start_str
+                    }
+                )
                 
-                # Calculate efficiency as win_rate / dropout_rate
-                metrics['efficiency'] = metrics['win_rate'] / dropout_rate
-            
-            # Convert results to DataFrame and sort by efficiency
-            results_df = pd.DataFrame(results)
-            results_df = results_df.sort_values('efficiency', ascending=False)
-            
-            # Store results
-            self.results = results_df
-            
+                # Convert to DataFrame
+                all_data = result.fetchall()
+                
+                if not all_data:
+                    if progress_bar:
+                        progress_bar.progress(1.0, text="No data found for the specified pair")
+                    return False
+                
+                if progress_bar:
+                    progress_bar.progress(0.2, text=f"Processing {len(all_data)} data points...")
+                
+                # Create DataFrame from the query results
+                columns = ['exchange_name', 'pair_name', 'price', 'created_at', 'timestamp_sgt', 'all_bid', 'all_ask']
+                df = pd.DataFrame(all_data, columns=columns)
+                
+                # Convert columns to appropriate types
+                df['price'] = pd.to_numeric(df['price'], errors='coerce')
+                df['all_bid'] = pd.to_numeric(df['all_bid'], errors='coerce')
+                df['all_ask'] = pd.to_numeric(df['all_ask'], errors='coerce')
+                
+                # Get unique exchanges
+                exchanges = df['exchange_name'].unique()
+                
+                if progress_bar:
+                    progress_bar.progress(0.3, text=f"Analyzing {len(exchanges)} exchanges...")
+                
+                # Process data for each exchange
+                results = []
+                
+                # Track global choppiness winners for win rate calculation
+                choppiness_winners = []
+                
+                # First pass: Calculate choppiness for each exchange
+                for exchange in exchanges:
+                    exchange_df = df[df['exchange_name'] == exchange].copy()
+                    
+                    # Skip if insufficient data
+                    if len(exchange_df) < self.point_count * 0.6:
+                        continue
+                        
+                    # Calculate metrics for this exchange
+                    metrics = self._calculate_metrics(exchange_df, 'price', self.point_count)
+                    
+                    if not metrics:
+                        continue
+                        
+                    # Store results with exchange info
+                    metrics['exchange'] = exchange
+                    metrics['data_points'] = len(exchange_df)
+                    
+                    # Calculate win rate separately in second pass
+                    metrics['win_rate'] = 0
+                    
+                    # Store choppiness for determining winners
+                    choppiness_winners.append({
+                        'exchange': exchange,
+                        'choppiness': metrics['choppiness']
+                    })
+                    
+                    # Add to results
+                    results.append(metrics)
+                
+                if not results:
+                    if progress_bar:
+                        progress_bar.progress(1.0, text="Insufficient data for analysis")
+                    return False
+                
+                # Sort choppiness winners by choppiness (highest first)
+                choppiness_winners = sorted(choppiness_winners, key=lambda x: x['choppiness'], reverse=True)
+                
+                if progress_bar:
+                    progress_bar.progress(0.5, text="Calculating win rates and efficiency scores...")
+                
+                # Create a map for quick lookup of exchange
+                metrics_map = {m['exchange']: m for m in results}
+                
+                # Assign win rate based on choppiness ranking
+                total_exchanges = len(choppiness_winners)
+                for i, winner in enumerate(choppiness_winners):
+                    # Calculate win rate (100% for top tier, decreasing for others)
+                    win_rate = 100.0 - (i / total_exchanges * 100.0)
+                    
+                    # Update the metrics
+                    exchange = winner['exchange']
+                    if exchange in metrics_map:
+                        metrics_map[exchange]['win_rate'] = win_rate
+                
+                # Calculate efficiency scores
+                for metrics in results:
+                    # Ensure minimum dropout rate to avoid division by zero
+                    dropout_rate = max(0.1, metrics['dropout_rate'])
+                    
+                    # Calculate efficiency as win_rate / dropout_rate
+                    metrics['efficiency'] = metrics['win_rate'] / dropout_rate
+                
+                # Convert results to DataFrame and sort by efficiency
+                results_df = pd.DataFrame(results)
+                results_df = results_df.sort_values('efficiency', ascending=False)
+                
+                # Store results
+                self.results = results_df
+                
+                if progress_bar:
+                    progress_bar.progress(1.0, text="Analysis complete!")
+                
+                return True
+                
+        except Exception as e:
             if progress_bar:
-                progress_bar.progress(1.0, text="Analysis complete!")
+                progress_bar.progress(1.0, text=f"Error: {str(e)}")
+            st.error(f"Error in analysis: {e}")
+            import traceback
+            st.error(traceback.format_exc())
+            return False
             
-            return True
-            
-    except Exception as e:
-        if progress_bar:
-            progress_bar.progress(1.0, text=f"Error: {str(e)}")
-        st.error(f"Error in analysis: {e}")
-        import traceback
-        st.error(traceback.format_exc())
-        return False
-    
     def _calculate_metrics(self, df, price_col, point_count):
-        """Calculate metrics for a specific exchange and tier
+        """Calculate metrics for a specific exchange
         
         Args:
             df: DataFrame with price data
@@ -493,22 +421,33 @@ class CrossExchangeAnalyzer:
             tick_atr = price_changes.abs().mean()
             tick_atr_pct = (tick_atr / mean_price) * 100
             
+            # Get total bid/ask for liquidity data if available
+            avg_bid = df['all_bid'].mean() if 'all_bid' in df.columns else None
+            avg_ask = df['all_ask'].mean() if 'all_ask' in df.columns else None
+            
+            # Use min of bid/ask as total liquidity
+            if avg_bid is not None and avg_ask is not None:
+                avg_liquidity = min(avg_bid, avg_ask)
+            else:
+                avg_liquidity = None
+            
             return {
                 'choppiness': choppiness,
                 'dropout_rate': dropout_rate,
                 'direction_change_pct': direction_change_pct,
-                'tick_atr_pct': tick_atr_pct
+                'tick_atr_pct': tick_atr_pct,
+                'avg_liquidity': avg_liquidity
             }
             
         except Exception as e:
             print(f"Error calculating metrics: {e}")
             return None
-    
-    def get_global_rankings(self):
-        """Get global rankings of all exchange-tier combinations
+            
+    def get_rankings(self):
+        """Get rankings of all exchanges
         
         Returns:
-            DataFrame: Ranked tiers across all exchanges
+            DataFrame: Ranked exchanges
         """
         if self.results is None:
             return None
@@ -516,19 +455,16 @@ class CrossExchangeAnalyzer:
         # Create display DataFrame with relevant columns
         display_df = self.results.copy()
         
-        # Create combined exchange:tier column
-        display_df['exchange_tier'] = display_df.apply(
-            lambda row: f"{row['exchange']}:{row['tier']}", axis=1
-        )
-        
         # Select columns for display
         columns = [
-            'exchange_tier', 'exchange', 'tier', 'depth', 'efficiency', 
-            'win_rate', 'dropout_rate', 'choppiness', 'direction_change_pct', 
-            'tick_atr_pct', 'data_points'
+            'exchange', 'efficiency', 'win_rate', 'dropout_rate', 
+            'choppiness', 'direction_change_pct', 'tick_atr_pct', 
+            'data_points', 'avg_liquidity'
         ]
         
-        display_df = display_df[columns]
+        # Filter to columns that exist in the dataframe
+        available_columns = [col for col in columns if col in display_df.columns]
+        display_df = display_df[available_columns]
         
         # Sort by efficiency (descending)
         display_df = display_df.sort_values('efficiency', ascending=False)
@@ -604,7 +540,7 @@ def format_number(num):
 
 # Display rankings table
 def display_rankings_table(df):
-    """Display the global rankings table
+    """Display the exchange rankings table
     
     Args:
         df: DataFrame with ranking data
@@ -616,18 +552,14 @@ def display_rankings_table(df):
     # Make a copy for display formatting
     display_df = df.copy()
     
-    # Format exchange_tier with styled HTML tags
-    def format_exchange_tier(row):
-        exchange = row['exchange']
-        tier = row['tier']
-        
+    # Format exchange with styled HTML tags
+    def format_exchange(exchange):
         # Map exchange to CSS class
         exchange_class = f"exchange-{exchange.lower()}"
-        
-        return f"""<span class="exchange-tag {exchange_class}">{exchange}</span> {tier}"""
+        return f"""<span class="exchange-tag {exchange_class}">{exchange}</span>"""
     
-    # Create styled exchange_tier column for display
-    display_df['Exchange:Tier'] = display_df.apply(format_exchange_tier, axis=1)
+    # Create styled exchange column for display
+    display_df['Exchange'] = display_df['exchange'].apply(format_exchange)
     
     # Rename and format columns
     display_df = display_df.rename(columns={
@@ -637,71 +569,73 @@ def display_rankings_table(df):
         'choppiness': 'Choppiness',
         'direction_change_pct': 'Direction Changes (%)',
         'tick_atr_pct': 'Tick ATR (%)',
-        'tier': 'Tier',
-        'exchange': 'Exchange',
-        'depth': 'Depth',
+        'avg_liquidity': 'Avg Liquidity',
         'data_points': 'Data Points'
     })
     
     # Format numeric columns
     for col in display_df.columns:
-        if col in ['Win Rate (%)', 'Dropout Rate (%)', 'Direction Changes (%)']:
-            display_df[col] = display_df[col].apply(
-                lambda x: f"{x:.1f}%" if not pd.isna(x) else "N/A"
-            )
-        elif col == 'Tick ATR (%)':
-            display_df[col] = display_df[col].apply(
-                lambda x: f"{x:.4f}" if not pd.isna(x) else "N/A"
-            )
-        elif col == 'Efficiency Score':
-            display_df[col] = display_df[col].apply(
-                lambda x: f"{x:.2f}" if not pd.isna(x) else "N/A"
-            )
-        elif col == 'Choppiness':
-            display_df[col] = display_df[col].apply(
-                lambda x: f"{x:.1f}" if not pd.isna(x) else "N/A"
-            )
-        elif col == 'Depth':
-            display_df[col] = display_df[col].apply(
-                lambda x: f"{int(x):,}" if not pd.isna(x) else "N/A"
-            )
+        if col not in ['Exchange', 'exchange']:
+            if col in ['Win Rate (%)', 'Dropout Rate (%)', 'Direction Changes (%)']:
+                display_df[col] = display_df[col].apply(
+                    lambda x: f"{x:.1f}%" if not pd.isna(x) else "N/A"
+                )
+            elif col == 'Tick ATR (%)':
+                display_df[col] = display_df[col].apply(
+                    lambda x: f"{x:.4f}" if not pd.isna(x) else "N/A"
+                )
+            elif col == 'Efficiency Score':
+                display_df[col] = display_df[col].apply(
+                    lambda x: f"{x:.2f}" if not pd.isna(x) else "N/A"
+                )
+            elif col == 'Choppiness':
+                display_df[col] = display_df[col].apply(
+                    lambda x: f"{x:.1f}" if not pd.isna(x) else "N/A"
+                )
+            elif col == 'Avg Liquidity':
+                display_df[col] = display_df[col].apply(
+                    lambda x: f"{int(x):,}" if not pd.isna(x) and x is not None else "N/A"
+                )
     
     # Select columns for display
     display_columns = [
-        'Exchange:Tier', 'Efficiency Score', 'Win Rate (%)', 
-        'Dropout Rate (%)', 'Choppiness', 'Depth'
+        'Exchange', 'Efficiency Score', 'Win Rate (%)', 
+        'Dropout Rate (%)', 'Choppiness', 'Avg Liquidity'
     ]
     
+    # Filter to columns that exist
+    available_display_columns = [col for col in display_columns if col in display_df.columns]
+    
     # Show the table with all needed context
-    st.markdown("### Global Tier Rankings Across All Exchanges")
+    st.markdown("### Exchange Rankings")
     st.markdown("""
     <div style="background-color: #f0f2f6; padding: 8px; border-radius: 5px; margin-bottom: 15px;">
         <p style="margin: 3px 0;"><strong>Efficiency Score</strong> = Win Rate (%) / Dropout Rate (%)</p>
-        <p style="margin: 3px 0;"><strong>Win Rate</strong>: Based on relative choppiness ranking (100% for top tier)</p>
+        <p style="margin: 3px 0;"><strong>Win Rate</strong>: Based on relative choppiness ranking (100% for top exchange)</p>
         <p style="margin: 3px 0;"><strong>Dropout Rate</strong>: Percentage of missing or zero values in the feed</p>
     </div>
     """, unsafe_allow_html=True)
     
     st.dataframe(
-        display_df[display_columns],
+        display_df[available_display_columns],
         use_container_width=True,
         height=min(800, 100 + (len(display_df) * 35))
     )
     
     # Show fallback recommendations
     if len(display_df) >= 3:
-        st.markdown("### Recommended Tier Fallback Strategy")
+        st.markdown("### Recommended Exchange Fallback Strategy")
         
-        # Get top 3 tiers
-        top_tiers = display_df.iloc[:3]
+        # Get top 3 exchanges
+        top_exchanges = display_df.iloc[:3]
         
         # Display recommendation
         st.markdown(f"""
         <div style="background-color: #e6f7ff; padding: 10px; border-radius: 5px; margin-bottom: 15px;">
-            <h4 style="margin: 0;">Cross-Exchange Tier Strategy:</h4>
-            <p style="margin: 5px 0;"><strong>Primary Tier:</strong> {top_tiers.iloc[0]['Exchange:Tier']}</p>
-            <p style="margin: 5px 0;"><strong>Fallback Tier 1:</strong> {top_tiers.iloc[1]['Exchange:Tier']}</p>
-            <p style="margin: 5px 0;"><strong>Fallback Tier 2:</strong> {top_tiers.iloc[2]['Exchange:Tier']}</p>
+            <h4 style="margin: 0;">Cross-Exchange Strategy:</h4>
+            <p style="margin: 5px 0;"><strong>Primary Exchange:</strong> {top_exchanges.iloc[0]['Exchange']}</p>
+            <p style="margin: 5px 0;"><strong>Fallback Exchange 1:</strong> {top_exchanges.iloc[1]['Exchange']}</p>
+            <p style="margin: 5px 0;"><strong>Fallback Exchange 2:</strong> {top_exchanges.iloc[2]['Exchange']}</p>
         </div>
         """, unsafe_allow_html=True)
         
@@ -710,9 +644,9 @@ def display_rankings_table(df):
         
         For real-time implementation, use this approach:
         
-        1. **Multi-Exchange Monitoring**: Subscribe to all three tiers across the different exchanges
-        2. **Zero-Tolerance Fallback**: If primary tier returns zero/missing value, IMMEDIATELY use data from fallback tier 1
-        3. **Global Ranking**: The recommended tiers are ranked across ALL exchanges based on efficiency
+        1. **Multi-Exchange Monitoring**: Subscribe to all three exchanges simultaneously
+        2. **Zero-Tolerance Fallback**: If primary exchange returns zero/missing value, IMMEDIATELY use data from fallback exchange 1
+        3. **Global Ranking**: The recommended exchanges are ranked based on efficiency
         4. **Auto-Update**: This analysis refreshes every 10 minutes to adapt to changing market conditions
         """)
 
@@ -724,7 +658,7 @@ def main():
 
     # Initialize session state for tracking auto-refresh
     if 'analyzer' not in st.session_state:
-        st.session_state.analyzer = CrossExchangeAnalyzer()
+        st.session_state.analyzer = ExchangeAnalyzer()
     
     if 'last_refresh' not in st.session_state:
         st.session_state.last_refresh = None
@@ -739,7 +673,7 @@ def main():
         st.session_state.auto_refresh_enabled = False
 
     # Main layout
-    st.markdown("<h1 style='text-align: center; font-size:28px; margin-bottom: 10px;'>Cross-Exchange Depth Tier Analyzer</h1>", unsafe_allow_html=True)
+    st.markdown("<h1 style='text-align: center; font-size:28px; margin-bottom: 10px;'>Exchange Efficiency Analyzer</h1>", unsafe_allow_html=True)
 
     # Display current time
     st.markdown(f"<p style='text-align: center; font-size:14px; color:gray;'>Current time: {current_time_sg} (SGT)</p>", unsafe_allow_html=True)
@@ -821,8 +755,8 @@ def main():
                 </div>
                 """, unsafe_allow_html=True)
 
-            # Get and display global rankings
-            rankings = st.session_state.analyzer.get_global_rankings()
+            # Get and display rankings
+            rankings = st.session_state.analyzer.get_rankings()
             display_rankings_table(rankings)
 
             # Show analysis completion time
@@ -840,20 +774,20 @@ def main():
 
     else:
         # Welcome message
-        st.info("Select a pair and click ANALYZE NOW to find the optimal depth tier with cross-exchange efficiency ranking.")
+        st.info("Select a pair and click ANALYZE NOW to find the optimal exchange with efficiency ranking.")
         
         # Instructions
         st.markdown("""
         ### About This Tool
         
-        This analyzer helps you find the best depth tier across all exchanges by:
+        This analyzer helps you find the best exchange by:
         
-        1. **Global Ranking**: Ranks all tiers from all exchanges in a single list
-        2. **Efficiency Score**: Calculates Win Rate / Dropout Rate for optimal tier selection
-        3. **Fallback Strategy**: Recommends primary and fallback tiers for robust implementation
+        1. **Global Ranking**: Ranks all exchanges in a single list
+        2. **Efficiency Score**: Calculates Win Rate / Dropout Rate for optimal selection
+        3. **Fallback Strategy**: Recommends primary and fallback exchanges
         4. **Auto-Refresh**: Updates analysis every 10 minutes when enabled
         
-        **Note**: Data is fetched from the `uat_oracle_exchange_price_partition_v1_20250429` table with a 24-hour lookback period.
+        **Note**: Data is fetched from the `oracle_exchange_price_partition_v1_20250429` table with a 24-hour lookback period.
         """)
 
 if __name__ == "__main__":
