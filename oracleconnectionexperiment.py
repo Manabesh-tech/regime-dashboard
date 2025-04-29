@@ -326,6 +326,12 @@ def analyze_tiers(pair_name, progress_bar=None):
                     # 6. Calculate efficiency score: win_rate * (100-dropout_rate)/100
                     efficiency = (avg_win_rate * run_rate) / 100
                     
+                    # Round to 1 decimal place to avoid excessive decimals
+                    avg_win_rate = round(avg_win_rate, 1)
+                    dropout_rate = round(dropout_rate, 1)
+                    efficiency = round(efficiency, 1)
+                    choppiness = round(choppiness, 1)
+                    
                     # Store result
                     results.append({
                         'exchange': exchange,
@@ -482,7 +488,8 @@ def main():
             st.dataframe(
                 display_df,
                 use_container_width=True,
-                height=min(800, 100 + (len(display_df) * 35))  # Adaptive height
+                height=min(800, 100 + (len(display_df) * 35)),  # Adaptive height
+                hide_index=True  # Hide the index column
             )
             
             # Show top recommendations
