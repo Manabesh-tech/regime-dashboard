@@ -488,6 +488,12 @@ def analyze_tiers(pair_name, progress_bar=None):
                 win_rate = (win_counts.get(exchange_tier_key, 0) / total_wins) * 100
                 win_rate = round(win_rate, 1)
                 
+                # Calculate validity rate (valid ticks / theoretical maximum)
+                valid_points = exchange_tier_valid_points.get(exchange_tier_key, 0)
+                theoretical_maximum = 172800  # 24 hours * 3600 seconds * 2 ticks per second (500ms)
+                validity_rate = (valid_points / theoretical_maximum) * 100
+                validity_rate = round(validity_rate, 1)
+                
                 # Calculate average choppiness across all windows
                 choppiness_values = exchange_tier_choppiness.get(exchange_tier_key, [0])
                 
@@ -496,16 +502,16 @@ def analyze_tiers(pair_name, progress_bar=None):
                 current_choppiness = round(current_choppiness, 1)
                 
                 # Calculate average choppiness across all windows from the past 24 hours
-                avg_choppiness = sum(choppiness_values) / len(choppiness_values)
+                avg_choppiness = sum(choppiness_values) / len(choppiness_values) if choppiness_values else 0
                 avg_choppiness = round(avg_choppiness, 1)
                 
                 # Calculate average dropout rate across all windows
                 dropout_values = exchange_tier_dropout.get(exchange_tier_key, [100])
-                avg_dropout = sum(dropout_values) / len(dropout_values)
+                avg_dropout = sum(dropout_values) / len(dropout_values) if dropout_values else 100
                 avg_dropout = round(avg_dropout, 1)
                 
-                # Calculate efficiency score
-                efficiency = (win_rate * (100 - avg_dropout)) / 100
+                # Calculate efficiency score (win rate * validity rate)
+                efficiency = (win_rate * validity_rate) / 100
                 efficiency = round(efficiency, 1)
                 
                 # Get valid points
@@ -523,6 +529,7 @@ def analyze_tiers(pair_name, progress_bar=None):
                     'avg_choppiness': avg_choppiness,
                     'dropout_rate': avg_dropout,
                     'win_rate': win_rate,
+                    'validity_rate': validity_rate,
                     'efficiency': efficiency,
                     'valid_points': valid_points,
                     'rank': 0  # Will be filled in later
@@ -604,7 +611,8 @@ def main():
     st.markdown("""
     **Key Metrics:**
     - **Win Rate:** Percentage of 5000-tick windows where this tier had the highest choppiness
-    - **Efficiency Score:** Win Rate % × (100% - Dropout Rate %)
+    - **Validity Rate:** Percentage of theoretical maximum ticks that have valid data (Valid Ticks ÷ 172,800)
+    - **Efficiency Score:** Win Rate % × Validity Rate % ÷ 100
     - **Current Choppiness:** Most recent choppiness value using 20-tick rolling window
     - **Avg Choppiness:** Average choppiness across all windows
     - **Dropout Rate:** Percentage of time tier has missing or invalid data
@@ -698,6 +706,7 @@ def main():
                 'avg_choppiness': 'Avg Choppiness',
                 'dropout_rate': 'Dropout Rate (%)',
                 'win_rate': 'Win Rate (%)',
+                'validity_rate': 'Validity Rate (%)',
                 'valid_points': 'Valid Ticks',
                 'rank': 'Rank'
             })
@@ -708,6 +717,7 @@ def main():
                 'Exchange:Tier', 
                 'Efficiency Score',
                 'Win Rate (%)',
+                'Validity Rate (%)',
                 'Dropout Rate (%)',
                 'Current Choppiness',
                 'Avg Choppiness',
