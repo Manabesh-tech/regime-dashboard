@@ -6,13 +6,14 @@ import pytz
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from contextlib import contextmanager
+import time
 
 # Clear cache at startup to ensure fresh data
 st.cache_data.clear()
 
 # Page configuration - absolute minimum for speed
 st.set_page_config(
-    page_title="Depth Tier Analyzer",
+    page_title="Enhanced Depth Tier Analyzer",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="collapsed"  # Start with sidebar collapsed for speed
@@ -70,6 +71,17 @@ st.markdown("""
     /* Highlight top tier */
     .dataframe tr:first-child {
         background-color: #e6f7ff !important;
+    }
+    
+    /* Highlight % Time Highest Choppiness cells based on value */
+    .highlight-cell-high {
+        background-color: #d4f7d4 !important;  /* Light green */
+    }
+    .highlight-cell-medium {
+        background-color: #ffffd4 !important;  /* Light yellow */
+    }
+    .highlight-cell-low {
+        background-color: #ffd4d4 !important;  /* Light red */
     }
 </style>
 """, unsafe_allow_html=True)
@@ -208,10 +220,10 @@ def get_current_bid_ask(pair_name, use_replication=True):
         st.error(f"Error getting bid/ask data: {e}")
         return None
 
-# Simplified version of the depth tier analyzer
-class SimplifiedDepthTierAnalyzer:
+# Enhanced version of the depth tier analyzer with time-based choppiness tracking
+class EnhancedDepthTierAnalyzer:
     """
-    Simplified analyzer for liquidity depth tiers - raw metrics only, no scoring
+    Enhanced analyzer for liquidity depth tiers with time-based choppiness tracking
     """
 
     def __init__(self):
@@ -264,7 +276,6 @@ class SimplifiedDepthTierAnalyzer:
             'price_23':'12000k',
             'price_24':'13000k',
             'price_25':'14000k',
-
         }
 
         # Metrics to calculate
@@ -285,15 +296,22 @@ class SimplifiedDepthTierAnalyzer:
 
         # Store results
         self.results = {point: None for point in self.point_counts}
+        
+        # New: Store historical choppiness data for time-based analysis
+        self.historical_choppiness = {}
+        
+        # New: Store time highest percentages
+        self.time_highest_choppiness = {point: {} for point in self.point_counts}
 
-    def fetch_and_analyze(self, pair_name, hours=3, progress_bar=None, use_replication=True):
-        """Fetch data and calculate metrics for each depth tier
-
+    def fetch_and_analyze(self, pair_name, hours=24, progress_bar=None, use_replication=True, time_intervals=12):
+        """Fetch data and calculate metrics for each depth tier with time-based analysis
+        
         Args:
             pair_name: Cryptocurrency pair to analyze
-            hours: Hours of data to look back (default reduced from 24 to 3)
+            hours: Hours of data to look back (default 24 hours)
             progress_bar: Optional progress bar to update
             use_replication: Whether to use replication database
+            time_intervals: Number of time intervals to split data into for historical analysis
         """
         try:
             with get_session(use_replication=use_replication) as session:
@@ -323,70 +341,85 @@ class SimplifiedDepthTierAnalyzer:
                 if progress_bar:
                     progress_bar.progress(0.05, text=f"Analyzing data from {start_str_display} to {end_str_display} (SGT)")
 
-                # Get current day's partition table (most likely to have data)
-                today = datetime.now().strftime("%Y%m%d")
-                table_name = f"oracle_order_book_level_price_data_partition_v4_{today}"
+                # Get data tables covering the time range
+                table_dates = []
+                current_date = now.date()
+                
+                # Add yesterday and today's tables if within the time range
+                yesterday = current_date - timedelta(days=1)
+                
+                # Always check today's table first
+                table_dates.append(current_date.strftime("%Y%m%d"))
+                
+                # Check if we need yesterday's data too
+                if start_time.date() <= yesterday:
+                    table_dates.append(yesterday.strftime("%Y%m%d"))
+                
+                # Check if we need even earlier data
+                if hours > 48:
+                    for i in range(2, min(7, hours//24 + 2)):  # Limit to a week of lookback
+                        past_date = current_date - timedelta(days=i)
+                        if start_time.date() <= past_date:
+                            table_dates.append(past_date.strftime("%Y%m%d"))
 
-                # Check if table exists
-                check_table = text("""
-                    SELECT EXISTS (
-                        SELECT FROM information_schema.tables 
-                        WHERE table_schema = 'public' 
-                        AND table_name = :table_name
-                    );
-                """)
-
-                # Debug information about table checking
                 if progress_bar:
-                    progress_bar.progress(0.1, text=f"Checking for table: {table_name}")
+                    progress_bar.progress(0.1, text=f"Searching data across {len(table_dates)} tables")
 
-                table_exists = session.execute(check_table, {"table_name": table_name}).scalar()
-
-                if not table_exists:
-                    # Try yesterday if today doesn't exist
-                    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
-                    table_name = f"oracle_order_book_level_price_data_partition_v4_{yesterday}"
-
-                    if progress_bar:
-                        progress_bar.progress(0.1, text=f"Today's table not found, checking: {table_name}")
-
-                    # Check if yesterday's table exists
+                # Collect data from all tables
+                all_data = []
+                
+                for table_date in table_dates:
+                    table_name = f"oracle_order_book_level_price_data_partition_v4_{table_date}"
+                    
+                    # Check if table exists
+                    check_table = text("""
+                        SELECT EXISTS (
+                            SELECT FROM information_schema.tables 
+                            WHERE table_schema = 'public' 
+                            AND table_name = :table_name
+                        );
+                    """)
+                    
                     if not session.execute(check_table, {"table_name": table_name}).scalar():
+                        continue  # Skip if table doesn't exist
+                        
+                    if progress_bar:
+                        progress_bar.progress(0.1, text=f"Fetching data from {table_name}...")
+                        
+                    # Query to fetch data from this table
+                    query = text(f"""
+                        SELECT
+                            pair_name,
+                            created_at,
+                            TO_CHAR(created_at + INTERVAL '8 hour', 'YYYY-MM-DD HH24:MI:SS.MS') AS timestamp_sgt,
+                            {', '.join(self.depth_tier_columns)}
+                        FROM
+                            public."{table_name}"
+                        WHERE
+                            pair_name = :pair_name
+                            AND created_at >= :start_time
+                        ORDER BY created_at DESC
+                    """)
+                    
+                    # Execute query with parameters
+                    result = session.execute(
+                        query,
+                        {
+                            "pair_name": pair_name,
+                            "start_time": start_str
+                        }
+                    )
+                    
+                    # Add to our collected data
+                    table_data = result.fetchall()
+                    if table_data:
+                        all_data.extend(table_data)
                         if progress_bar:
-                            progress_bar.progress(0.1, text="No data tables found for analysis")
-                        return False
-
-                if progress_bar:
-                    progress_bar.progress(0.15, text=f"Fetching data from {table_name} for {pair_name}...")
-
-                # Update query to include created_at column for timestamp tracking
-                query = text(f"""
-                    SELECT
-                        pair_name,
-                        TO_CHAR(created_at + INTERVAL '8 hour', 'YYYY-MM-DD HH24:MI:SS.MS') AS timestamp_sgt,
-                        {', '.join(self.depth_tier_columns)}
-                    FROM
-                        public."{table_name}"
-                    WHERE
-                        pair_name = :pair_name
-                    ORDER BY created_at DESC
-                    LIMIT :limit
-                """)
-
-                # Execute query with parameters
-                result = session.execute(
-                    query,
-                    {
-                        "pair_name": pair_name,
-                        "start_time": start_str,
-                        "limit": max(self.point_counts) + 1000
-                    }
-                )
-
-                # Fetch all rows and create DataFrame
-                columns = ['pair_name', 'timestamp_sgt'] + self.depth_tier_columns
-                all_data = result.fetchall()
-
+                            progress_bar.progress(0.1, text=f"Found {len(table_data)} rows in {table_name}")
+                
+                # Sort all collected data by timestamp
+                all_data.sort(key=lambda x: x[1], reverse=True)  # Sort by created_at (index 1)
+                
                 if not all_data:
                     if progress_bar:
                         progress_bar.progress(0.2, text="No data found for the specified pair")
@@ -401,8 +434,9 @@ class SimplifiedDepthTierAnalyzer:
                     progress_bar.progress(0.3, text=f"Processing {len(all_data)} data points...")
 
                 # Convert to DataFrame for faster processing
+                columns = ['pair_name', 'created_at', 'timestamp_sgt'] + self.depth_tier_columns
                 all_df = pd.DataFrame(all_data, columns=columns)
-
+                
                 # Process each point count using the pre-fetched data
                 for i, point_count in enumerate(self.point_counts):
                     if progress_bar:
@@ -411,7 +445,7 @@ class SimplifiedDepthTierAnalyzer:
 
                     if len(all_df) >= point_count:
                         # Get and store the time range for this specific point count
-                        point_df = all_df.iloc[:point_count]
+                        point_df = all_df.iloc[:point_count].copy()
 
                         if 'timestamp_sgt' in point_df.columns:
                             newest_time = point_df['timestamp_sgt'].iloc[0]
@@ -422,8 +456,85 @@ class SimplifiedDepthTierAnalyzer:
                                 'oldest': oldest_time,
                                 'count': len(point_df)
                             }
+                        
+                        # New: Historical analysis by time intervals
+                        # Divide data into time intervals for historical analysis
+                        interval_size = min(len(all_df) // time_intervals, point_count)
+                        
+                        if interval_size < 50:  # Ensure meaningful sample size
+                            time_intervals = max(1, len(all_df) // 50)
+                            interval_size = min(len(all_df) // time_intervals, point_count)
+                        
+                        # Initialize storage for this point count's historical analysis
+                        self.historical_choppiness[point_count] = {
+                            'intervals': [],
+                            'tier_data': {}
+                        }
+                        
+                        # Track which tier had highest choppiness in each interval
+                        highest_choppiness_counts = {}
+                        
+                        # Process each time interval
+                        for j in range(time_intervals):
+                            start_idx = j * interval_size
+                            end_idx = min((j + 1) * interval_size, len(all_df))
+                            
+                            if end_idx - start_idx < interval_size * 0.5:  # Skip if too small
+                                continue
+                                
+                            interval_df = all_df.iloc[start_idx:end_idx].copy()
+                            
+                            # Get interval time range for reference
+                            interval_range = {
+                                'start': interval_df['timestamp_sgt'].iloc[-1],
+                                'end': interval_df['timestamp_sgt'].iloc[0]
+                            }
+                            
+                            self.historical_choppiness[point_count]['intervals'].append(interval_range)
+                            
+                            # Calculate choppiness for each tier in this interval
+                            interval_results = {}
+                            highest_choppiness = 0
+                            highest_tier = None
+                            
+                            for column in self.depth_tier_columns:
+                                # Extract price data for this tier
+                                if column in interval_df.columns:
+                                    # Make a clean copy of the data for this specific tier
+                                    df_tier = interval_df[['pair_name', column]].copy()
+                                    
+                                    # Calculate choppiness metric
+                                    metrics = self._calculate_metrics(df_tier, column, end_idx - start_idx)
+                                    
+                                    if metrics and 'choppiness' in metrics:
+                                        tier = self.depth_tier_values[column]
+                                        
+                                        # Store the choppiness value
+                                        if tier not in self.historical_choppiness[point_count]['tier_data']:
+                                            self.historical_choppiness[point_count]['tier_data'][tier] = []
+                                            
+                                        self.historical_choppiness[point_count]['tier_data'][tier].append(metrics['choppiness'])
+                                        
+                                        # Track which tier had highest choppiness in this interval
+                                        if metrics['choppiness'] > highest_choppiness:
+                                            highest_choppiness = metrics['choppiness']
+                                            highest_tier = tier
+                            
+                            # Increment count for the tier with highest choppiness
+                            if highest_tier:
+                                if highest_tier not in highest_choppiness_counts:
+                                    highest_choppiness_counts[highest_tier] = 0
+                                highest_choppiness_counts[highest_tier] += 1
+                        
+                        # Calculate percentage of time each tier had highest choppiness
+                        total_intervals = len(self.historical_choppiness[point_count]['intervals'])
+                        
+                        if total_intervals > 0:
+                            for tier, count in highest_choppiness_counts.items():
+                                percentage = (count / total_intervals) * 100
+                                self.time_highest_choppiness[point_count][tier] = percentage
 
-                        # Process each depth tier separately
+                        # Process each depth tier for the main results
                         tier_results = {}
 
                         for column in self.depth_tier_columns:
@@ -437,8 +548,14 @@ class SimplifiedDepthTierAnalyzer:
                                 if metrics:
                                     tier = self.depth_tier_values[column]
                                     tier_results[tier] = metrics
+                                    
+                                    # Add time highest percentage if available
+                                    if tier in self.time_highest_choppiness[point_count]:
+                                        tier_results[tier]['time_highest_choppiness'] = self.time_highest_choppiness[point_count][tier]
+                                    else:
+                                        tier_results[tier]['time_highest_choppiness'] = 0.0
 
-                        # Convert to DataFrame and sort by a primary metric
+                        # Convert to DataFrame and sort by choppiness
                         self.results[point_count] = self._create_results_table(tier_results)
 
                 if progress_bar:
@@ -514,10 +631,11 @@ class SimplifiedDepthTierAnalyzer:
             }
 
         except Exception as e:
+            print(f"Error calculating metrics: {e}")
             return None
 
     def _create_results_table(self, tier_results):
-        """Create a simple results table without scoring or normalization"""
+        """Create a results table including time highest percentages"""
         if not tier_results:
             return None
 
@@ -530,22 +648,23 @@ class SimplifiedDepthTierAnalyzer:
 
         df = pd.DataFrame(data)
 
-        # Sort by direction changes (higher is better) as the primary metric
-        # You can change this to sort by another metric if you prefer
-        if 'direction_changes' in df.columns:
-            df = df.sort_values('direction_changes', ascending=False)
+        # Sort by time highest choppiness as the primary metric
+        if 'time_highest_choppiness' in df.columns:
+            df = df.sort_values('time_highest_choppiness', ascending=False)
+        elif 'choppiness' in df.columns:
+            df = df.sort_values('choppiness', ascending=False)
         else:
-            # If direction_changes is not available, try another metric
-            for metric in ['choppiness', 'tick_atr_pct']:
+            # If choppiness is not available, try another metric
+            for metric in ['direction_changes', 'tick_atr_pct']:
                 if metric in df.columns:
                     df = df.sort_values(metric, ascending=False)
                     break
 
         return df
 
-# Table-only display function - simplified
+# Enhanced table display function with time highest percentage
 def create_point_count_table(analyzer, point_count):
-    """Creates a clean, readable table of raw metrics without scoring"""
+    """Creates a clean, readable table with time highest choppiness percentages"""
     if analyzer.results[point_count] is None:
         st.info(f"No data available for {point_count} points analysis.")
         return
@@ -561,6 +680,13 @@ def create_point_count_table(analyzer, point_count):
             <p style="margin: 3px 0;"><strong>Total data points:</strong> {point_range['count']}</p>
         </div>
         """, unsafe_allow_html=True)
+        
+    # Check how many time intervals were analyzed
+    interval_count = 0
+    if hasattr(analyzer, 'historical_choppiness') and point_count in analyzer.historical_choppiness:
+        interval_count = len(analyzer.historical_choppiness[point_count]['intervals'])
+        if interval_count > 0:
+            st.markdown(f"**Time Analysis:** Analyzed {interval_count} time intervals across the period")
 
     df = analyzer.results[point_count]
 
@@ -568,21 +694,33 @@ def create_point_count_table(analyzer, point_count):
     display_df = df.copy()
 
     # Select only the columns we want to display
-    display_columns = ['Tier', 'direction_changes', 'choppiness', 'tick_atr_pct', 'trend_strength']
-    display_df = display_df[display_columns]
+    display_columns = ['Tier', 'time_highest_choppiness', 'choppiness', 'direction_changes', 'tick_atr_pct', 'trend_strength']
+    
+    # Filter to columns that exist in the dataframe
+    available_columns = [col for col in display_columns if col in display_df.columns]
+    display_df = display_df[available_columns]
 
     # Rename columns for better display
-    display_df = display_df.rename(columns={
+    column_renames = {
+        'time_highest_choppiness': '% Time Highest Choppiness',
         'direction_changes': 'Direction Changes (%)',
         'choppiness': 'Choppiness',
         'tick_atr_pct': 'Tick ATR %',
         'trend_strength': 'Trend Strength'
-    })
+    }
+    
+    # Only rename columns that exist
+    renames = {col: column_renames[col] for col in column_renames if col in display_df.columns}
+    display_df = display_df.rename(columns=renames)
 
     # Format numeric columns with appropriate decimal places
     for col in display_df.columns:
         if col != 'Tier':
-            if col == 'Tick ATR %':
+            if col == '% Time Highest Choppiness':
+                display_df[col] = display_df[col].apply(
+                    lambda x: f"{x:.1f}%" if not pd.isna(x) else "0.0%"
+                )
+            elif col == 'Tick ATR %':
                 display_df[col] = display_df[col].apply(
                     lambda x: f"{x:.4f}" if not pd.isna(x) else "N/A"
                 )
@@ -598,6 +736,14 @@ def create_point_count_table(analyzer, point_count):
     # Display the top tier as recommendation
     top_tier = display_df.iloc[0]['Tier']
     st.markdown(f"### Recommended Depth Tier: **{top_tier}**")
+    
+    # Add explanatory text
+    if '% Time Highest Choppiness' in display_df.columns:
+        st.markdown("""
+        <div style="background-color: #f7f7f7; padding: 8px; border-radius: 5px; margin-bottom: 15px;">
+            <p style="margin: 3px 0;"><strong>% Time Highest Choppiness</strong>: Percentage of time intervals where this tier had the highest choppiness value compared to other tiers</p>
+        </div>
+        """, unsafe_allow_html=True)
 
     # Show the full table with enhanced styling
     st.dataframe(
@@ -629,7 +775,7 @@ def main():
     current_time_sg = now_sg.strftime("%Y-%m-%d %H:%M:%S")
 
     # Main layout - super streamlined
-    st.markdown("<h1 style='text-align: center; font-size:28px; margin-bottom: 10px;'>Liquidity Depth Tier Analyzer</h1>", unsafe_allow_html=True)
+    st.markdown("<h1 style='text-align: center; font-size:28px; margin-bottom: 10px;'>Enhanced Liquidity Depth Tier Analyzer</h1>", unsafe_allow_html=True)
 
     # Display current Singapore time to confirm updates
     st.markdown(f"<p style='text-align: center; font-size:14px; color:gray;'>Last updated: {current_time_sg} (SGT)</p>", unsafe_allow_html=True)
@@ -648,6 +794,15 @@ def main():
         )
 
     with col2:
+        # Add hours selection
+        hours_options = [6, 12, 24, 48]
+        selected_hours = st.selectbox(
+            "Analysis Hours",
+            hours_options,
+            index=2  # Default to 24 hours
+        )
+
+    with col3:
         run_analysis = st.button("ANALYZE", use_container_width=True)
 
     # Main content
@@ -657,7 +812,7 @@ def main():
 
         # Show analysis time in Singapore timezone
         analysis_start_time = datetime.now(singapore_tz).strftime("%Y-%m-%d %H:%M:%S")
-        st.markdown(f"<p style='text-align: center; font-size:14px; color:green;'>Analysis started at: {analysis_start_time} (SGT)</p>", unsafe_allow_html=True)
+        st.markdown(f"<p style='text-align: center; font-size:14px; color:green;'>Analysis started at: {analysis_start_time} (SGT) for {selected_hours} hours of data</p>", unsafe_allow_html=True)
 
         # Get current bid/ask data
         bid_ask_data = get_current_bid_ask(selected_pair)
@@ -674,9 +829,15 @@ def main():
             """, unsafe_allow_html=True)
 
         # Simple explanation of metrics (much shorter)
-        st.markdown("""
-        **Metrics:** Direction Changes (%), Choppiness, Tick ATR %, and Trend Strength.
-        Higher values of the first three metrics and lower values of Trend Strength typically indicate better trading conditions.
+        st.markdown(f"""
+        **Analysis Period:** Looking back {selected_hours} hours
+        
+        **Key Metrics:**
+        - **% Time Highest Choppiness:** Percentage of time this tier had the highest choppiness
+        - **Choppiness:** Oscillation intensity within price range
+        - **Direction Changes (%):** Frequency of price direction reversals
+        - **Tick ATR %:** Average tick-to-tick price change percentage
+        - **Trend Strength:** Lower values indicate more choppy/mean-reverting behavior
         """)
 
         # Set up tabs for results - updated to match point counts
@@ -686,20 +847,28 @@ def main():
         progress_bar = st.progress(0, text="Starting analysis...")
 
         # Initialize analyzer and run analysis
-        analyzer = SimplifiedDepthTierAnalyzer()
-        success = analyzer.fetch_and_analyze(selected_pair, hours=3, progress_bar=progress_bar)  # Reduced from 24 to 3 hours
+        analyzer = EnhancedDepthTierAnalyzer()
+        
+        # Calculate appropriate time intervals based on hours
+        time_intervals = max(12, selected_hours * 2)  # More intervals for longer periods
+        
+        success = analyzer.fetch_and_analyze(
+            selected_pair, 
+            hours=selected_hours, 
+            progress_bar=progress_bar,
+            time_intervals=time_intervals
+        )
 
         if success:
             # Display the time range used for analysis
-            # if hasattr(analyzer, 'analysis_time_range') and analyzer.analysis_time_range:
-            #     st.markdown(f"""
-            #     <div style="background-color: #e6f3ff; padding: 10px; border-radius: 5px; margin-bottom: 20px;">
-            #         <h3 style="margin: 0;">Overall Data Time Range</h3>
-            #         <p style="margin: 5px 0;"><strong>From:</strong> {analyzer.analysis_time_range['start']} ({analyzer.analysis_time_range['timezone']})</p>
-            #         <p style="margin: 5px 0;"><strong>To:</strong> {analyzer.analysis_time_range['end']} ({analyzer.analysis_time_range['timezone']})</p>
-            #         <p style="margin: 5px 0;"><em>Detailed time ranges for each point count are shown in individual tabs</em></p>
-            #     </div>
-            #     """, unsafe_allow_html=True)
+            if hasattr(analyzer, 'analysis_time_range') and analyzer.analysis_time_range:
+                st.markdown(f"""
+                <div style="background-color: #e6f3ff; padding: 10px; border-radius: 5px; margin-bottom: 20px;">
+                    <h3 style="margin: 0;">Overall Data Time Range</h3>
+                    <p style="margin: 5px 0;"><strong>From:</strong> {analyzer.analysis_time_range['start']} ({analyzer.analysis_time_range['timezone']})</p>
+                    <p style="margin: 5px 0;"><strong>To:</strong> {analyzer.analysis_time_range['end']} ({analyzer.analysis_time_range['timezone']})</p>
+                </div>
+                """, unsafe_allow_html=True)
 
             # Display results for each point count (updated point counts)
             with tabs[0]:
@@ -720,11 +889,11 @@ def main():
 
         else:
             progress_bar.empty()
-            st.error(f"Failed to analyze {selected_pair}. Please try another pair.")
+            st.error(f"Failed to analyze {selected_pair}. Please try another pair or time range.")
 
     else:
         # Minimal welcome message
-        st.info("Select a pair and click ANALYZE to find the optimal depth tier.")
+        st.info("Select a pair and time range, then click ANALYZE to find the optimal depth tier.")
 
 if __name__ == "__main__":
     main()
