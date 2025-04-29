@@ -215,6 +215,7 @@ def analyze_tiers(pair_name, progress_bar=None):
                         pair_name = :pair_name
                     ORDER BY 
                         created_at DESC
+                    LIMIT 50000
                 """)
                 
                 result = session.execute(query, {"pair_name": pair_name})
