@@ -270,80 +270,108 @@ def style_edge_matrix(df):
     # Create a copy without the time_slot column for styling
     df_style = df.drop(['time_slot', 'date'], axis=1).copy()
     
-    # Define style function
-    def edge_styler(val):
+    # Create a copy for styled display
+    styled_display = pd.DataFrame('', index=df.index, columns=df.columns)
+    styled_display[['time_slot', 'date']] = df[['time_slot', 'date']]
+    
+    # Function to format and determine style
+    def format_and_style(val):
         if pd.isna(val):
-            return 'background-color: #f5f5f5; color: #666666'
+            return ('', 'background-color: #f5f5f5; color: #666666')
+        
         try:
             val_float = float(val)
             if val_float == 0:
-                return 'background-color: #f5f5f5; color: #666666'
-            elif val_float < -0.1:
-                return 'background-color: rgba(180, 0, 0, 0.9); color: white'
+                return ('0', 'background-color: #f5f5f5; color: #666666')
+            
+            # Format the value as percentage
+            formatted = f"{val_float*100:.1f}%"
+            
+            # Determine the style
+            if val_float < -0.1:
+                style = 'background-color: rgba(180, 0, 0, 0.9); color: white'
             elif val_float < -0.05:
-                return 'background-color: rgba(255, 0, 0, 0.9); color: white'
+                style = 'background-color: rgba(255, 0, 0, 0.9); color: white'
             elif val_float < -0.01:
-                return 'background-color: rgba(255, 150, 150, 0.9); color: black'
+                style = 'background-color: rgba(255, 150, 150, 0.9); color: black'
             elif val_float < 0.01:
-                return 'background-color: rgba(255, 255, 150, 0.9); color: black'
+                style = 'background-color: rgba(255, 255, 150, 0.9); color: black'
             elif val_float < 0.05:
-                return 'background-color: rgba(150, 255, 150, 0.9); color: black'
+                style = 'background-color: rgba(150, 255, 150, 0.9); color: black'
             elif val_float < 0.1:
-                return 'background-color: rgba(0, 255, 0, 0.9); color: black'
+                style = 'background-color: rgba(0, 255, 0, 0.9); color: black'
             else:
-                return 'background-color: rgba(0, 180, 0, 0.9); color: white'
+                style = 'background-color: rgba(0, 180, 0, 0.9); color: white'
+                
+            return (formatted, style)
         except (TypeError, ValueError):
-            return 'background-color: #f5f5f5; color: #666666'
+            return ('', 'background-color: #f5f5f5; color: #666666')
     
-    # Apply the style
-    styled = df_style.copy()
+    # Apply formatting and collect styles
+    styles = pd.DataFrame('', index=df_style.index, columns=df_style.columns)
     
-    # Format numeric values as percentage with 1 decimal place
-    for col in styled.columns:
-        styled[col] = styled[col].apply(
-            lambda x: f"{x*100:.1f}%" if pd.notnull(x) else ""
-        )
+    # Process each cell
+    for col in df_style.columns:
+        for idx in df_style.index:
+            val = df_style.loc[idx, col]
+            formatted, style = format_and_style(val)
+            styled_display.loc[idx, col] = formatted
+            styles.loc[idx, col] = style
     
-    # Apply styling with the custom styler function
-    return styled.style.applymap(edge_styler)
+    # Create the styler and apply cell styles
+    return styled_display.style.apply(lambda _: styles, axis=None)
 
 # Function to style the volatility matrix
 def style_volatility_matrix(df):
     # Create a copy without the time_slot column for styling
     df_style = df.drop(['time_slot', 'date'], axis=1).copy()
     
-    # Define style function
-    def volatility_styler(val):
+    # Create a copy for styled display
+    styled_display = pd.DataFrame('', index=df.index, columns=df.columns)
+    styled_display[['time_slot', 'date']] = df[['time_slot', 'date']]
+    
+    # Function to format and determine style
+    def format_and_style(val):
         if pd.isna(val):
-            return 'background-color: #f5f5f5; color: #666666'
+            return ('', 'background-color: #f5f5f5; color: #666666')
+        
         try:
             val_float = float(val)
             if val_float == 0:
-                return 'background-color: #f5f5f5; color: #666666'
-            elif val_float < 0.2:
-                return 'background-color: rgba(0, 180, 0, 0.9); color: white'  # Low
+                return ('0', 'background-color: #f5f5f5; color: #666666')
+            
+            # Format the value as percentage
+            formatted = f"{val_float*100:.1f}%"
+            
+            # Determine the style
+            if val_float < 0.2:
+                style = 'background-color: rgba(0, 180, 0, 0.9); color: white'  # Low
             elif val_float < 0.5:
-                return 'background-color: rgba(150, 255, 150, 0.9); color: black'  # Medium-Low
+                style = 'background-color: rgba(150, 255, 150, 0.9); color: black'  # Medium-Low
             elif val_float < 1.0:
-                return 'background-color: rgba(255, 255, 150, 0.9); color: black'  # Medium
+                style = 'background-color: rgba(255, 255, 150, 0.9); color: black'  # Medium
             elif val_float < 1.5:
-                return 'background-color: rgba(255, 150, 0, 0.9); color: black'  # Medium-High
+                style = 'background-color: rgba(255, 150, 0, 0.9); color: black'  # Medium-High
             else:
-                return 'background-color: rgba(255, 0, 0, 0.9); color: white'  # High
+                style = 'background-color: rgba(255, 0, 0, 0.9); color: white'  # High
+                
+            return (formatted, style)
         except (TypeError, ValueError):
-            return 'background-color: #f5f5f5; color: #666666'
+            return ('', 'background-color: #f5f5f5; color: #666666')
     
-    # Apply the style
-    styled = df_style.copy()
+    # Apply formatting and collect styles
+    styles = pd.DataFrame('', index=df_style.index, columns=df_style.columns)
     
-    # Format numeric values as percentage with 1 decimal place
-    for col in styled.columns:
-        styled[col] = styled[col].apply(
-            lambda x: f"{x*100:.1f}%" if pd.notnull(x) else ""
-        )
+    # Process each cell
+    for col in df_style.columns:
+        for idx in df_style.index:
+            val = df_style.loc[idx, col]
+            formatted, style = format_and_style(val)
+            styled_display.loc[idx, col] = formatted
+            styles.loc[idx, col] = style
     
-    # Apply styling with the custom styler function
-    return styled.style.applymap(volatility_styler)
+    # Create the styler and apply cell styles
+    return styled_display.style.apply(lambda _: styles, axis=None)
 
 # Function to add date separators to DataFrame display
 def add_date_separators(df):
