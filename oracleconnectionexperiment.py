@@ -60,10 +60,12 @@ st.markdown("""
     
     /* Exchange tag styling */
     .exchange-tag {
+        display: inline-block;
         padding: 2px 6px;
         border-radius: 4px;
         font-weight: bold;
         margin-right: 5px;
+        font-size: 14px;
     }
     .exchange-binancefuture {
         background-color: #f3ba2f;
@@ -238,7 +240,7 @@ class ExchangeAnalyzer:
                         pair_name = :pair_name
                     ORDER BY 
                         created_at DESC
-                    LIMIT 5000
+                    LIMIT 5000*8
                 """)
                 
                 # Execute query with parameters
@@ -559,7 +561,7 @@ def display_rankings_table(df):
     def format_exchange(exchange):
         # Map exchange to CSS class
         exchange_class = f"exchange-{exchange.lower()}"
-        return f"""<span class="exchange-tag {exchange_class}">{exchange}</span>"""
+        return f'<span class="exchange-tag {exchange_class}">{exchange}</span>'
     
     # Create styled exchange column for display
     display_df['Exchange'] = display_df['exchange'].apply(format_exchange)
@@ -619,11 +621,8 @@ def display_rankings_table(df):
     </div>
     """, unsafe_allow_html=True)
     
-    st.dataframe(
-        display_df[available_display_columns],
-        use_container_width=True,
-        height=min(800, 100 + (len(display_df) * 35))
-    )
+    # Convert DataFrame to HTML with unsafe_allow_html=True
+    st.markdown(display_df[available_display_columns].to_html(escape=False), unsafe_allow_html=True)
     
     # Show fallback recommendations
     if len(display_df) >= 3:
