@@ -10,7 +10,7 @@ import time
 import re
 
 st.set_page_config(
-    page_title="10-Minute Volatility Matrix",
+    page_title="10-Minute System Edge & Volatility Matrix",
     page_icon="📊",
     layout="wide"
 )
@@ -57,7 +57,7 @@ except Exception as e:
     st.stop()
 
 # --- UI Setup ---
-st.title("10-Minute Volatility Matrix")
+st.title("System Edge & Volatility Matrix")
 st.subheader("All Trading Pairs - Last 24 Hours (Singapore Time)")
 
 # Add performance options in the sidebar
@@ -87,6 +87,8 @@ start_time_utc = start_time_sg.astimezone(pytz.UTC)
 
 # Set thresholds
 extreme_vol_threshold = 1.0  # 100% annualized volatility
+high_edge_threshold = 0.5    # 50% house edge
+negative_edge_threshold = -0.2  # -20% house edge (system losing)
 
 # Calculate expected data points based on resolution
 expected_points = int(24 * 60 / resolution_min)  # Number of intervals in 24 hours
@@ -178,12 +180,242 @@ def build_price_query(tables, pair_name, start_time, end_time):
     complete_query = " UNION ".join(union_parts) + " ORDER BY timestamp"
     return complete_query
 
+# Function to verify if table exists and get its columns
+def get_table_columns(conn, table_name):
+    """Check if a table exists and return its columns"""
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT EXISTS (
+            SELECT FROM information_schema.tables 
+            WHERE table_schema = 'public' 
+            AND table_name = %s
+        );
+    """, (table_name,))
+    
+    exists = cursor.fetchone()[0]
+    
+    if not exists:
+        cursor.close()
+        return False, []
+    
+    # Get columns
+    cursor.execute("""
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+        AND table_name = %s
+        ORDER BY ordinal_position;
+    """, (table_name,))
+    
+    columns = [row[0] for row in cursor.fetchall()]
+    cursor.close()
+    
+    return exists, columns
+
+# Function to fetch house edge data for all pairs
+@st.cache_data(ttl=60*cache_ttl, show_spinner=False)
+def fetch_house_edge_data(resolution_min=10):
+    """
+    Fetch house edge data for all pairs with the specified resolution
+    using trade_fill_fresh table
+    """
+    # First verify trade_fill_fresh exists and get its columns
+    exists, columns = get_table_columns(conn, "trade_fill_fresh")
+    
+    if not exists:
+        st.error("Error: trade_fill_fresh table does not exist in the database")
+        return pd.DataFrame()
+    
+    # Check required columns
+    required_columns = ['pair_name', 'taker_way', 'taker_fee_mode', 'taker_pnl', 
+                        'funding_fee', 'rebate', 'deal_vol', 'collateral_price', 'created_at']
+    
+    missing_columns = [col for col in required_columns if col.lower() not in [c.lower() for c in columns]]
+    
+    if missing_columns:
+        st.warning(f"Warning: Missing required columns in trade_fill_fresh: {missing_columns}")
+        # We can try with a simpler query using available columns
+    
+    print(f"Available columns in trade_fill_fresh: {columns}")
+    
+    # Calculate time range for the query
+    end_time = now_sg
+    start_time = end_time - timedelta(days=lookback_days)
+    
+    # Direct query using trade_fill_fresh
+    query = f"""
+    SELECT
+        pair_name,
+        DATE_TRUNC('{resolution_min} minutes', created_at + INTERVAL '8 hour') AS time_block,
+        
+        -- Calculate total PNL
+        SUM(CASE WHEN taker_way IN (1, 2, 3, 4) THEN -1 * taker_pnl * collateral_price ELSE 0 END) +
+        SUM(CASE WHEN taker_way = 0 THEN -1 * funding_fee * collateral_price ELSE 0 END) +
+        SUM(-1 * rebate * collateral_price) AS total_platform_pnl,
+        
+        -- Calculate margin amount (deal_vol for open positions)
+        SUM(CASE WHEN taker_way IN (1, 3) THEN deal_vol * collateral_price ELSE 0 END) AS margin_amount,
+        
+        -- Calculate house edge with bounds (-1 to 1)
+        CASE
+            WHEN SUM(CASE WHEN taker_way IN (1, 3) THEN deal_vol * collateral_price ELSE 0 END) = 0 THEN 0
+            WHEN (SUM(CASE WHEN taker_way IN (1, 2, 3, 4) THEN -1 * taker_pnl * collateral_price ELSE 0 END) +
+                SUM(CASE WHEN taker_way = 0 THEN -1 * funding_fee * collateral_price ELSE 0 END) +
+                SUM(-1 * rebate * collateral_price)) / 
+                SUM(CASE WHEN taker_way IN (1, 3) THEN deal_vol * collateral_price ELSE 0 END) > 1 THEN 1
+            WHEN (SUM(CASE WHEN taker_way IN (1, 2, 3, 4) THEN -1 * taker_pnl * collateral_price ELSE 0 END) +
+                SUM(CASE WHEN taker_way = 0 THEN -1 * funding_fee * collateral_price ELSE 0 END) +
+                SUM(-1 * rebate * collateral_price)) / 
+                SUM(CASE WHEN taker_way IN (1, 3) THEN deal_vol * collateral_price ELSE 0 END) < -1 THEN -1
+            ELSE (SUM(CASE WHEN taker_way IN (1, 2, 3, 4) THEN -1 * taker_pnl * collateral_price ELSE 0 END) +
+                SUM(CASE WHEN taker_way = 0 THEN -1 * funding_fee * collateral_price ELSE 0 END) +
+                SUM(-1 * rebate * collateral_price)) / 
+                NULLIF(SUM(CASE WHEN taker_way IN (1, 3) THEN deal_vol * collateral_price ELSE 0 END), 0)
+        END AS house_edge
+    FROM
+        trade_fill_fresh
+    WHERE
+        created_at >= NOW() - INTERVAL '24 hours'
+        AND taker_fee_mode = 2
+    GROUP BY
+        pair_name,
+        DATE_TRUNC('{resolution_min} minutes', created_at + INTERVAL '8 hour')
+    ORDER BY
+        pair_name,
+        DATE_TRUNC('{resolution_min} minutes', created_at + INTERVAL '8 hour')
+    """
+    
+    try:
+        print("Executing house edge query...")
+        start_time = time.time()
+        edge_df = pd.read_sql_query(query, conn)
+        query_time = time.time() - start_time
+        print(f"House edge query completed in {query_time:.2f} seconds. DataFrame shape: {edge_df.shape}")
+        
+        if edge_df.empty:
+            print("No house edge data found.")
+            return pd.DataFrame()
+        
+        # Convert timestamp to datetime
+        edge_df['timestamp'] = pd.to_datetime(edge_df['time_block'])
+        
+        # Format the time label (HH:MM) for later joining
+        edge_df['time_label'] = edge_df['timestamp'].dt.strftime('%H:%M')
+        
+        return edge_df
+        
+    except Exception as e:
+        error_msg = str(e)
+        print(f"Error fetching house edge data: {error_msg}")
+        
+        # Try simplified query if there's a specific column issue
+        if "column" in error_msg.lower() and "does not exist" in error_msg.lower():
+            column_name = re.search(r'"([^"]*)"', error_msg)
+            if column_name:
+                print(f"Column {column_name.group(1)} does not exist. Attempting simplified query.")
+            
+            return fetch_simplified_house_edge(resolution_min, columns)
+            
+        return pd.DataFrame()
+
+# Simplified house edge calculation as fallback
+def fetch_simplified_house_edge(resolution_min=10, available_columns=[]):
+    """Simplified version of house edge calculation as fallback"""
+    try:
+        simplified_query = ""
+        
+        # Check for minimum required columns
+        if all(col.lower() in [c.lower() for c in available_columns] 
+               for col in ['pair_name', 'taker_pnl', 'collateral_price', 'created_at']):
+            
+            simplified_query = f"""
+            SELECT
+                pair_name,
+                DATE_TRUNC('{resolution_min} minutes', created_at + INTERVAL '8 hour') AS time_block,
+                
+                -- Simplified platform PNL (orders only)
+                SUM(-1 * taker_pnl * collateral_price) AS total_platform_pnl
+            FROM
+                trade_fill_fresh
+            WHERE
+                created_at >= NOW() - INTERVAL '24 hours'
+            GROUP BY
+                pair_name,
+                DATE_TRUNC('{resolution_min} minutes', created_at + INTERVAL '8 hour')
+            ORDER BY
+                pair_name,
+                DATE_TRUNC('{resolution_min} minutes', created_at + INTERVAL '8 hour')
+            """
+        else:
+            # Create an even simpler query with whatever columns are available
+            select_columns = ["pair_name"]
+            if "created_at" in available_columns:
+                select_columns.append(f"DATE_TRUNC('{resolution_min} minutes', created_at + INTERVAL '8 hour') AS time_block")
+            else:
+                # If no timestamp column, we can't proceed
+                return pd.DataFrame()
+                
+            simplified_query = f"""
+            SELECT
+                {', '.join(select_columns)}
+            FROM
+                trade_fill_fresh
+            WHERE
+                created_at >= NOW() - INTERVAL '24 hours'
+            GROUP BY
+                {', '.join(select_columns)}
+            ORDER BY
+                {', '.join(select_columns)}
+            """
+        
+        print("Executing simplified house edge query...")
+        start_time = time.time()
+        edge_df = pd.read_sql_query(simplified_query, conn)
+        query_time = time.time() - start_time
+        print(f"Simplified query completed in {query_time:.2f} seconds. DataFrame shape: {edge_df.shape}")
+        
+        # If we don't have pnl data, just add placeholder columns
+        if 'total_platform_pnl' not in edge_df.columns:
+            edge_df['total_platform_pnl'] = np.nan
+            edge_df['margin_amount'] = np.nan
+            edge_df['house_edge'] = np.nan
+        
+        # Convert timestamp to datetime
+        edge_df['timestamp'] = pd.to_datetime(edge_df['time_block'])
+        
+        # Format the time label (HH:MM) for later joining
+        edge_df['time_label'] = edge_df['timestamp'].dt.strftime('%H:%M')
+        
+        return edge_df
+        
+    except Exception as e:
+        print(f"Error in simplified house edge calculation: {e}")
+        return pd.DataFrame()
+
 # Fetch all available tokens from DB
 @st.cache_data(ttl=60*cache_ttl, show_spinner=False)
 def fetch_all_tokens():
     """Get a list of all trading pairs/tokens"""
+    all_tokens = set()
+    
     try:
-        # Try from oracle price log
+        # First try trade_fill_fresh
+        exists, _ = get_table_columns(conn, "trade_fill_fresh")
+        
+        if exists:
+            cursor = conn.cursor()
+            cursor.execute("""
+            SELECT DISTINCT pair_name 
+            FROM trade_fill_fresh 
+            WHERE created_at >= NOW() - INTERVAL '24 hours'
+            ORDER BY pair_name
+            """)
+            
+            tokens_from_trades = [row[0] for row in cursor.fetchall()]
+            all_tokens.update(tokens_from_trades)
+            cursor.close()
+            
+        # Also get tokens from oracle price logs
         partition_tables = get_partition_tables(conn, start_time_sg, now_sg)
         
         if partition_tables:
@@ -194,11 +426,12 @@ def fetch_all_tokens():
             WHERE source_type = 0
             ORDER BY pair_name
             """)
-            tokens = [row[0] for row in cursor.fetchall()]
+            
+            tokens_from_price = [row[0] for row in cursor.fetchall()]
+            all_tokens.update(tokens_from_price)
             cursor.close()
-            return tokens
         
-        return []
+        return sorted(list(all_tokens))
     except Exception as e:
         st.error(f"Error fetching tokens: {e}")
         return ["BTC", "ETH", "SOL", "DOGE", "PEPE"]  # Default fallback
@@ -251,6 +484,21 @@ def classify_volatility(vol):
         return ("HIGH", 3, "High volatility")
     else:
         return ("EXTREME", 4, "Extreme volatility")
+
+# House edge classification function
+def classify_house_edge(edge):
+    if pd.isna(edge):
+        return ("UNKNOWN", 0, "Insufficient data")
+    elif edge < negative_edge_threshold:  # System is losing money
+        return ("NEGATIVE", 1, "System losing")
+    elif edge < 0.1:  # Low edge
+        return ("LOW", 2, "Low edge")
+    elif edge < 0.3:  # Medium edge
+        return ("MEDIUM", 3, "Medium edge")
+    elif edge < high_edge_threshold:  # Good edge
+        return ("GOOD", 4, "Good edge")
+    else:  # High edge
+        return ("HIGH", 5, "High edge")
 
 # Function to generate aligned time blocks for the past 24 hours
 def generate_aligned_time_blocks(current_time, resolution_min):
@@ -368,6 +616,75 @@ def fetch_and_calculate_volatility(token):
         print(f"[{token}] Error processing: {e}")
         return None
 
+# Function to combine volatility and house edge data
+def combine_volatility_and_edge(volatility_results, house_edge_data):
+    """
+    Combine volatility and house edge data into a single DataFrame for display.
+    Returns a dictionary with tokens as keys and combined dataframes as values.
+    """
+    combined_results = {}
+    
+    for token in volatility_results.keys():
+        # Get volatility data for this token
+        vol_df = volatility_results[token]
+        
+        # Get house edge data for this token
+        edge_df = pd.DataFrame()
+        if not house_edge_data.empty:
+            edge_df = house_edge_data[house_edge_data['pair_name'] == token].copy()
+        
+        if vol_df is not None and not vol_df.empty:
+            if not edge_df.empty:
+                # Format timestamps for joining
+                edge_df['time_label'] = edge_df['timestamp'].dt.strftime('%H:%M')
+                
+                # Get available columns for merging
+                edge_columns = ['time_label']
+                if 'house_edge' in edge_df.columns:
+                    edge_columns.append('house_edge')
+                if 'total_platform_pnl' in edge_df.columns:
+                    edge_columns.append('total_platform_pnl')
+                if 'margin_amount' in edge_df.columns:
+                    edge_columns.append('margin_amount')
+                
+                # Merge on time_label
+                merged = pd.merge(
+                    vol_df.reset_index(), 
+                    edge_df[edge_columns], 
+                    on='time_label', 
+                    how='outer'
+                )
+                
+                # Classify house edge if available
+                if 'house_edge' in merged.columns:
+                    merged['edge_info'] = merged['house_edge'].apply(classify_house_edge)
+                    merged['edge_regime'] = merged['edge_info'].apply(lambda x: x[0] if x else "UNKNOWN")
+                    merged['edge_desc'] = merged['edge_info'].apply(lambda x: x[2] if x else "Insufficient data")
+                else:
+                    merged['house_edge'] = np.nan
+                    merged['edge_info'] = None
+                    merged['edge_regime'] = "UNKNOWN"
+                    merged['edge_desc'] = "Insufficient data"
+                
+                # Set index back to timestamp
+                if 'timestamp_x' in merged.columns:
+                    merged.set_index('timestamp_x', inplace=True)
+                elif 'index' in merged.columns:
+                    merged.set_index('index', inplace=True)
+                
+                combined_results[token] = merged
+            else:
+                # If no edge data, still include volatility data
+                vol_df['house_edge'] = np.nan
+                vol_df['total_platform_pnl'] = np.nan
+                vol_df['margin_amount'] = np.nan
+                vol_df['edge_info'] = None
+                vol_df['edge_regime'] = "UNKNOWN"
+                vol_df['edge_desc'] = "Insufficient data"
+                combined_results[token] = vol_df
+            
+    return combined_results
+
 # Function to process tokens in parallel
 def process_tokens_in_parallel(tokens, max_workers):
     """Process volatility calculations for multiple tokens in parallel"""
@@ -454,33 +771,70 @@ with st.expander("View Time Blocks Being Analyzed"):
 progress_status = st.empty()
 progress_status.info("Starting data processing...")
 
-# Calculate volatility for each token in parallel
+# Fetch house edge data (for all tokens)
+progress_status.info("Fetching house edge data for all tokens...")
 start_time = time.time()
+house_edge_data = fetch_house_edge_data(resolution_min)
+edge_time = time.time() - start_time
+progress_status.info(f"House edge data fetched in {edge_time:.2f} seconds. Processing volatility...")
+
+# Calculate volatility for each token in parallel
 token_volatility_results = process_tokens_in_parallel(selected_tokens, parallel_workers)
+
+# Combine volatility and house edge data
+progress_status.info("Combining edge and volatility data...")
+combined_results = combine_volatility_and_edge(token_volatility_results, house_edge_data)
 
 # Final progress update
 total_time = time.time() - start_time
-progress_status.success(f"Processing complete in {total_time:.2f} seconds. Processed {len(token_volatility_results)}/{len(selected_tokens)} tokens.")
+progress_status.success(f"Processing complete in {total_time:.2f} seconds. Processed {len(combined_results)}/{len(selected_tokens)} tokens.")
 
 # Create table for display
-if token_volatility_results:
-    # Create table data for volatility
+if combined_results:
+    # Check if we got house edge data
+    has_edge_data = False
+    for token, df in combined_results.items():
+        if 'house_edge' in df.columns and not df['house_edge'].isna().all():
+            has_edge_data = True
+            break
+    
+    # Display appropriate title based on available data
+    if has_edge_data:
+        st.markdown(f"## Combined {resolution_min}-Minute Edge and Volatility Matrix")
+        st.markdown("### Values shown as: Volatility % / House Edge %")
+    else:
+        st.markdown(f"## {resolution_min}-Minute Volatility Matrix")
+        st.markdown("### Values shown as: Volatility %")
+    
+    # Create table data
     table_data = {}
     
-    for token, df in token_volatility_results.items():
-        # Create a series with volatility values
-        volatility_series = pd.Series(
-            [f"{(v*100):.1f}%" if not pd.isna(v) else "N/A" 
-             for v in df['realized_vol']],
-            index=df['time_label']
-        )
-        table_data[token] = volatility_series
+    for token, df in combined_results.items():
+        # Create a series with appropriate values
+        if has_edge_data:
+            # Combined format: "vol% / edge%"
+            combined_series = pd.Series(
+                [f"{(v*100):.1f}% / {(e*100):.1f}%" if not pd.isna(v) and not pd.isna(e) else 
+                 f"{(v*100):.1f}% / N/A" if not pd.isna(v) else
+                 f"N/A / {(e*100):.1f}%" if not pd.isna(e) else "N/A" 
+                 for v, e in zip(df['realized_vol'], df['house_edge'])],
+                index=df['time_label']
+            )
+        else:
+            # Volatility only format: "vol%"
+            combined_series = pd.Series(
+                [f"{(v*100):.1f}%" if not pd.isna(v) else "N/A" 
+                 for v in df['realized_vol']],
+                index=df['time_label']
+            )
+            
+        table_data[token] = combined_series
     
     # Create DataFrame with all tokens
-    volatility_table = pd.DataFrame(table_data)
+    combined_table = pd.DataFrame(table_data)
     
     # Apply the time blocks in the proper order (most recent first)
-    available_times = set(volatility_table.index)
+    available_times = set(combined_table.index)
     ordered_times = [t for t in time_block_labels if t in available_times]
     
     # If no matches are found in aligned blocks, fallback to the available times
@@ -488,80 +842,198 @@ if token_volatility_results:
         ordered_times = sorted(list(available_times), reverse=True)
     
     # Reindex with the ordered times
-    volatility_table = volatility_table.reindex(ordered_times)
+    combined_table = combined_table.reindex(ordered_times)
     
-    # Function to color cells based on volatility
-    def color_volatility_cells(val):
+    # Create a separate table for visualization that shows numeric values
+    numeric_data = {}
+    for token, df in combined_results.items():
+        # Create dataframes with the numeric values for coloring
+        vol_series = pd.Series(df['realized_vol'] if 'realized_vol' in df else np.nan, 
+                              index=df['time_label'] if 'time_label' in df else [])
+        edge_series = pd.Series(df['house_edge'] if 'house_edge' in df else np.nan, 
+                               index=df['time_label'] if 'time_label' in df else [])
+        numeric_data[token] = {'vol': vol_series, 'edge': edge_series}
+    
+    # Function to color cells
+    def color_matrix_cells(val, token, time_label, has_edge_data):
         if val == "N/A":
             return 'background-color: #f5f5f5; color: #666666;'  # Grey for missing
         
-        try:
-            vol_value = float(val.replace("%", "")) / 100
-        except:
-            return 'background-color: #f5f5f5; color: #666666;'  # Grey for parsing error
+        # Extract vol and edge values
+        vol_value = np.nan
+        edge_value = np.nan
         
-        if pd.isna(vol_value):
+        if has_edge_data:
+            # Extract from combined format "vol% / edge%"
+            if "N/A" not in val:
+                # Format: "vol% / edge%"
+                parts = val.split(" / ")
+                if len(parts) == 2:
+                    try:
+                        vol_value = float(parts[0].replace("%", "")) / 100
+                        edge_value = float(parts[1].replace("%", "")) / 100
+                    except:
+                        pass
+            elif "/ N/A" in val:
+                # Format: "vol% / N/A"
+                try:
+                    vol_value = float(val.split(" / ")[0].replace("%", "")) / 100
+                except:
+                    pass
+            elif "N/A /" in val:
+                # Format: "N/A / edge%"
+                try:
+                    edge_value = float(val.split(" / ")[1].replace("%", "")) / 100
+                except:
+                    pass
+        else:
+            # Extract from volatility-only format
+            try:
+                vol_value = float(val.replace("%", "")) / 100
+            except:
+                pass
+        
+        # If we couldn't parse the values, try to get them from numeric_data
+        if pd.isna(vol_value) or (has_edge_data and pd.isna(edge_value)):
+            try:
+                if token in numeric_data and time_label in numeric_data[token]['vol'].index:
+                    vol_value = numeric_data[token]['vol'].loc[time_label]
+                if has_edge_data and token in numeric_data and time_label in numeric_data[token]['edge'].index:
+                    edge_value = numeric_data[token]['edge'].loc[time_label]
+            except:
+                pass
+        
+        if pd.isna(vol_value) and (not has_edge_data or pd.isna(edge_value)):
             return 'background-color: #f5f5f5; color: #666666;'  # Grey for missing
         
-        # Define volatility color gradient
-        if vol_value < 0.3:  # Low volatility
-            intensity = max(0, min(255, int(255 * vol_value / 0.3)))
-            return f'background-color: rgba({255-intensity}, 255, {255-intensity}, 0.7); color: black'
-        elif vol_value < 0.6:  # Medium volatility
-            intensity = max(0, min(255, int(255 * (vol_value - 0.3) / 0.3)))
-            return f'background-color: rgba(255, 255, {255-intensity}, 0.7); color: black'
-        elif vol_value < 1.0:  # High volatility
-            intensity = max(0, min(255, int(255 * (vol_value - 0.6) / 0.4)))
-            return f'background-color: rgba(255, {255-(intensity//2)}, 0, 0.7); color: black'
-        else:  # Extreme volatility
-            return 'background-color: rgba(255, 0, 0, 0.7); color: white'
+        # Create colors based on combinations of edge and volatility
+        if has_edge_data:
+            # Define edge colors (red to green)
+            if pd.isna(edge_value):
+                edge_color = "200,200,200"  # Grey for missing edge
+            elif edge_value < negative_edge_threshold:  # Negative edge (system losing)
+                edge_color = "255,100,100"  # Red
+            elif edge_value < 0.1:  # Low edge
+                edge_color = "255,200,100"  # Orange yellow
+            elif edge_value < 0.3:  # Medium edge
+                edge_color = "200,255,100"  # Yellow green
+            elif edge_value < high_edge_threshold:  # Good edge
+                edge_color = "150,255,150"  # Light green
+            else:  # High edge
+                edge_color = "100,255,100"  # Green
+                
+            # Define volatility intensity (transparency)
+            if pd.isna(vol_value):
+                vol_alpha = 0.5  # Medium transparency for missing vol
+                text_color = "black"
+            elif vol_value < 0.3:  # Low volatility
+                vol_alpha = 0.4
+                text_color = "black"
+            elif vol_value < 0.6:  # Medium volatility
+                vol_alpha = 0.6
+                text_color = "black"
+            elif vol_value < 1.0:  # High volatility
+                vol_alpha = 0.8
+                text_color = "black"
+            else:  # Extreme volatility
+                vol_alpha = 1.0
+                text_color = "white"
+                
+            return f'background-color: rgba({edge_color}, {vol_alpha}); color: {text_color}'
+            
+        else:
+            # Volatility-only color scheme
+            if pd.isna(vol_value):
+                return 'background-color: #f5f5f5; color: #666666;'  # Grey for missing
+            elif vol_value < 0.3:  # Low volatility
+                intensity = max(0, min(255, int(255 * vol_value / 0.3)))
+                return f'background-color: rgba({255-intensity}, 255, {255-intensity}, 0.7); color: black'
+            elif vol_value < 0.6:  # Medium volatility
+                intensity = max(0, min(255, int(255 * (vol_value - 0.3) / 0.3)))
+                return f'background-color: rgba(255, 255, {255-intensity}, 0.7); color: black'
+            elif vol_value < 1.0:  # High volatility
+                intensity = max(0, min(255, int(255 * (vol_value - 0.6) / 0.4)))
+                return f'background-color: rgba(255, {255-(intensity//2)}, 0, 0.7); color: black'
+            else:  # Extreme volatility
+                return 'background-color: rgba(255, 0, 0, 0.7); color: white'
     
-    # Apply styling
-    styled_table = volatility_table.style.applymap(color_volatility_cells)
+    # Apply styling for the combined table
+    styled_table = combined_table.style.apply(
+        lambda x: pd.Series([color_matrix_cells(val, x.name, idx, has_edge_data) for idx, val in x.items()], index=x.index),
+        axis=1
+    )
+    
+    # Color legends
+    if has_edge_data:
+        st.markdown("""
+        #### Color Legend: 
+        - **Background Color**: House Edge (Red = Negative, Yellow = Low, Green = High)
+        - **Color Intensity**: Volatility (Darker = Higher Volatility)
+        """)
+    else:
+        st.markdown("""
+        #### Color Legend: 
+        - **Green**: Low volatility (<30%)
+        - **Yellow**: Medium volatility (30-60%)
+        - **Orange**: High volatility (60-100%)
+        - **Red**: Extreme volatility (>100%)
+        """)
     
     # Display the matrix
-    st.markdown(f"## {resolution_min}-Minute Volatility Matrix")
-    st.markdown("### Values shown as annualized volatility percentages")
-    st.markdown("""
-    #### Color Legend: 
-    - **Green**: Low volatility (<30%)
-    - **Yellow**: Medium volatility (30-60%)
-    - **Orange**: High volatility (60-100%)
-    - **Red**: Extreme volatility (>100%)
-    """)
     st.dataframe(styled_table, height=700, use_container_width=True)
     
     # Create a summary dashboard
-    st.subheader("24-Hour Volatility Summary")
+    st.subheader("24-Hour Summary Dashboard")
     
     # Summary metrics
     summary_data = []
-    for token, df in token_volatility_results.items():
+    for token, df in combined_results.items():
         if not df.empty:
             avg_vol = df['realized_vol'].mean() if 'realized_vol' in df and not df['realized_vol'].isna().all() else np.nan
+            avg_edge = df['house_edge'].mean() if 'house_edge' in df and not df['house_edge'].isna().all() else np.nan
+            total_pnl = df['total_platform_pnl'].sum() if 'total_platform_pnl' in df and not df['total_platform_pnl'].isna().all() else np.nan
+            total_margin = df['margin_amount'].sum() if 'margin_amount' in df and not df['margin_amount'].isna().all() else np.nan
             
             # Get peak volatility time
             if 'realized_vol' in df and not df['realized_vol'].isna().all():
                 max_vol_idx = df['realized_vol'].idxmax() 
                 max_vol_time = df.loc[max_vol_idx, 'time_label'] if 'time_label' in df.columns else "N/A"
-                max_vol_value = df.loc[max_vol_idx, 'realized_vol'] if not pd.isna(df.loc[max_vol_idx, 'realized_vol']) else np.nan
             else:
                 max_vol_time = "N/A"
-                max_vol_value = np.nan
             
-            summary_data.append({
+            # Get best edge time
+            if 'house_edge' in df and not df['house_edge'].isna().all():
+                max_edge_idx = df['house_edge'].idxmax()
+                max_edge_time = df.loc[max_edge_idx, 'time_label'] if 'time_label' in df.columns else "N/A"
+            else:
+                max_edge_time = "N/A"
+            
+            # Create summary row with available data
+            summary_row = {
                 'Token': token,
                 'Avg Vol (%)': (avg_vol * 100).round(1) if not pd.isna(avg_vol) else np.nan,
-                'Peak Vol (%)': (max_vol_value * 100).round(1) if not pd.isna(max_vol_value) else np.nan,
-                'Peak Vol Time': max_vol_time,
-                'Volatility Regime': df['avg_vol_desc'].iloc[0] if not df['avg_vol_desc'].isna().all() else "Unknown"
-            })
+                'Peak Vol Time': max_vol_time
+            }
+            
+            # Add edge data if available
+            if has_edge_data:
+                summary_row.update({
+                    'Avg Edge (%)': (avg_edge * 100).round(1) if not pd.isna(avg_edge) else np.nan,
+                    'Total PNL': int(total_pnl) if not pd.isna(total_pnl) else np.nan,
+                    'Total Margin': int(total_margin) if not pd.isna(total_margin) else np.nan,
+                    'Best Edge Time': max_edge_time
+                })
+                
+            summary_data.append(summary_row)
     
     if summary_data:
         summary_df = pd.DataFrame(summary_data)
         
-        # Sort by average volatility (high to low)
-        summary_df = summary_df.sort_values(by='Avg Vol (%)', ascending=False)
+        # Sort based on available data
+        if has_edge_data and 'Avg Edge (%)' in summary_df.columns:
+            summary_df = summary_df.sort_values(by='Avg Edge (%)', ascending=False)
+        else:
+            summary_df = summary_df.sort_values(by='Avg Vol (%)', ascending=False)
         
         # Add rank column
         summary_df.insert(0, 'Rank', range(1, len(summary_df) + 1))
@@ -582,136 +1054,307 @@ if token_volatility_results:
             else:
                 return 'color: red'
         
-        def color_regime_column(val):
-            if "Low" in val:
-                return 'color: green'
-            elif "Medium" in val:
-                return 'color: #aaaa00'
-            elif "High" in val:
+        def color_edge_column(val):
+            if pd.isna(val):
+                return ''
+            elif val < negative_edge_threshold * 100:
+                return 'color: red'
+            elif val < 10:
                 return 'color: orange'
-            elif "Extreme" in val:
+            elif val < 30:
+                return 'color: #aaaa00'
+            elif val < high_edge_threshold * 100:
+                return 'color: lightgreen'
+            else:
+                return 'color: green; font-weight: bold'
+        
+        def color_pnl_column(val):
+            if pd.isna(val):
+                return ''
+            elif val < 0:
                 return 'color: red'
             else:
-                return ''
+                return 'color: green'
         
-        # Apply styling
-        styled_summary = summary_df.style\
-            .applymap(color_vol_column, subset=['Avg Vol (%)', 'Peak Vol (%)'])\
-            .applymap(color_regime_column, subset=['Volatility Regime'])
+        # Apply styling based on available columns
+        styled_summary = summary_df.style
+        styled_summary = styled_summary.applymap(color_vol_column, subset=['Avg Vol (%)'])
+        
+        if has_edge_data:
+            if 'Avg Edge (%)' in summary_df.columns:
+                styled_summary = styled_summary.applymap(color_edge_column, subset=['Avg Edge (%)'])
+            if 'Total PNL' in summary_df.columns:
+                styled_summary = styled_summary.applymap(color_pnl_column, subset=['Total PNL'])
         
         # Display the styled dataframe
         st.dataframe(styled_summary, height=500, use_container_width=True)
         
-        # Volatility overview
-        st.subheader("Volatility Breakdown")
-        
-        # Count tokens in each volatility regime
-        low_vol = sum(1 for row in summary_data if not pd.isna(row['Avg Vol (%)']) and row['Avg Vol (%)'] < 30)
-        medium_vol = sum(1 for row in summary_data if not pd.isna(row['Avg Vol (%)']) and 30 <= row['Avg Vol (%)'] < 60)
-        high_vol = sum(1 for row in summary_data if not pd.isna(row['Avg Vol (%)']) and 60 <= row['Avg Vol (%)'] < 100)
-        extreme_vol = sum(1 for row in summary_data if not pd.isna(row['Avg Vol (%)']) and row['Avg Vol (%)'] >= 100)
-        
-        total = low_vol + medium_vol + high_vol + extreme_vol
-        
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Low Vol", f"{low_vol} ({low_vol/total*100:.1f}%)")
-        col2.metric("Medium Vol", f"{medium_vol} ({medium_vol/total*100:.1f}%)")
-        col3.metric("High Vol", f"{high_vol} ({high_vol/total*100:.1f}%)")
-        col4.metric("Extreme Vol", f"{extreme_vol} ({extreme_vol/total*100:.1f}%)")
-        
-        # Create pie chart
-        labels = ['Low Vol', 'Medium Vol', 'High Vol', 'Extreme Vol']
-        values = [low_vol, medium_vol, high_vol, extreme_vol]
-        colors = ['rgba(100,255,100,0.8)', 'rgba(255,255,100,0.8)', 'rgba(255,165,0,0.8)', 'rgba(255,0,0,0.8)']
-        
-        fig = go.Figure(data=[go.Pie(
-            labels=labels, 
-            values=values, 
-            marker=dict(colors=colors, line=dict(color='#000000', width=2)), 
-            textinfo='label+percent', 
-            hole=.3
-        )])
-        fig.update_layout(
-            title="24-Hour Volatility Distribution",
-            height=400,
-            font=dict(color="#000000", size=12),
-        )
-        st.plotly_chart(fig, use_container_width=True)
-        
+        # Create summary metrics at the top based on available data
+        if has_edge_data:
+            total_pnl = sum(row.get('Total PNL', 0) for row in summary_data if 'Total PNL' in row and not pd.isna(row['Total PNL']))
+            
+            # Calculate weighted average edge if we have valid data
+            valid_data = [(row['Avg Edge (%)'], row['Total Margin']) for row in summary_data 
+                         if 'Avg Edge (%)' in row and 'Total Margin' in row and
+                         not pd.isna(row['Avg Edge (%)']) and not pd.isna(row['Total Margin']) and row['Total Margin'] != 0]
+            
+            if valid_data:
+                total_margin = sum(margin for _, margin in valid_data)
+                if total_margin > 0:
+                    avg_portfolio_edge = sum(edge * margin / 100 for edge, margin in valid_data) / total_margin * 100
+                else:
+                    avg_portfolio_edge = np.nan
+            else:
+                avg_portfolio_edge = np.nan
+            
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Total Portfolio PNL (24h)", f"${total_pnl:,.2f}")
+            col2.metric("Weighted Avg Edge", f"{avg_portfolio_edge:.2f}%" if not pd.isna(avg_portfolio_edge) else "N/A")
+            col3.metric("Tokens Analyzed", f"{len(summary_data)}")
+        else:
+            # Volatility-only metrics
+            col1, col2 = st.columns(2)
+            col1.metric("Average Volatility", f"{summary_df['Avg Vol (%)'].mean():.2f}%")
+            col2.metric("Tokens Analyzed", f"{len(summary_data)}")
     else:
         st.warning("No summary data available.")
     
-    # Extreme volatility events
-    st.subheader("Extreme Volatility Events")
+    # Identify and display opportunities
+    st.subheader("Trading Opportunities & Events")
     
+    if has_edge_data:
+        # Trading opportunities section with both edge and volatility
+        col1, col2 = st.columns(2)
+        
+        # 1. High Edge with Low Volatility (Good Risk/Reward)
+        high_edge_tokens = [row for row in summary_data 
+                            if 'Avg Edge (%)' in row and 'Avg Vol (%)' in row
+                            and not pd.isna(row['Avg Edge (%)']) 
+                            and not pd.isna(row['Avg Vol (%)'])
+                            and row['Avg Edge (%)'] > 20
+                            and row['Avg Vol (%)'] < 60]
+        
+        with col1:
+            st.markdown("### High Edge / Low Volatility Pairs")
+            if high_edge_tokens:
+                for token in high_edge_tokens:
+                    edge = token['Avg Edge (%)']
+                    vol = token['Avg Vol (%)']
+                    edge_color = "green" if edge > 30 else "lightgreen"
+                    st.markdown(f"- **{token['Token']}**: Edge: <span style='color:{edge_color}'>{edge:.1f}%</span>, Vol: <span style='color:green'>{vol:.1f}%</span>", unsafe_allow_html=True)
+            else:
+                st.markdown("*No tokens in this category*")
+    
+    # Extreme volatility events
     extreme_vol_events = []
-    for token, df in token_volatility_results.items():
+    for token, df in combined_results.items():
         if not df.empty and 'realized_vol' in df.columns:
             extreme_periods = df[df['realized_vol'] >= extreme_vol_threshold]
             for idx, row in extreme_periods.iterrows():
                 vol_value = float(row['realized_vol']) if 'realized_vol' in row and not pd.isna(row['realized_vol']) else 0.0
+                edge_value = float(row['house_edge']) if 'house_edge' in row and not pd.isna(row['house_edge']) else 0.0
                 time_label = str(row['time_label']) if 'time_label' in row and not pd.isna(row['time_label']) else "Unknown"
                 
                 extreme_vol_events.append({
                     'Token': token,
                     'Time': time_label,
                     'Volatility (%)': round(vol_value * 100, 1),
+                    'Edge (%)': round(edge_value * 100, 1) if has_edge_data else np.nan,
                     'Full Timestamp': idx.strftime('%Y-%m-%d %H:%M') if hasattr(idx, 'strftime') else str(idx)
                 })
     
-    if extreme_vol_events:
-        extreme_df = pd.DataFrame(extreme_vol_events)
-        # Sort by volatility (highest first)
-        extreme_df = extreme_df.sort_values(by='Volatility (%)', ascending=False)
-        
-        # Reset the index to remove it
-        extreme_df = extreme_df.reset_index(drop=True)
-        
-        # Display the dataframe
-        st.dataframe(extreme_df, height=300, use_container_width=True)
-        
-        # Create a more visually appealing list of extreme events
-        st.markdown("### Top Extreme Volatility Events")
-        
-        # Only process top 10 events if there are any
-        top_events = extreme_df.head(10).to_dict('records')
-        for i, event in enumerate(top_events):
-            token = event['Token']
-            time = event['Time']
-            vol = event['Volatility (%)']
-            date = event['Full Timestamp'].split(' ')[0] if ' ' in event['Full Timestamp'] else ""
-            
-            st.markdown(f"**{i+1}. {token}** at **{time}** on {date}: <span style='color:red; font-weight:bold;'>{vol}%</span> volatility", unsafe_allow_html=True)
-        
-        if len(extreme_vol_events) > 10:
-            st.markdown(f"*... and {len(extreme_vol_events) - 10} more extreme events*")
+    if has_edge_data:
+        with col2:
+            st.markdown("### Extreme Volatility Events")
+            if extreme_vol_events:
+                extreme_vol_events_sorted = sorted(extreme_vol_events, key=lambda x: x['Volatility (%)'], reverse=True)
+                for event in extreme_vol_events_sorted[:5]:  # Show top 5
+                    token = event['Token']
+                    time = event['Time']
+                    vol = event['Volatility (%)']
+                    edge = event['Edge (%)']
+                    edge_color = "red" if edge < 0 else "green"
+                    st.markdown(f"- **{token}** at **{time}**: Vol: <span style='color:red'>{vol}%</span>, Edge: <span style='color:{edge_color}'>{edge}%</span>", unsafe_allow_html=True)
+                
+                if len(extreme_vol_events) > 5:
+                    st.markdown(f"*... and {len(extreme_vol_events) - 5} more extreme events*")
+            else:
+                st.markdown("*No events in this category*")
     else:
-        st.info("No extreme volatility events detected in the selected tokens.")
+        # Volatility-only events display
+        st.markdown("### Extreme Volatility Events")
+        if extreme_vol_events:
+            extreme_df = pd.DataFrame(extreme_vol_events)
+            # Sort by volatility (highest first)
+            extreme_df = extreme_df.sort_values(by='Volatility (%)', ascending=False)
+            
+            # Reset the index to remove it
+            extreme_df = extreme_df.reset_index(drop=True)
+            
+            # Display the dataframe
+            st.dataframe(extreme_df, height=300, use_container_width=True)
+            
+            # Create a more visually appealing list of extreme events
+            st.markdown("### Top Extreme Volatility Events")
+            
+            # Only process top 10 events if there are any
+            top_events = extreme_df.head(10).to_dict('records')
+            for i, event in enumerate(top_events):
+                token = event['Token']
+                time = event['Time']
+                vol = event['Volatility (%)']
+                date = event['Full Timestamp'].split(' ')[0] if ' ' in event['Full Timestamp'] else ""
+                
+                st.markdown(f"**{i+1}. {token}** at **{time}** on {date}: <span style='color:red; font-weight:bold;'>{vol}%</span> volatility", unsafe_allow_html=True)
+            
+            if len(extreme_vol_events) > 10:
+                st.markdown(f"*... and {len(extreme_vol_events) - 10} more extreme events*")
+        else:
+            st.info("No extreme volatility events detected in the selected tokens.")
+    
+    # Only show the edge vs. volatility visualization if we have edge data
+    if has_edge_data:
+        # Visualize the relationship between edge and volatility
+        st.subheader("Edge vs. Volatility Relationship")
+        
+        # Prepare data for scatter plot
+        scatter_data = []
+        for token, df in combined_results.items():
+            if not df.empty:
+                avg_vol = df['realized_vol'].mean() if 'realized_vol' in df and not df['realized_vol'].isna().all() else np.nan
+                avg_edge = df['house_edge'].mean() if 'house_edge' in df and not df['house_edge'].isna().all() else np.nan
+                if not pd.isna(avg_vol) and not pd.isna(avg_edge):
+                    scatter_data.append({
+                        'Token': token,
+                        'Volatility': avg_vol * 100,  # Convert to percentage
+                        'Edge': avg_edge * 100        # Convert to percentage
+                    })
+        
+        if scatter_data:
+            scatter_df = pd.DataFrame(scatter_data)
+            
+            # Create scatter plot
+            fig = go.Figure()
+            
+            # Add scatter points
+            fig.add_trace(go.Scatter(
+                x=scatter_df['Volatility'],
+                y=scatter_df['Edge'],
+                mode='markers+text',
+                marker=dict(
+                    size=12,
+                    color=scatter_df['Volatility'],
+                    colorscale='Viridis',
+                    showscale=True,
+                    colorbar=dict(title="Volatility (%)"),
+                    line=dict(width=1, color='black')
+                ),
+                text=scatter_df['Token'],
+                textposition="top center",
+                name='Tokens'
+            ))
+            
+            # Add quadrant lines
+            fig.add_shape(
+                type="line",
+                x0=0, x1=max(scatter_df['Volatility']) * 1.1,
+                y0=0, y1=0,
+                line=dict(color="black", width=1, dash="dash")
+            )
+            
+            fig.add_shape(
+                type="line",
+                x0=60, x1=60,
+                y0=min(scatter_df['Edge']) * 1.1, y1=max(scatter_df['Edge']) * 1.1,
+                line=dict(color="black", width=1, dash="dash")
+            )
+            
+            # Add quadrant labels
+            fig.add_annotation(
+                x=30, y=20,
+                text="IDEAL:<br>High Edge, Low Vol",
+                showarrow=False,
+                font=dict(size=12, color="green")
+            )
+            
+            fig.add_annotation(
+                x=80, y=20,
+                text="GOOD:<br>High Edge, High Vol",
+                showarrow=False,
+                font=dict(size=12, color="darkgreen")
+            )
+            
+            fig.add_annotation(
+                x=30, y=-20,
+                text="POOR:<br>Negative Edge, Low Vol",
+                showarrow=False,
+                font=dict(size=12, color="red")
+            )
+            
+            fig.add_annotation(
+                x=80, y=-20,
+                text="AVOID:<br>Negative Edge, High Vol",
+                showarrow=False,
+                font=dict(size=12, color="darkred")
+            )
+            
+            # Update layout
+            fig.update_layout(
+                title="Average Edge vs. Volatility by Token (24h)",
+                xaxis_title="Volatility (%)",
+                yaxis_title="Edge (%)",
+                height=600,
+                template="plotly_white",
+                showlegend=False
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.warning("Insufficient data for scatter plot.")
 
-with st.expander("Understanding the Volatility Matrix"):
-    st.markdown(f"""
-    ### How to Read This Table
-    
-    The {resolution_min}-Minute Volatility Matrix shows volatility data for each token across time intervals during the last 24 hours.
-    
-    #### Cell Values
-    Each cell shows the **annualized volatility percentage** for that specific token and time period.
-    
-    #### Color Coding
-    - **Green**: Low volatility (<30%)
-    - **Yellow**: Medium volatility (30-60%)
-    - **Orange**: High volatility (60-100%)
-    - **Red**: Extreme volatility (>100%)
-    
-    #### Trading Implications
-    - **Green areas**: Periods of low volatility, often suitable for range-bound trading strategies
-    - **Yellow/Orange areas**: Periods of increased volatility, may require wider stops but offer more trading opportunities 
-    - **Red areas**: Extreme volatility periods, requiring careful risk management but potentially offering significant opportunities
-    
-    #### Technical Details
-    - Volatility is calculated as the standard deviation of log returns
-    - Values are annualized to represent expected price variation over a year
-    - Calculations use a rolling window approach on 1-minute price data
-    - All times are shown in Singapore timezone
-    - Missing values (gray cells) indicate insufficient data
-    """)
+with st.expander("Understanding the Matrix"):
+    if has_edge_data:
+        st.markdown(f"""
+        ### How to Read This Table
+        
+        The {resolution_min}-Minute System Edge & Volatility Matrix shows combined data for each token across time intervals during the last 24 hours. Each cell contains both volatility and house edge information.
+        
+        #### Cell Values
+        Each cell shows **Volatility % / House Edge %** for that specific token and time period.
+        
+        #### Color Coding
+        - **Background Color** represents the house edge:
+            - **Red**: Negative edge (system is losing money)
+            - **Orange/Yellow**: Low/medium edge
+            - **Green**: High edge (good for the system)
+        
+        - **Color Intensity** represents volatility:
+            - **Lighter shades**: Lower volatility
+            - **Darker shades**: Higher volatility
+            - **White text**: Extreme volatility (≥100%)
+        
+        #### Trading Implications
+        - **Green cells with light background**: High edge with low volatility - best trading opportunities
+        - **Green cells with dark background**: High edge but high volatility - good but riskier
+        - **Red cells with dark background**: Negative edge with high volatility - avoid these
+        
+        #### Technical Details
+        - Volatility is calculated as the standard deviation of log returns, annualized 
+        - House edge represents the system's profitability, calculated as (platform PNL / total margin)
+        - Edge values range from -1 to 1, with positive values indicating system profit
+        - All times are shown in Singapore timezone
+        - Missing values (gray cells) indicate insufficient data
+        """)
+    else:
+        st.markdown(f"""
+        ### How to Read This Table
+        
+        The {resolution_min}-Minute Volatility Matrix shows volatility data for each token across time intervals during the last 24 hours.
+        
+        #### Cell Values
+        Each cell shows the **annualized volatility percentage** for that specific token and time period.
+        
+        #### Color Coding
+        - **Green**: Low volatility (<30%)
+        - **Yellow**: Medium volatility (30-60%)
+        - **Orange**: High volatility (60-100%)
