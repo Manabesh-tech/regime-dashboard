@@ -122,6 +122,10 @@ def fetch_data(pair_name):
     start_time_utc = start_time_sg.astimezone(pytz.utc)
     end_time_utc = now_sg.astimezone(pytz.utc)
 
+    # Debug information
+    st.sidebar.write(f"Fetching data for {pair_name}")
+    st.sidebar.write(f"Time range: {start_time_utc} to {end_time_utc}")
+
     query = f"""
     WITH time_blocks AS (
       SELECT
@@ -132,17 +136,68 @@ def fetch_data(pair_name):
           INTERVAL '10 minutes'
         ) AS block_start
     ),
-    slot_data AS (
+    pnl_data AS (
       SELECT
-        date_trunc('hour', created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') + 
-        INTERVAL '10 min' * floor(EXTRACT(MINUTE FROM created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') / 10) AS time_slot,
-        SUM(taker_pnl * collateral_price) AS order_pnl,
-        SUM(funding_fee * collateral_price) AS funding_pnl,
-        SUM(rebate * collateral_price) AS rebate_pnl,
-        SUM(CASE WHEN taker_way IN (1, 3) THEN collateral_amount * collateral_price ELSE 0 END) AS total_collateral,
+        date_trunc('hour', created_at) + 
+        INTERVAL '10 min' * floor(EXTRACT(MINUTE FROM created_at) / 10) AS time_slot,
+        (
+          SELECT SUM(CombinedResult) FROM (
+            -- Order PNL
+            SELECT SUM(taker_pnl * collateral_price) AS CombinedResult
+            FROM public.trade_fill_fresh inner_t
+            WHERE inner_t.created_at BETWEEN 
+                  date_trunc('hour', t.created_at) + INTERVAL '10 min' * floor(EXTRACT(MINUTE FROM t.created_at) / 10) 
+                  AND date_trunc('hour', t.created_at) + INTERVAL '10 min' * floor(EXTRACT(MINUTE FROM t.created_at) / 10) + INTERVAL '10 minutes'
+              AND inner_t.pair_name = '{pair_name}'
+              AND inner_t.taker_way IN (1, 2, 3, 4)
+
+            UNION ALL
+
+            -- Fee revenue (negative because it's income for platform)
+            SELECT SUM(-1 * taker_fee * collateral_price) AS CombinedResult
+            FROM public.trade_fill_fresh inner_t
+            WHERE inner_t.created_at BETWEEN 
+                  date_trunc('hour', t.created_at) + INTERVAL '10 min' * floor(EXTRACT(MINUTE FROM t.created_at) / 10) 
+                  AND date_trunc('hour', t.created_at) + INTERVAL '10 min' * floor(EXTRACT(MINUTE FROM t.created_at) / 10) + INTERVAL '10 minutes'
+              AND inner_t.pair_name = '{pair_name}'
+              AND inner_t.taker_fee_mode = 1 
+              AND inner_t.taker_way IN (1, 3)
+
+            UNION ALL
+
+            -- Funding fees
+            SELECT SUM(funding_fee * collateral_price) AS CombinedResult
+            FROM public.trade_fill_fresh inner_t
+            WHERE inner_t.created_at BETWEEN 
+                  date_trunc('hour', t.created_at) + INTERVAL '10 min' * floor(EXTRACT(MINUTE FROM t.created_at) / 10) 
+                  AND date_trunc('hour', t.created_at) + INTERVAL '10 min' * floor(EXTRACT(MINUTE FROM t.created_at) / 10) + INTERVAL '10 minutes'
+              AND inner_t.pair_name = '{pair_name}'
+              AND inner_t.taker_way = 0
+
+            UNION ALL
+
+            -- Stop loss fees
+            SELECT SUM(-taker_sl_fee * collateral_price - maker_sl_fee) AS CombinedResult
+            FROM public.trade_fill_fresh inner_t
+            WHERE inner_t.created_at BETWEEN 
+                  date_trunc('hour', t.created_at) + INTERVAL '10 min' * floor(EXTRACT(MINUTE FROM t.created_at) / 10) 
+                  AND date_trunc('hour', t.created_at) + INTERVAL '10 min' * floor(EXTRACT(MINUTE FROM t.created_at) / 10) + INTERVAL '10 minutes'
+              AND inner_t.pair_name = '{pair_name}'
+          ) AS CombinedResults
+        ) AS total_pnl,
+        
+        -- Collateral calculation as per your colleague's query
+        SUM(
+          CASE 
+            WHEN taker_fee_mode = 2 AND taker_way IN (1, 3) 
+            THEN deal_vol * collateral_price 
+            ELSE 0 
+          END
+        ) AS total_collateral,
+        
         array_agg(deal_price ORDER BY created_at) AS price_array
       FROM
-        trade_fill_fresh
+        public.trade_fill_fresh t
       WHERE
         created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
         AND pair_name = '{pair_name}'
@@ -151,15 +206,13 @@ def fetch_data(pair_name):
     )
     SELECT
       tb.block_start AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore' AS timestamp,
-      COALESCE(sd.order_pnl, 0) AS order_pnl,
-      COALESCE(sd.funding_pnl, 0) AS funding_pnl,
-      COALESCE(sd.rebate_pnl, 0) AS rebate_pnl,
-      COALESCE(sd.total_collateral, 0) AS total_collateral,
-      sd.price_array
+      COALESCE(pd.total_pnl, 0) AS total_pnl,
+      COALESCE(pd.total_collateral, 0) AS total_collateral,
+      pd.price_array
     FROM
       time_blocks tb
     LEFT JOIN
-      slot_data sd ON tb.block_start = sd.time_slot AT TIME ZONE 'Asia/Singapore' AT TIME ZONE 'UTC'
+      pnl_data pd ON tb.block_start = pd.time_slot
     ORDER BY
       tb.block_start
     """
@@ -169,20 +222,28 @@ def fetch_data(pair_name):
             df = pd.read_sql(query, conn)
         
         if df.empty:
+            st.sidebar.write(f"No data found for {pair_name}")
             return None
+        
+        # Debug count
+        st.sidebar.write(f"Retrieved {len(df)} rows for {pair_name}")
         
         # Process data
         df['timestamp'] = pd.to_datetime(df['timestamp'])
         df['time_label'] = df['timestamp'].dt.strftime('%H:%M')
         
-        # Calculate metrics
-        df['total_pnl'] = df['order_pnl'] + df['funding_pnl'] + df['rebate_pnl']
+        # Calculate edge directly using total_pnl and total_collateral
         df['edge'] = np.where(df['total_collateral'] > 0, df['total_pnl'] / df['total_collateral'], None)
         df['volatility'] = df['price_array'].apply(calculate_volatility)
         
+        # Show data summary
+        non_null_edges = df['edge'].count()
+        non_null_vols = df['volatility'].count()
+        st.sidebar.write(f"Non-null edges: {non_null_edges}, Non-null volatilities: {non_null_vols}")
+        
         return df
     except Exception as e:
-        st.error(f"Error fetching data for {pair_name}: {e}")
+        st.sidebar.error(f"Error fetching data for {pair_name}: {str(e)}")
         return None
 
 # Progress indicator
