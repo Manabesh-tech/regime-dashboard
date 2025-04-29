@@ -98,7 +98,13 @@ def get_engine(db_name='report_dev'):
         user = st.secrets["database"]["user"]
         password = st.secrets["database"]["password"]
         host = st.secrets["database"]["host"]
-        port = st.secrets["database"]["port"]
+        
+        # Handle potentially empty port - default to 5432 if empty
+        try:
+            port = int(st.secrets["database"]["port"])
+        except (ValueError, TypeError):
+            port = 5432  # Default PostgreSQL port
+            
         database = st.secrets["database"]["database"]
         
         # Construct connection URL
