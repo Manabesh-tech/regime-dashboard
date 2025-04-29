@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
 from sqlalchemy import create_engine
 from datetime import datetime, timedelta
 import pytz
@@ -25,14 +24,12 @@ except Exception as e:
     st.stop()
 
 # --- UI Setup ---
-st.set_option('deprecation.showPyplotGlobalUse', False)
 st.title("Edge & Volatility Matrix (10min)")
 st.subheader("All Trading Pairs - Last 24 Hours (Singapore Time)")
 
 # Define parameters
 timeframe = "10min"
 lookback_days = 1  # 24 hours
-expected_points = 144  # Expected data points per pair over 24 hours (24 hours * 6 intervals per hour)
 singapore_timezone = pytz.timezone('Asia/Singapore')
 
 # Get current time in Singapore timezone
@@ -317,70 +314,9 @@ status_text.text(f"Processed {len(pair_results)}/{len(selected_pairs)} pairs suc
 # Create tabs for Edge and Volatility
 tab1, tab2, tab3 = st.tabs(["Edge", "Volatility", "Combined"])
 
-# Function to color edge values
-def edge_color(val):
-    if pd.isna(val) or val is None:
-        return '#f5f5f5'  # Gray for missing/zero
-    elif val < -0.1:
-        return 'rgba(180, 0, 0, 0.9)'  # Deep red
-    elif val < -0.05:
-        return 'rgba(255, 0, 0, 0.9)'  # Red
-    elif val < -0.01:
-        return 'rgba(255, 150, 150, 0.9)'  # Light red
-    elif val < 0.01:
-        return 'rgba(255, 255, 150, 0.9)'  # Yellow
-    elif val < 0.05:
-        return 'rgba(150, 255, 150, 0.9)'  # Light green
-    elif val < 0.1:
-        return 'rgba(0, 255, 0, 0.9)'  # Green
-    else:
-        return 'rgba(0, 180, 0, 0.9)'  # Deep green
-
-# Function to color volatility values
-def vol_color(val):
-    if pd.isna(val) or val is None:
-        return '#f5f5f5'  # Gray for missing/zero
-    elif val < 0.3:
-        return 'rgba(0, 255, 0, 0.9)'  # Green
-    elif val < 0.6:
-        return 'rgba(255, 255, 0, 0.9)'  # Yellow
-    elif val < 1.0:
-        return 'rgba(255, 165, 0, 0.9)'  # Orange
-    else:
-        return 'rgba(255, 0, 0, 0.9)'  # Red
-
-# Format values for display
-def format_value(val, type='edge'):
-    if pd.isna(val) or val is None:
-        return '-'
-    
-    if type == 'edge':
-        return f"{val*100:.2f}%"
-    else:  # volatility
-        return f"{val*100:.1f}%"
-
-# Function to create matrix and handle duplicates
-def create_time_matrix(data_dict, time_labels, metric):
-    # Create a dict of dicts to handle potential duplicates
-    matrix_data = {}
-    
-    for pair_name, df in data_dict.items():
-        matrix_data[pair_name] = {}
-        
-        # Group by time_label and take the average for any duplicates
-        grouped = df.groupby('time_label')[metric].mean()
-        
-        # Fill the matrix with values
-        for time_label in time_labels:
-            if time_label in grouped.index:
-                matrix_data[pair_name][time_label] = grouped[time_label]
-            else:
-                matrix_data[pair_name][time_label] = None
-    
-    return matrix_data
-
-if pair_results:
-    # Create a list of all time labels we have data for
+# Helper function to format time labels for display
+def format_time_labels():
+    # Process time blocks to get unique, ordered labels
     all_time_labels = set()
     for pair, df in pair_results.items():
         all_time_labels.update(df['time_label'].tolist())
@@ -395,76 +331,100 @@ if pair_results:
     if not ordered_times:
         ordered_times = sorted(list(all_time_labels), reverse=True)
     
+    return ordered_times
+
+# Create an edge matrix that shows exact values
+def create_edge_matrix(data_dict, time_labels):
+    # Create a new DataFrame with time labels as columns and pairs as rows
+    edge_matrix = pd.DataFrame(index=selected_pairs, columns=time_labels)
+    
+    # Fill in the matrix with edge values
+    for pair_name, df in data_dict.items():
+        for _, row in df.iterrows():
+            time_label = row['time_label']
+            if time_label in time_labels:
+                edge_matrix.at[pair_name, time_label] = row['edge']
+    
+    # Return the matrix with both the index and columns reset
+    return edge_matrix.reset_index().rename(columns={'index': 'pair_name'})
+
+# Create a volatility matrix that shows exact values
+def create_volatility_matrix(data_dict, time_labels):
+    # Create a new DataFrame with time labels as columns and pairs as rows
+    vol_matrix = pd.DataFrame(index=selected_pairs, columns=time_labels)
+    
+    # Fill in the matrix with volatility values
+    for pair_name, df in data_dict.items():
+        for _, row in df.iterrows():
+            time_label = row['time_label']
+            if time_label in time_labels:
+                vol_matrix.at[pair_name, time_label] = row['volatility']
+    
+    # Return the matrix with both the index and columns reset
+    return vol_matrix.reset_index().rename(columns={'index': 'pair_name'})
+
+# Style functions
+def color_edge_cells(val):
+    if pd.isna(val) or val == 0:
+        return 'background-color: #f5f5f5; color: #666666;'  # Gray for missing/zero
+    elif val < -0.1:
+        return 'background-color: rgba(180, 0, 0, 0.9); color: white;'  # Deep red
+    elif val < -0.05:
+        return 'background-color: rgba(255, 0, 0, 0.9); color: white;'  # Red
+    elif val < -0.01:
+        return 'background-color: rgba(255, 150, 150, 0.9); color: black;'  # Light red
+    elif val < 0.01:
+        return 'background-color: rgba(255, 255, 150, 0.9); color: black;'  # Yellow
+    elif val < 0.05:
+        return 'background-color: rgba(150, 255, 150, 0.9); color: black;'  # Light green
+    elif val < 0.1:
+        return 'background-color: rgba(0, 255, 0, 0.9); color: black;'  # Green
+    else:
+        return 'background-color: rgba(0, 180, 0, 0.9); color: white;'  # Deep green
+
+def color_volatility_cells(val):
+    if pd.isna(val) or val == 0:
+        return 'background-color: #f5f5f5; color: #666666;'  # Gray for missing/zero
+    elif val < 0.3:
+        return 'background-color: rgba(0, 255, 0, 0.9); color: black;'  # Green
+    elif val < 0.6:
+        return 'background-color: rgba(255, 255, 0, 0.9); color: black;'  # Yellow
+    elif val < 1.0:
+        return 'background-color: rgba(255, 165, 0, 0.9); color: black;'  # Orange
+    else:
+        return 'background-color: rgba(255, 0, 0, 0.9); color: white;'  # Red
+
+if pair_results:
+    # Get ordered time labels
+    ordered_times = format_time_labels()
+    
     # With tab 1 (Edge)
     with tab1:
         st.markdown("## Edge Matrix (10min timeframe, Last 24 hours, Singapore Time)")
         st.markdown("### Edge = PNL / Total Open Collateral")
         
         # Create edge matrix
-        edge_matrix = create_time_matrix(pair_results, ordered_times, 'edge')
+        edge_df = create_edge_matrix(pair_results, ordered_times)
         
-        # Create visualization
-        fig = go.Figure()
+        # Format values for display (convert to percentages)
+        display_edge_df = edge_df.copy()
+        for col in ordered_times:
+            display_edge_df[col] = display_edge_df[col].apply(
+                lambda x: f"{x*100:.1f}%" if not pd.isna(x) else "0"
+            )
         
-        # Add each pair to the matrix
-        for pair_name, time_data in edge_matrix.items():
-            # Extract values in the correct order
-            edge_values = [time_data.get(t) for t in ordered_times]
-            
-            # Add trace for hover
-            fig.add_trace(go.Heatmap(
-                z=[edge_values],
-                x=ordered_times,
-                y=[pair_name],
-                colorscale=[[0, 'rgba(255,255,255,0)']],  # Transparent
-                showscale=False,
-                hoverinfo='text',
-                text=[[format_value(v) for v in edge_values]],
-                hovertemplate='<b>%{y}</b><br>Time: %{x}<br>Edge: %{text}<extra></extra>'
-            ))
-            
-            # Add colored rectangles and text
-            for i, val in enumerate(edge_values):
-                if not pd.isna(val) and val is not None:
-                    # Add colored rectangle
-                    fig.add_shape(
-                        type="rect",
-                        x0=i-0.5, x1=i+0.5,
-                        y0=-0.5, y1=0.5,
-                        xref="x", yref=f"y{len(fig.data)}",
-                        fillcolor=edge_color(val),
-                        line=dict(width=1, color='white'),
-                    )
-                    
-                    # Add text annotation
-                    fig.add_annotation(
-                        x=i, y=0,
-                        text=format_value(val),
-                        showarrow=False,
-                        font=dict(
-                            color='black' if abs(val) < 0.05 else 'white',
-                            size=10
-                        ),
-                        xref="x", yref=f"y{len(fig.data)}",
-                    )
-        
-        # Update layout
-        fig.update_layout(
-            title="Edge Matrix (10min intervals, Last 24 hours)",
-            xaxis=dict(
-                title="Time (Singapore)",
-                tickangle=45,
-                side="top"
-            ),
-            yaxis=dict(
-                title="Trading Pair",
-                autorange="reversed"
-            ),
-            height=max(500, len(pair_results) * 40),
-            margin=dict(t=50, l=120, r=20, b=50),
+        # Style the dataframe
+        edge_styled = edge_df.style.apply(
+            lambda x: [color_edge_cells(val) for val in x], 
+            axis=1, 
+            subset=ordered_times
         )
         
-        st.plotly_chart(fig, use_container_width=True)
+        # Replace NaN with formatted values for display
+        edge_styled.data = display_edge_df
+        
+        # Display the styled dataframe
+        st.dataframe(edge_styled, height=600, use_container_width=True)
         
         # Legend
         st.markdown("**Edge Legend:** <span style='color:red'>Negative</span> | <span style='color:yellow'>Neutral</span> | <span style='color:green'>Positive</span>", unsafe_allow_html=True)
@@ -475,207 +435,48 @@ if pair_results:
         st.markdown("### Annualized Volatility = StdDev(Log Returns) * sqrt(trading periods per year)")
         
         # Create volatility matrix
-        vol_matrix = create_time_matrix(pair_results, ordered_times, 'volatility')
+        vol_df = create_volatility_matrix(pair_results, ordered_times)
         
-        # Create visualization
-        fig = go.Figure()
+        # Format values for display (convert to percentages)
+        display_vol_df = vol_df.copy()
+        for col in ordered_times:
+            display_vol_df[col] = display_vol_df[col].apply(
+                lambda x: f"{x*100:.1f}%" if not pd.isna(x) else "0"
+            )
         
-        # Add each pair to the matrix
-        for pair_name, time_data in vol_matrix.items():
-            # Extract values in the correct order
-            vol_values = [time_data.get(t) for t in ordered_times]
-            
-            # Add trace for hover
-            fig.add_trace(go.Heatmap(
-                z=[vol_values],
-                x=ordered_times,
-                y=[pair_name],
-                colorscale=[[0, 'rgba(255,255,255,0)']],  # Transparent
-                showscale=False,
-                hoverinfo='text',
-                text=[[format_value(v, 'volatility') for v in vol_values]],
-                hovertemplate='<b>%{y}</b><br>Time: %{x}<br>Volatility: %{text}<extra></extra>'
-            ))
-            
-            # Add colored rectangles and text
-            for i, val in enumerate(vol_values):
-                if not pd.isna(val) and val is not None:
-                    # Add colored rectangle
-                    fig.add_shape(
-                        type="rect",
-                        x0=i-0.5, x1=i+0.5,
-                        y0=-0.5, y1=0.5,
-                        xref="x", yref=f"y{len(fig.data)}",
-                        fillcolor=vol_color(val),
-                        line=dict(width=1, color='white'),
-                    )
-                    
-                    # Add text annotation
-                    fig.add_annotation(
-                        x=i, y=0,
-                        text=format_value(val, 'volatility'),
-                        showarrow=False,
-                        font=dict(
-                            color='black' if val < 0.6 else 'white',
-                            size=10
-                        ),
-                        xref="x", yref=f"y{len(fig.data)}",
-                    )
-        
-        # Update layout
-        fig.update_layout(
-            title="Volatility Matrix (10min intervals, Last 24 hours)",
-            xaxis=dict(
-                title="Time (Singapore)",
-                tickangle=45,
-                side="top"
-            ),
-            yaxis=dict(
-                title="Trading Pair",
-                autorange="reversed"
-            ),
-            height=max(500, len(pair_results) * 40),
-            margin=dict(t=50, l=120, r=20, b=50),
+        # Style the dataframe
+        vol_styled = vol_df.style.apply(
+            lambda x: [color_volatility_cells(val) for val in x], 
+            axis=1, 
+            subset=ordered_times
         )
         
-        st.plotly_chart(fig, use_container_width=True)
+        # Replace NaN with formatted values for display
+        vol_styled.data = display_vol_df
+        
+        # Display the styled dataframe
+        st.dataframe(vol_styled, height=600, use_container_width=True)
         
         # Legend
         st.markdown("**Volatility Legend:** <span style='color:green'>Low</span> | <span style='color:yellow'>Medium</span> | <span style='color:orange'>High</span> | <span style='color:red'>Extreme</span>", unsafe_allow_html=True)
     
     # With tab 3 (Combined View)
     with tab3:
-        st.markdown("## Combined Edge & Volatility Matrix (10min intervals, Last 24 hours)")
-        st.markdown("### Each cell shows: Edge (top) and Volatility (bottom)")
+        st.markdown("## Combined View (Edge and Volatility)")
+        st.markdown("### Edge values are shown as percentages, Volatility values are shown as percentages")
         
-        # Create visualization
-        fig = go.Figure()
+        # Create tabs for different combined views
+        combined_tab1, combined_tab2 = st.tabs(["Edge Values", "Volatility Values"])
         
-        # Add each pair to the matrix
-        for pair_name in pair_results.keys():
-            edge_data = edge_matrix[pair_name]
-            vol_data = vol_matrix[pair_name]
-            
-            # Extract values in the correct order
-            edge_values = [edge_data.get(t) for t in ordered_times]
-            vol_values = [vol_data.get(t) for t in ordered_times]
-            
-            # Add placeholder trace
-            fig.add_trace(go.Heatmap(
-                z=[np.zeros(len(ordered_times))],
-                x=ordered_times,
-                y=[pair_name],
-                colorscale=[[0, 'rgba(255,255,255,0)']],  # Transparent
-                showscale=False,
-                hoverinfo='none'
-            ))
-            
-            # Add split colored rectangles for each cell
-            for i in range(len(ordered_times)):
-                edge_val = edge_values[i]
-                vol_val = vol_values[i]
-                
-                # Top half - Edge
-                if not pd.isna(edge_val) and edge_val is not None:
-                    fig.add_shape(
-                        type="rect",
-                        x0=i-0.5, x1=i+0.5,
-                        y0=0, y1=0.5,  # Top half
-                        xref="x", yref=f"y{len(fig.data)}",
-                        fillcolor=edge_color(edge_val),
-                        line=dict(width=1, color='white'),
-                    )
-                    
-                    # Add edge text
-                    fig.add_annotation(
-                        x=i, y=0.25,  # Top quarter
-                        text=format_value(edge_val),
-                        showarrow=False,
-                        font=dict(
-                            color='black' if abs(edge_val) < 0.05 else 'white',
-                            size=9
-                        ),
-                        xref="x", yref=f"y{len(fig.data)}",
-                    )
-                
-                # Bottom half - Volatility
-                if not pd.isna(vol_val) and vol_val is not None:
-                    fig.add_shape(
-                        type="rect",
-                        x0=i-0.5, x1=i+0.5,
-                        y0=-0.5, y1=0,  # Bottom half
-                        xref="x", yref=f"y{len(fig.data)}",
-                        fillcolor=vol_color(vol_val),
-                        line=dict(width=1, color='white'),
-                    )
-                    
-                    # Add volatility text
-                    fig.add_annotation(
-                        x=i, y=-0.25,  # Bottom quarter
-                        text=format_value(vol_val, 'volatility'),
-                        showarrow=False,
-                        font=dict(
-                            color='black' if vol_val < 0.6 else 'white',
-                            size=9
-                        ),
-                        xref="x", yref=f"y{len(fig.data)}",
-                    )
-                
-                # Add separator line
-                if (not pd.isna(edge_val) and edge_val is not None) or (not pd.isna(vol_val) and vol_val is not None):
-                    fig.add_shape(
-                        type="line",
-                        x0=i-0.5, x1=i+0.5,
-                        y0=0, y1=0,  # Middle
-                        xref="x", yref=f"y{len(fig.data)}",
-                        line=dict(width=1, color='white'),
-                    )
-            
-            # Add hover information
-            hover_texts = []
-            for i in range(len(ordered_times)):
-                edge_val = edge_values[i]
-                vol_val = vol_values[i]
-                edge_text = format_value(edge_val) if not pd.isna(edge_val) and edge_val is not None else '-'
-                vol_text = format_value(vol_val, 'volatility') if not pd.isna(vol_val) and vol_val is not None else '-'
-                hover_texts.append(f"Edge: {edge_text}<br>Vol: {vol_text}")
-            
-            # Add invisible trace for hover text
-            fig.add_trace(go.Scatter(
-                x=ordered_times,
-                y=[0] * len(ordered_times),
-                mode='markers',
-                marker=dict(size=0, color='rgba(0,0,0,0)'),
-                hoverinfo='text',
-                text=hover_texts,
-                hovertemplate=f'<b>{pair_name}</b><br>Time: %{{x}}<br>%{{text}}<extra></extra>',
-                showlegend=False
-            ))
+        with combined_tab1:
+            st.markdown("### Edge Values (Percentages)")
+            # We'll use the already formatted edge dataframe
+            st.dataframe(edge_styled, height=600, use_container_width=True)
         
-        # Update layout
-        fig.update_layout(
-            title="Combined Edge & Volatility Matrix (10min intervals, Last 24 hours)",
-            xaxis=dict(
-                title="Time (Singapore)",
-                tickangle=45,
-                side="top"
-            ),
-            yaxis=dict(
-                title="Trading Pair",
-                autorange="reversed"
-            ),
-            height=max(500, len(pair_results) * 40),
-            margin=dict(t=50, l=120, r=20, b=50),
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Legend
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("**Edge (Top):** <span style='color:red'>Negative</span> | <span style='color:yellow'>Neutral</span> | <span style='color:green'>Positive</span>", unsafe_allow_html=True)
-        with col2:
-            st.markdown("**Volatility (Bottom):** <span style='color:green'>Low</span> | <span style='color:yellow'>Medium</span> | <span style='color:orange'>High</span> | <span style='color:red'>Extreme</span>", unsafe_allow_html=True)
+        with combined_tab2:
+            st.markdown("### Volatility Values (Percentages)")
+            # We'll use the already formatted volatility dataframe
+            st.dataframe(vol_styled, height=600, use_container_width=True)
 
 else:
     st.warning("No data available for the selected pairs. Try selecting different pairs or refreshing the data.")
