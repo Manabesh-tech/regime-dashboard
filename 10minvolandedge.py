@@ -265,113 +265,50 @@ def create_transposed_volatility_matrix():
     # Convert to DataFrame
     return pd.DataFrame(matrix_data)
 
-# Function to style the edge matrix
-def style_edge_matrix(df):
-    # Create a copy without the time_slot column for styling
-    df_style = df.drop(['time_slot', 'date'], axis=1).copy()
+# Function to display edge matrix with custom formatting
+def display_edge_matrix(edge_df):
+    # Create a DataFrame with formatted values
+    formatted_df = edge_df.copy()
     
-    # Create a copy for styled display
-    styled_display = pd.DataFrame('', index=df.index, columns=df.columns)
-    styled_display[['time_slot', 'date']] = df[['time_slot', 'date']]
+    # Process each numeric column
+    for col in formatted_df.columns:
+        if col not in ['time_slot', 'date']:
+            # Format values as strings
+            formatted_df[col] = formatted_df[col].apply(
+                lambda x: f"{x*100:.1f}%" if isinstance(x, (int, float)) and not pd.isna(x) else ""
+            )
     
-    # Function to format and determine style
-    def format_and_style(val):
-        if pd.isna(val):
-            return ('', 'background-color: #f5f5f5; color: #666666')
-        
-        try:
-            val_float = float(val)
-            if val_float == 0:
-                return ('0', 'background-color: #f5f5f5; color: #666666')
-            
-            # Format the value as percentage
-            formatted = f"{val_float*100:.1f}%"
-            
-            # Determine the style
-            if val_float < -0.1:
-                style = 'background-color: rgba(180, 0, 0, 0.9); color: white'
-            elif val_float < -0.05:
-                style = 'background-color: rgba(255, 0, 0, 0.9); color: white'
-            elif val_float < -0.01:
-                style = 'background-color: rgba(255, 150, 150, 0.9); color: black'
-            elif val_float < 0.01:
-                style = 'background-color: rgba(255, 255, 150, 0.9); color: black'
-            elif val_float < 0.05:
-                style = 'background-color: rgba(150, 255, 150, 0.9); color: black'
-            elif val_float < 0.1:
-                style = 'background-color: rgba(0, 255, 0, 0.9); color: black'
-            else:
-                style = 'background-color: rgba(0, 180, 0, 0.9); color: white'
-                
-            return (formatted, style)
-        except (TypeError, ValueError):
-            return ('', 'background-color: #f5f5f5; color: #666666')
+    # Display using st.dataframe with custom styling
+    st.dataframe(
+        formatted_df,
+        height=600,
+        use_container_width=True
+    )
     
-    # Apply formatting and collect styles
-    styles = pd.DataFrame('', index=df_style.index, columns=df_style.columns)
-    
-    # Process each cell
-    for col in df_style.columns:
-        for idx in df_style.index:
-            val = df_style.loc[idx, col]
-            formatted, style = format_and_style(val)
-            styled_display.loc[idx, col] = formatted
-            styles.loc[idx, col] = style
-    
-    # Create the styler and apply cell styles
-    return styled_display.style.apply(lambda _: styles, axis=None)
+    # Return the dataframe for reference
+    return formatted_df
 
-# Function to style the volatility matrix
-def style_volatility_matrix(df):
-    # Create a copy without the time_slot column for styling
-    df_style = df.drop(['time_slot', 'date'], axis=1).copy()
+# Function to display volatility matrix with custom formatting
+def display_volatility_matrix(vol_df):
+    # Create a DataFrame with formatted values
+    formatted_df = vol_df.copy()
     
-    # Create a copy for styled display
-    styled_display = pd.DataFrame('', index=df.index, columns=df.columns)
-    styled_display[['time_slot', 'date']] = df[['time_slot', 'date']]
+    # Process each numeric column
+    for col in formatted_df.columns:
+        if col not in ['time_slot', 'date']:
+            # Format values as strings
+            formatted_df[col] = formatted_df[col].apply(
+                lambda x: f"{x*100:.1f}%" if isinstance(x, (int, float)) and not pd.isna(x) else ""
+            )
     
-    # Function to format and determine style
-    def format_and_style(val):
-        if pd.isna(val):
-            return ('', 'background-color: #f5f5f5; color: #666666')
-        
-        try:
-            val_float = float(val)
-            if val_float == 0:
-                return ('0', 'background-color: #f5f5f5; color: #666666')
-            
-            # Format the value as percentage
-            formatted = f"{val_float*100:.1f}%"
-            
-            # Determine the style
-            if val_float < 0.2:
-                style = 'background-color: rgba(0, 180, 0, 0.9); color: white'  # Low
-            elif val_float < 0.5:
-                style = 'background-color: rgba(150, 255, 150, 0.9); color: black'  # Medium-Low
-            elif val_float < 1.0:
-                style = 'background-color: rgba(255, 255, 150, 0.9); color: black'  # Medium
-            elif val_float < 1.5:
-                style = 'background-color: rgba(255, 150, 0, 0.9); color: black'  # Medium-High
-            else:
-                style = 'background-color: rgba(255, 0, 0, 0.9); color: white'  # High
-                
-            return (formatted, style)
-        except (TypeError, ValueError):
-            return ('', 'background-color: #f5f5f5; color: #666666')
+    # Display using st.dataframe
+    st.dataframe(
+        formatted_df,
+        height=600,
+        use_container_width=True
+    )
     
-    # Apply formatting and collect styles
-    styles = pd.DataFrame('', index=df_style.index, columns=df_style.columns)
-    
-    # Process each cell
-    for col in df_style.columns:
-        for idx in df_style.index:
-            val = df_style.loc[idx, col]
-            formatted, style = format_and_style(val)
-            styled_display.loc[idx, col] = formatted
-            styles.loc[idx, col] = style
-    
-    # Create the styler and apply cell styles
-    return styled_display.style.apply(lambda _: styles, axis=None)
+    return formatted_df
 
 # Function to add date separators to DataFrame display
 def add_date_separators(df):
@@ -407,26 +344,19 @@ if pair_data:
         edge_df = create_transposed_edge_matrix()
         
         if not edge_df.empty:
-            # Add date separators
-            display_df = edge_df.copy()
-            
-            # Apply styling for display
-            st.dataframe(
-                data=style_edge_matrix(display_df),
-                height=600,
-                use_container_width=True
-            )
+            # Display the matrix without complex styling
+            display_edge_matrix(edge_df)
             
             # Legend
             st.markdown("""
             **Edge Legend:**
-            <span style='background-color:rgba(180, 0, 0, 0.9);color:white;padding:2px 6px;border-radius:3px;'>Very Negative</span>
-            <span style='background-color:rgba(255, 0, 0, 0.9);color:white;padding:2px 6px;border-radius:3px;'>Negative</span>
-            <span style='background-color:rgba(255, 150, 150, 0.9);color:black;padding:2px 6px;border-radius:3px;'>Slightly Negative</span>
-            <span style='background-color:rgba(255, 255, 150, 0.9);color:black;padding:2px 6px;border-radius:3px;'>Neutral</span>
-            <span style='background-color:rgba(150, 255, 150, 0.9);color:black;padding:2px 6px;border-radius:3px;'>Slightly Positive</span>
-            <span style='background-color:rgba(0, 255, 0, 0.9);color:black;padding:2px 6px;border-radius:3px;'>Positive</span>
-            <span style='background-color:rgba(0, 180, 0, 0.9);color:white;padding:2px 6px;border-radius:3px;'>Very Positive</span>
+            <span style='background-color:rgba(180, 0, 0, 0.9);color:white;padding:2px 6px;border-radius:3px;'>Very Negative (<-10%)</span>
+            <span style='background-color:rgba(255, 0, 0, 0.9);color:white;padding:2px 6px;border-radius:3px;'>Negative (-10% to -5%)</span>
+            <span style='background-color:rgba(255, 150, 150, 0.9);color:black;padding:2px 6px;border-radius:3px;'>Slightly Negative (-5% to -1%)</span>
+            <span style='background-color:rgba(255, 255, 150, 0.9);color:black;padding:2px 6px;border-radius:3px;'>Neutral (-1% to 1%)</span>
+            <span style='background-color:rgba(150, 255, 150, 0.9);color:black;padding:2px 6px;border-radius:3px;'>Slightly Positive (1% to 5%)</span>
+            <span style='background-color:rgba(0, 255, 0, 0.9);color:black;padding:2px 6px;border-radius:3px;'>Positive (5% to 10%)</span>
+            <span style='background-color:rgba(0, 180, 0, 0.9);color:white;padding:2px 6px;border-radius:3px;'>Very Positive (>10%)</span>
             """, unsafe_allow_html=True)
         else:
             st.warning("No edge data available for selected pairs.")
@@ -440,21 +370,17 @@ if pair_data:
         vol_df = create_transposed_volatility_matrix()
         
         if not vol_df.empty:
-            # Display the table with values
-            st.dataframe(
-                data=style_volatility_matrix(vol_df),
-                height=600,
-                use_container_width=True
-            )
+            # Display the table without complex styling
+            display_volatility_matrix(vol_df)
             
             # Legend
             st.markdown("""
             **Volatility Legend:**
-            <span style='background-color:rgba(0, 180, 0, 0.9);color:white;padding:2px 6px;border-radius:3px;'>Low</span>
-            <span style='background-color:rgba(150, 255, 150, 0.9);color:black;padding:2px 6px;border-radius:3px;'>Medium-Low</span>
-            <span style='background-color:rgba(255, 255, 150, 0.9);color:black;padding:2px 6px;border-radius:3px;'>Medium</span>
-            <span style='background-color:rgba(255, 150, 0, 0.9);color:black;padding:2px 6px;border-radius:3px;'>Medium-High</span>
-            <span style='background-color:rgba(255, 0, 0, 0.9);color:white;padding:2px 6px;border-radius:3px;'>High</span>
+            <span style='background-color:rgba(0, 180, 0, 0.9);color:white;padding:2px 6px;border-radius:3px;'>Low (<20%)</span>
+            <span style='background-color:rgba(150, 255, 150, 0.9);color:black;padding:2px 6px;border-radius:3px;'>Medium-Low (20% to 50%)</span>
+            <span style='background-color:rgba(255, 255, 150, 0.9);color:black;padding:2px 6px;border-radius:3px;'>Medium (50% to 100%)</span>
+            <span style='background-color:rgba(255, 150, 0, 0.9);color:black;padding:2px 6px;border-radius:3px;'>Medium-High (100% to 150%)</span>
+            <span style='background-color:rgba(255, 0, 0, 0.9);color:white;padding:2px 6px;border-radius:3px;'>High (>150%)</span>
             """, unsafe_allow_html=True)
         else:
             st.warning("No volatility data available for selected pairs.")
