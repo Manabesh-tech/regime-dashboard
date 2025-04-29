@@ -45,42 +45,47 @@ def fetch_pairs():
 
 # UI controls
 pairs = fetch_pairs()
-col1, col2 = st.columns([3, 1])
+col1, col2, col3 = st.columns([3, 1, 1])
 
 with col1:
+    search_term = st.text_input("Search pairs", "")
+    if search_term:
+        selected_pairs = [pair for pair in pairs if search_term.lower() in pair.lower()]
+        if not selected_pairs:
+            st.warning(f"No pairs found matching '{search_term}'")
+            selected_pairs = pairs[:5] if len(pairs) >= 5 else pairs
+    else:
+        selected_pairs = pairs
+
+with col2:
     select_all = st.checkbox("Select All Pairs", value=False)
     if select_all:
         selected_pairs = pairs
-    else:
-        selected_pairs = st.multiselect(
-            "Select Pairs", 
-            pairs,
-            default=pairs[:5] if len(pairs) >= 5 else pairs
-        )
 
-with col2:
+with col3:
     if st.button("Refresh Data"):
         st.cache_data.clear()
         st.experimental_rerun()
 
-if not selected_pairs:
-    st.warning("Please select at least one pair")
-    st.stop()
-
-# Generate time slots
+# Generate time slots in reverse order (latest first)
 def generate_time_slots():
     slots = []
-    current = start_time_sg
-    while current < now_sg:
+    current = now_sg
+    end_time = start_time_sg
+    
+    while current >= end_time:
         # Round to nearest 10 minute mark
         minute = current.minute
         rounded_minute = (minute // 10) * 10
         slot = current.replace(minute=rounded_minute, second=0, microsecond=0)
-        slots.append(slot.strftime("%H:%M"))
-        current += timedelta(minutes=10)
+        slots.append(slot)
+        current -= timedelta(minutes=10)
+    
     return slots
 
 time_slots = generate_time_slots()
+time_labels = [slot.strftime("%H:%M") for slot in time_slots]
+date_labels = [slot.strftime("%b %d") for slot in time_slots]
 
 # Function to fetch data and calculate edge and volatility
 @st.cache_data(ttl=600)
@@ -136,7 +141,7 @@ def calculate_edge_volatility(pair_name):
     LEFT JOIN
       pnl_data p ON t.slot = p.time_slot AT TIME ZONE 'Asia/Singapore' AT TIME ZONE 'UTC'
     ORDER BY
-      t.slot
+      t.slot DESC  -- Order by time descending (newest first)
     """
     
     try:
@@ -187,6 +192,9 @@ def calculate_edge_volatility(pair_name):
         st.error(f"Error processing {pair_name}: {e}")
         return None
 
+# Show pairs selected
+st.write(f"Displaying data for {len(selected_pairs)} pairs")
+
 # Progress bar
 progress_bar = st.progress(0)
 status_text = st.empty()
@@ -207,77 +215,135 @@ status_text.text(f"Processed {len(pair_data)}/{len(selected_pairs)} pairs")
 # Create tabs
 tab1, tab2 = st.tabs(["Edge", "Volatility"])
 
-# Create edge matrix
-def create_edge_matrix():
-    # Create a DataFrame with pairs as rows and time slots as columns
-    data = {}
+# Function to create edge matrix with pairs as columns and time as rows
+def create_transposed_edge_matrix():
+    # Create a DataFrame with time slots as rows and pairs as columns
+    # Initialize with a list of time labels from our time slots (latest first)
+    matrix_data = {
+        'time_slot': time_labels,
+        'date': date_labels
+    }
+    
+    # Add data for each pair
+    for pair in selected_pairs:
+        if pair in pair_data:
+            pair_df = pair_data[pair]
+            
+            # Create a series with edge values indexed by time_label
+            edge_by_time = pd.Series(
+                pair_df['edge'].values,
+                index=pair_df['time_label']
+            )
+            
+            # Add this pair's data to the matrix
+            matrix_data[pair] = [edge_by_time.get(time, None) for time in time_labels]
+    
+    # Convert to DataFrame
+    return pd.DataFrame(matrix_data)
+
+# Function to create volatility matrix with pairs as columns
+def create_transposed_volatility_matrix():
+    # Similar structure as edge matrix
+    matrix_data = {
+        'time_slot': time_labels,
+        'date': date_labels
+    }
     
     for pair in selected_pairs:
         if pair in pair_data:
             pair_df = pair_data[pair]
             
-            # Map time_label to edge value
-            edge_values = {}
-            for _, row in pair_df.iterrows():
-                edge_values[row['time_label']] = row['edge']
+            # Create a series with volatility values indexed by time_label
+            vol_by_time = pd.Series(
+                pair_df['volatility'].values,
+                index=pair_df['time_label']
+            )
             
-            # Create row with values for each time slot
-            row_data = {}
-            for slot in time_slots:
-                row_data[slot] = edge_values.get(slot, None)
-            
-            # Add to data dictionary
-            data[pair] = row_data
+            # Add this pair's data to the matrix
+            matrix_data[pair] = [vol_by_time.get(time, None) for time in time_labels]
     
     # Convert to DataFrame
-    if data:
-        return pd.DataFrame.from_dict(data, orient='index')
-    return pd.DataFrame()
+    return pd.DataFrame(matrix_data)
 
-# Create volatility matrix
-def create_volatility_matrix():
-    # Create a DataFrame with pairs as rows and time slots as columns
-    data = {}
+# Function to style the edge matrix
+def style_edge_matrix(df):
+    # Create a copy without the time_slot column for styling
+    df_style = df.drop(['time_slot', 'date'], axis=1).copy()
     
-    for pair in selected_pairs:
-        if pair in pair_data:
-            pair_df = pair_data[pair]
-            
-            # Map time_label to volatility value
-            vol_values = {}
-            for _, row in pair_df.iterrows():
-                vol_values[row['time_label']] = row['volatility']
-            
-            # Create row with values for each time slot
-            row_data = {}
-            for slot in time_slots:
-                row_data[slot] = vol_values.get(slot, None)
-            
-            # Add to data dictionary
-            data[pair] = row_data
+    # Define style function
+    def edge_styler(val):
+        if pd.isna(val) or val == 0:
+            return 'background-color: #f5f5f5; color: #666666'
+        elif val < -0.1:
+            return 'background-color: rgba(180, 0, 0, 0.9); color: white'
+        elif val < -0.05:
+            return 'background-color: rgba(255, 0, 0, 0.9); color: white'
+        elif val < -0.01:
+            return 'background-color: rgba(255, 150, 150, 0.9); color: black'
+        elif val < 0.01:
+            return 'background-color: rgba(255, 255, 150, 0.9); color: black'
+        elif val < 0.05:
+            return 'background-color: rgba(150, 255, 150, 0.9); color: black'
+        elif val < 0.1:
+            return 'background-color: rgba(0, 255, 0, 0.9); color: black'
+        else:
+            return 'background-color: rgba(0, 180, 0, 0.9); color: white'
     
-    # Convert to DataFrame
-    if data:
-        return pd.DataFrame.from_dict(data, orient='index')
-    return pd.DataFrame()
+    # Apply the style
+    styled = df_style.style.applymap(edge_styler)
+    
+    # Format as percentage with 1 decimal place
+    return styled.format("{:.1%}")
 
-# Function to format edge values as string percentages
-def format_edge_values(df):
-    formatted = df.copy()
-    for col in formatted.columns:
-        formatted[col] = formatted[col].apply(
-            lambda x: f"{x*100:.1f}%" if pd.notnull(x) and x != 0 else "0"
-        )
-    return formatted
+# Function to style the volatility matrix
+def style_volatility_matrix(df):
+    # Create a copy without the time_slot column for styling
+    df_style = df.drop(['time_slot', 'date'], axis=1).copy()
+    
+    # Define style function
+    def volatility_styler(val):
+        if pd.isna(val) or val == 0:
+            return 'background-color: #f5f5f5; color: #666666'
+        elif val < 0.2:
+            return 'background-color: rgba(0, 180, 0, 0.9); color: white'  # Low
+        elif val < 0.5:
+            return 'background-color: rgba(150, 255, 150, 0.9); color: black'  # Medium-Low
+        elif val < 1.0:
+            return 'background-color: rgba(255, 255, 150, 0.9); color: black'  # Medium
+        elif val < 1.5:
+            return 'background-color: rgba(255, 150, 0, 0.9); color: black'  # Medium-High
+        else:
+            return 'background-color: rgba(255, 0, 0, 0.9); color: white'  # High
+    
+    # Apply the style
+    styled = df_style.style.applymap(volatility_styler)
+    
+    # Format as percentage with 1 decimal place
+    return styled.format("{:.1%}")
 
-# Function to format volatility values as string percentages
-def format_volatility_values(df):
-    formatted = df.copy()
-    for col in formatted.columns:
-        formatted[col] = formatted[col].apply(
-            lambda x: f"{x*100:.1f}%" if pd.notnull(x) and x != 0 else "0"
-        )
-    return formatted
+# Function to add date separators to DataFrame display
+def add_date_separators(df):
+    result_df = pd.DataFrame()
+    current_date = None
+    
+    # Process each row
+    for idx, row in df.iterrows():
+        date = row['date']
+        
+        # Add date separator if it's a new date
+        if date != current_date:
+            # Create a separator row
+            separator = pd.DataFrame([{col: '' for col in df.columns}])
+            separator.iloc[0, df.columns.get_indexer(['time_slot'])[0]] = f"--- {date} ---"
+            
+            # Add separator to results
+            result_df = pd.concat([result_df, separator])
+            current_date = date
+        
+        # Add the actual data row
+        result_df = pd.concat([result_df, pd.DataFrame([row])])
+    
+    return result_df
 
 if pair_data:
     # Tab 1: Edge Matrix
@@ -285,73 +351,31 @@ if pair_data:
         st.markdown("## Edge Matrix (10min timeframe, Last 24 hours, Singapore Time)")
         st.markdown("### Edge = PNL / Total Open Collateral")
         
-        # Create edge matrix
-        edge_df = create_edge_matrix()
+        # Create edge matrix with pairs as columns
+        edge_df = create_transposed_edge_matrix()
         
         if not edge_df.empty:
-            # Convert values to numerical for styling
-            edge_numeric = edge_df.copy()
+            # Add date separators
+            display_df = edge_df.copy()
             
-            # Create styles manually using a Styler
-            edge_styles = []
-            
-            # Format the DataFrame for display with percentage values
-            edge_display = format_edge_values(edge_df)
-            
-            # Apply styles manually for each column
-            for col in edge_df.columns:
-                col_styles = []
-                for idx in edge_df.index:
-                    val = edge_df.loc[idx, col]
-                    # Define color based on value
-                    if pd.isna(val) or val == 0:
-                        color = "#f5f5f5"
-                        text_color = "#666666"
-                    elif val < -0.1:
-                        color = "rgba(180, 0, 0, 0.9)"
-                        text_color = "white"
-                    elif val < -0.05:
-                        color = "rgba(255, 0, 0, 0.9)"
-                        text_color = "white"
-                    elif val < -0.01:
-                        color = "rgba(255, 150, 150, 0.9)"
-                        text_color = "black"
-                    elif val < 0.01:
-                        color = "rgba(255, 255, 150, 0.9)"
-                        text_color = "black"
-                    elif val < 0.05:
-                        color = "rgba(150, 255, 150, 0.9)"
-                        text_color = "black"
-                    elif val < 0.1:
-                        color = "rgba(0, 255, 0, 0.9)"
-                        text_color = "black"
-                    else:
-                        color = "rgba(0, 180, 0, 0.9)"
-                        text_color = "white"
-                    
-                    # Apply style
-                    style = f"background-color: {color}; color: {text_color};"
-                    col_styles.append(style)
-                
-                # Add styles for this column
-                edge_styles.append(col_styles)
-            
-            # Create styled DataFrame
-            edge_style = pd.DataFrame(
-                edge_styles,
-                columns=edge_df.index,
-                index=edge_df.columns
-            ).T
-            
-            # Display the table with values
+            # Apply styling for display
             st.dataframe(
-                edge_display,
+                data=style_edge_matrix(display_df),
                 height=600,
                 use_container_width=True
             )
             
             # Legend
-            st.markdown("**Edge Legend:** <span style='color:red'>Negative</span> | <span style='color:yellow'>Neutral</span> | <span style='color:green'>Positive</span>", unsafe_allow_html=True)
+            st.markdown("""
+            **Edge Legend:**
+            <span style='background-color:rgba(180, 0, 0, 0.9);color:white;padding:2px 6px;border-radius:3px;'>Very Negative</span>
+            <span style='background-color:rgba(255, 0, 0, 0.9);color:white;padding:2px 6px;border-radius:3px;'>Negative</span>
+            <span style='background-color:rgba(255, 150, 150, 0.9);color:black;padding:2px 6px;border-radius:3px;'>Slightly Negative</span>
+            <span style='background-color:rgba(255, 255, 150, 0.9);color:black;padding:2px 6px;border-radius:3px;'>Neutral</span>
+            <span style='background-color:rgba(150, 255, 150, 0.9);color:black;padding:2px 6px;border-radius:3px;'>Slightly Positive</span>
+            <span style='background-color:rgba(0, 255, 0, 0.9);color:black;padding:2px 6px;border-radius:3px;'>Positive</span>
+            <span style='background-color:rgba(0, 180, 0, 0.9);color:white;padding:2px 6px;border-radius:3px;'>Very Positive</span>
+            """, unsafe_allow_html=True)
         else:
             st.warning("No edge data available for selected pairs.")
     
@@ -360,22 +384,26 @@ if pair_data:
         st.markdown("## Volatility Matrix (10min timeframe, Last 24 hours, Singapore Time)")
         st.markdown("### Annualized Volatility = StdDev(Log Returns) * sqrt(trading periods per year)")
         
-        # Create volatility matrix
-        vol_df = create_volatility_matrix()
+        # Create volatility matrix with pairs as columns
+        vol_df = create_transposed_volatility_matrix()
         
         if not vol_df.empty:
-            # Format the DataFrame for display with percentage values
-            vol_display = format_volatility_values(vol_df)
-            
             # Display the table with values
             st.dataframe(
-                vol_display,
+                data=style_volatility_matrix(vol_df),
                 height=600,
                 use_container_width=True
             )
             
             # Legend
-            st.markdown("**Volatility Legend:** <span style='color:green'>Low</span> | <span style='color:yellow'>Medium</span> | <span style='color:orange'>High</span> | <span style='color:red'>Extreme</span>", unsafe_allow_html=True)
+            st.markdown("""
+            **Volatility Legend:**
+            <span style='background-color:rgba(0, 180, 0, 0.9);color:white;padding:2px 6px;border-radius:3px;'>Low</span>
+            <span style='background-color:rgba(150, 255, 150, 0.9);color:black;padding:2px 6px;border-radius:3px;'>Medium-Low</span>
+            <span style='background-color:rgba(255, 255, 150, 0.9);color:black;padding:2px 6px;border-radius:3px;'>Medium</span>
+            <span style='background-color:rgba(255, 150, 0, 0.9);color:black;padding:2px 6px;border-radius:3px;'>Medium-High</span>
+            <span style='background-color:rgba(255, 0, 0, 0.9);color:white;padding:2px 6px;border-radius:3px;'>High</span>
+            """, unsafe_allow_html=True)
         else:
             st.warning("No volatility data available for selected pairs.")
 
