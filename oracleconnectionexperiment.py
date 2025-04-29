@@ -1,31 +1,31 @@
 # Process tier columns definition before querying
-            # Define tier columns and mapping
-            tier_columns = [
-                'price_1', 'price_2', 'price_3', 'price_4', 'price_5',
-                'price_6', 'price_7', 'price_8', 'price_9', 'price_10',
-                'price_11', 'price_12', 'price_13', 'price_14', 'price_15'
-            ]
-            
-            tier_values = {
-                'price_1': '10k',
-                'price_2': '50k',
-                'price_3': '100k',
-                'price_4': '200k',
-                'price_5': '300k',
-                'price_6': '400k',
-                'price_7': '500k',
-                'price_8': '600k',
-                'price_9': '700k',
-                'price_10': '800k',
-                'price_11': '900k',
-                'price_12': '1M',
-                'price_13': '2M',
-                'price_14': '3M',
-                'price_15': '4M',
-            }
-            
-            # Join all tier columns for the query
-            price_columns = ", ".join(tier_columns)import streamlit as st
+    # Define tier columns and mapping
+    tier_columns = [
+        'price_1', 'price_2', 'price_3', 'price_4', 'price_5',
+        'price_6', 'price_7', 'price_8', 'price_9', 'price_10',
+        'price_11', 'price_12', 'price_13', 'price_14', 'price_15'
+    ]
+    
+    tier_values = {
+        'price_1': '10k',
+        'price_2': '50k',
+        'price_3': '100k',
+        'price_4': '200k',
+        'price_5': '300k',
+        'price_6': '400k',
+        'price_7': '500k',
+        'price_8': '600k',
+        'price_9': '700k',
+        'price_10': '800k',
+        'price_11': '900k',
+        'price_12': '1M',
+        'price_13': '2M',
+        'price_14': '3M',
+        'price_15': '4M',
+    }
+    
+    # Join all tier columns for the query
+    price_columns = ", ".join(tier_columns)import streamlit as st
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
