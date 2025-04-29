@@ -239,7 +239,23 @@ def create_transposed_edge_matrix():
             matrix_data[pair] = [edge_by_time.get(time, None) for time in time_labels]
     
     # Convert to DataFrame
-    return pd.DataFrame(matrix_data)
+    df = pd.DataFrame(matrix_data)
+    
+    # Calculate data density for each pair to determine order
+    data_counts = {}
+    for pair in selected_pairs:
+        if pair in df.columns and pair not in ['time_slot', 'date']:
+            # Count non-null values for this pair
+            data_counts[pair] = df[pair].notna().sum()
+    
+    # Sort pairs by data density (highest first)
+    sorted_pairs = sorted(data_counts.keys(), key=lambda p: data_counts[p], reverse=True)
+    
+    # Reorder columns: first time_slot and date, then pairs by data density
+    reordered_columns = ['time_slot', 'date'] + sorted_pairs
+    
+    # Return reordered DataFrame
+    return df[reordered_columns]
 
 # Function to create volatility matrix with pairs as columns
 def create_transposed_volatility_matrix():
@@ -263,12 +279,41 @@ def create_transposed_volatility_matrix():
             matrix_data[pair] = [vol_by_time.get(time, None) for time in time_labels]
     
     # Convert to DataFrame
-    return pd.DataFrame(matrix_data)
+    df = pd.DataFrame(matrix_data)
+    
+    # Calculate data density for each pair to determine order
+    data_counts = {}
+    for pair in selected_pairs:
+        if pair in df.columns and pair not in ['time_slot', 'date']:
+            # Count non-null values for this pair
+            data_counts[pair] = df[pair].notna().sum()
+    
+    # Sort pairs by data density (highest first)
+    sorted_pairs = sorted(data_counts.keys(), key=lambda p: data_counts[p], reverse=True)
+    
+    # Reorder columns: first time_slot and date, then pairs by data density
+    reordered_columns = ['time_slot', 'date'] + sorted_pairs
+    
+    # Return reordered DataFrame
+    return df[reordered_columns]
 
-# Function to display edge matrix with custom formatting
+# Function to display edge matrix with custom formatting and colors
 def display_edge_matrix(edge_df):
     # Create a DataFrame with formatted values
     formatted_df = edge_df.copy()
+    
+    # Create a custom CSS for coloring cells based on value
+    cell_css = """
+    <style>
+    .very-negative { background-color: rgba(180, 0, 0, 0.9); color: white; }
+    .negative { background-color: rgba(255, 0, 0, 0.9); color: white; }
+    .slightly-negative { background-color: rgba(255, 150, 150, 0.9); color: black; }
+    .neutral { background-color: rgba(255, 255, 150, 0.9); color: black; }
+    .slightly-positive { background-color: rgba(150, 255, 150, 0.9); color: black; }
+    .positive { background-color: rgba(0, 255, 0, 0.9); color: black; }
+    .very-positive { background-color: rgba(0, 180, 0, 0.9); color: white; }
+    </style>
+    """
     
     # Process each numeric column
     for col in formatted_df.columns:
@@ -278,17 +323,20 @@ def display_edge_matrix(edge_df):
                 lambda x: f"{x*100:.1f}%" if isinstance(x, (int, float)) and not pd.isna(x) else ""
             )
     
-    # Display using st.dataframe with custom styling
+    # Display using st.dataframe with custom formatting
     st.dataframe(
         formatted_df,
         height=600,
-        use_container_width=True
+        use_container_width=True,
+        column_config={
+            "time_slot": st.column_config.TextColumn("Time", width="small"),
+            "date": st.column_config.TextColumn("Date", width="small")
+        }
     )
     
-    # Return the dataframe for reference
     return formatted_df
 
-# Function to display volatility matrix with custom formatting
+# Function to display volatility matrix with custom formatting and column width
 def display_volatility_matrix(vol_df):
     # Create a DataFrame with formatted values
     formatted_df = vol_df.copy()
@@ -301,11 +349,15 @@ def display_volatility_matrix(vol_df):
                 lambda x: f"{x*100:.1f}%" if isinstance(x, (int, float)) and not pd.isna(x) else ""
             )
     
-    # Display using st.dataframe
+    # Display using st.dataframe with column configuration
     st.dataframe(
         formatted_df,
         height=600,
-        use_container_width=True
+        use_container_width=True,
+        column_config={
+            "time_slot": st.column_config.TextColumn("Time", width="small"),
+            "date": st.column_config.TextColumn("Date", width="small")
+        }
     )
     
     return formatted_df
