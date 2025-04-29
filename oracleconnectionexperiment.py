@@ -216,7 +216,7 @@ def analyze_tiers(pair_name, progress_bar=None):
                             pair_name = :pair_name
                         ORDER BY 
                             created_at DESC
-                        LIMIT 50000
+                        LIMIT 100000
                     )
                     SELECT * FROM latest_data
                     ORDER BY 
@@ -261,67 +261,50 @@ def analyze_tiers(pair_name, progress_bar=None):
             if progress_bar:
                 progress_bar.progress(0.4, text=f"Found {len(exchanges)} exchanges")
             
-            # Non-overlapping 5000-tick windows
-            window_size = 5000
-            total_points = len(df)
-            num_windows = total_points // window_size
-            # Lower the minimum window size requirement if needed
-            if num_windows < 3 and total_points >= 1000:
-                # If we don't have enough data for 5000-tick windows, try smaller ones
-                window_size = min(total_points // 3, 2500)  # Ensure at least 3 windows if possible
-                num_windows = total_points // window_size
-                if progress_bar:
-                    progress_bar.progress(0.5, text=f"Using smaller window size ({window_size}). Created {num_windows} windows.")
-            
-            # Accept even just 1 window if that's all we have
-            if num_windows == 0 and total_points >= 1000:
-                window_size = total_points
-                num_windows = 1
-                if progress_bar:
-                    progress_bar.progress(0.5, text=f"Using all available data as single window ({window_size} points)")
-                
-            if num_windows == 0:
-                if progress_bar:
-                    progress_bar.progress(1.0, text=f"Insufficient data: found {total_points} points, need at least 1000")
-                return None
-                
-            if progress_bar:
-                progress_bar.progress(0.5, text=f"Creating {num_windows} non-overlapping windows...")
-                
             # Initialize variables to track tier performance
             win_counts = {}  # To count how many times each tier wins
             exchange_tier_choppiness = {}  # Store the overall choppiness average
             exchange_tier_dropout = {}     # Store the overall dropout rate
             
-            # Process each 5000-tick window
-            for window_idx in range(num_windows):
-                if progress_bar:
-                    progress_bar.progress(0.5 + (0.4 * window_idx / num_windows), 
-                                         text=f"Analyzing window {window_idx+1}/{num_windows}")
+            # Process each exchange separately
+            for exchange in exchanges:
+                # Filter data for this exchange
+                exchange_df = df[df['exchange_name'] == exchange].copy()
                 
-                # Calculate start and end indices for this window (non-overlapping)
-                start_idx = window_idx * window_size
-                end_idx = (window_idx + 1) * window_size
+                # Sort by timestamp to ensure proper order
+                exchange_df.sort_values('created_at', ascending=False, inplace=True)
                 
-                if end_idx > total_points:
-                    end_idx = total_points  # Use whatever data is left
+                # Calculate number of windows for this exchange
+                window_size = 5000
+                total_points = len(exchange_df)
+                num_windows = total_points // window_size
                 
-                # Get the data for this window
-                window_df = df.iloc[start_idx:end_idx].copy()
-                
-                # Skip if window is too small
-                if len(window_df) < 0.8 * window_size:  # Need at least 80% of full window
+                if num_windows == 0:
                     continue
                 
-                # Track best choppiness for this window
-                best_choppiness = 0
-                best_tier = None
-                # Process each exchange and tier in this window
-                for exchange in exchanges:
-                    # Filter for this exchange
-                    exchange_df = window_df[window_df['exchange_name'] == exchange].copy()
-                    if len(exchange_df) < 0.8 * window_size:  # Need at least 80% of data points
+                if progress_bar:
+                    progress_bar.progress(0.5, text=f"Processing {num_windows} windows for {exchange}...")
+                
+                # Process each window for this exchange
+                for window_idx in range(num_windows):
+                    if progress_bar:
+                        progress_bar.progress(0.5 + (0.4 * window_idx / num_windows), 
+                                             text=f"Analyzing window {window_idx+1}/{num_windows} for {exchange}")
+                    
+                    # Calculate start and end indices for this window
+                    start_idx = window_idx * window_size
+                    end_idx = (window_idx + 1) * window_size
+                    
+                    # Get the data for this window
+                    window_df = exchange_df.iloc[start_idx:end_idx].copy()
+                    
+                    # Skip if window is too small
+                    if len(window_df) < 0.8 * window_size:
                         continue
+                    
+                    # Track best choppiness for this window
+                    best_choppiness = 0
+                    best_tier = None
                     
                     # Process each tier
                     for tier_col in tier_columns:
@@ -329,11 +312,11 @@ def analyze_tiers(pair_name, progress_bar=None):
                         exchange_tier_key = f"{exchange}:{tier_name}"
                         
                         # Calculate dropout rate for this window
-                        total_points_in_window = len(exchange_df)
-                        nan_or_zero = (exchange_df[tier_col].isna() | (exchange_df[tier_col] <= 0)).sum()
+                        total_points_in_window = len(window_df)
+                        nan_or_zero = (window_df[tier_col].isna() | (window_df[tier_col] <= 0)).sum()
                         dropout_rate = (nan_or_zero / total_points_in_window) * 100
                         
-                        # Track overall dropout rate (average across all windows)
+                        # Track overall dropout rate
                         if exchange_tier_key not in exchange_tier_dropout:
                             exchange_tier_dropout[exchange_tier_key] = []
                         exchange_tier_dropout[exchange_tier_key].append(dropout_rate)
@@ -343,15 +326,15 @@ def analyze_tiers(pair_name, progress_bar=None):
                             continue
                         
                         # Get valid prices
-                        prices = exchange_df[tier_col].dropna()
+                        prices = window_df[tier_col].dropna()
                         prices = prices[prices > 0]
                         
-                # Skip if not enough data or too high dropout rate
-                if len(prices) < 0.5 * window_size or dropout_rate > 95:  # More lenient
+                        # Skip if not enough data
+                        if len(prices) < 0.8 * window_size:
                             continue
                         
                         # Calculate choppiness with 20-tick window
-                        window_size_choppiness = 20  # As specified in the instructions
+                        window_size_choppiness = 20
                         diff = prices.diff().dropna()
                         
                         if len(diff) < window_size_choppiness:
@@ -370,10 +353,10 @@ def analyze_tiers(pair_name, progress_bar=None):
                         # Cap extreme values
                         choppiness_values = np.minimum(choppiness_values, 1000)
                         
-                        # Calculate mean choppiness for this 5000-tick window
+                        # Calculate mean choppiness for this window
                         avg_choppiness = choppiness_values.mean()
                         
-                        # Track overall choppiness (average across all windows)
+                        # Track overall choppiness
                         if exchange_tier_key not in exchange_tier_choppiness:
                             exchange_tier_choppiness[exchange_tier_key] = []
                         exchange_tier_choppiness[exchange_tier_key].append(avg_choppiness)
@@ -382,12 +365,12 @@ def analyze_tiers(pair_name, progress_bar=None):
                         if avg_choppiness > best_choppiness:
                             best_choppiness = avg_choppiness
                             best_tier = exchange_tier_key
-                
-                # Count win for this window
-                if best_tier:
-                    if best_tier not in win_counts:
-                        win_counts[best_tier] = 0
-                    win_counts[best_tier] += 1
+                    
+                    # Count win for this window
+                    if best_tier:
+                        if best_tier not in win_counts:
+                            win_counts[best_tier] = 0
+                        win_counts[best_tier] += 1
             
             if progress_bar:
                 progress_bar.progress(0.9, text="Calculating final rankings...")
