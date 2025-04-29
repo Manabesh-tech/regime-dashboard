@@ -881,16 +881,16 @@ def render_complete_parameter_table(rec_df, sort_by="Pair Name"):
             lambda x: f"{x:+.2f}%" if not pd.isna(x) else "N/A"
         ),
         'Current Buffer': sorted_df['current_buffer_rate'].apply(
-            lambda x: f"{x*100:.2f}%" if not pd.isna(x) else "N/A"
+            lambda x: f"{x*100:.3f}%" if not pd.isna(x) else "N/A"
         ),
         'Recommended Buffer': sorted_df.apply(
-            lambda row: f"{row['recommended_buffer_rate']*100:.2f}%" 
+            lambda row: f"{row['recommended_buffer_rate']*100:.3f}%" 
             if not pd.isna(row['recommended_buffer_rate']) and not pd.isna(row['current_buffer_rate']) 
             else "N/A", 
             axis=1
         ),
         'Buffer Change': sorted_df['buffer_change'].apply(
-            lambda x: f"{x:+.2f}%" if not pd.isna(x) and abs(x) > 0.01 else "±0.00%"
+            lambda x: f"{x:+.3f}%" if not pd.isna(x) and abs(x) > 0.01 else "±0.00%"
         ),
         'Current Position': sorted_df['current_position_multiplier'].apply(
             lambda x: f"{x:,.0f}" if not pd.isna(x) else "N/A"
@@ -966,16 +966,16 @@ def render_significant_changes_summary(rec_df):
             lambda x: f"{x:+.2f}%" if not pd.isna(x) else "N/A"
         ),
         'Current Buffer': significant_df['current_buffer_rate'].apply(
-            lambda x: f"{x*100:.2f}%" if not pd.isna(x) else "N/A"
+            lambda x: f"{x*100:.3f}%" if not pd.isna(x) else "N/A"
         ),
         'Recommended Buffer': significant_df.apply(
-            lambda row: f"{row['recommended_buffer_rate']*100:.2f}%" 
+            lambda row: f"{row['recommended_buffer_rate']*100:.3f}%" 
             if not pd.isna(row['recommended_buffer_rate']) and not pd.isna(row['current_buffer_rate']) 
             else "N/A", 
             axis=1
         ),
         'Buffer Change': significant_df['buffer_change'].apply(
-            lambda x: f"{x:+.2f}%" if not pd.isna(x) and abs(x) > 0.01 else "±0.00%"
+            lambda x: f"{x:+.3f}%" if not pd.isna(x) and abs(x) > 0.01 else "±0.00%"
         ),
         'Current Position': significant_df['current_position_multiplier'].apply(
             lambda x: f"{x:,.0f}" if not pd.isna(x) else "N/A"
@@ -1042,10 +1042,10 @@ def render_rollbit_comparison(comparison_df):
         'Pair': rollbit_df['pair_name'],
         'Type': rollbit_df['token_type'],
         'SURF Buffer': rollbit_df['current_buffer_rate'].apply(
-            lambda x: f"{x*100:.2f}%" if not pd.isna(x) else "N/A"
+            lambda x: f"{x*100:.3f}%" if not pd.isna(x) else "N/A"
         ),
         'Rollbit Buffer': rollbit_df['rollbit_buffer_rate'].apply(
-            lambda x: f"{x*100:.2f}%" if not pd.isna(x) else "N/A"
+            lambda x: f"{x*100:.3f}%" if not pd.isna(x) else "N/A"
         )
     })
     
