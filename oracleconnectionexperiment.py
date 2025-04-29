@@ -338,24 +338,24 @@ class ExchangeAnalyzer:
                 # Create a map for quick lookup of exchange
                 metrics_map = {m['exchange']: m for m in results}
                 
-                # Assign win rate based on choppiness ranking
+                # Assign win rate based on choppiness ranking - raw win rates without normalization
                 total_exchanges = len(choppiness_winners)
                 for i, winner in enumerate(choppiness_winners):
-                    # Calculate win rate (100% for top tier, decreasing for others)
-                    win_rate = 100.0 - (i / total_exchanges * 100.0)
+                    # Simply use the raw choppiness value as the win rate
+                    win_rate = winner['choppiness']
                     
                     # Update the metrics
                     exchange = winner['exchange']
                     if exchange in metrics_map:
                         metrics_map[exchange]['win_rate'] = win_rate
                 
-                # Calculate efficiency scores
+                # Calculate efficiency scores using the new formula: win_rate * (100 - dropout_rate)
                 for metrics in results:
-                    # Ensure minimum dropout rate to avoid division by zero
-                    dropout_rate = max(0.1, metrics['dropout_rate'])
+                    # Get raw dropout rate (no minimum)
+                    dropout_rate = metrics['dropout_rate']
                     
-                    # Calculate efficiency as win_rate / dropout_rate
-                    metrics['efficiency'] = metrics['win_rate'] / dropout_rate
+                    # Calculate efficiency as win_rate * (100% - dropout_rate)
+                    metrics['efficiency'] = metrics['win_rate'] * ((100 - dropout_rate) / 100)
                 
                 # Convert results to DataFrame and sort by efficiency
                 results_df = pd.DataFrame(results)
@@ -424,10 +424,7 @@ class ExchangeAnalyzer:
             epsilon = 1e-10
             choppiness_values = 100 * sum_abs_changes / (price_range + epsilon)
             
-            # Cap extreme values
-            choppiness_values = np.minimum(choppiness_values, 1000)
-            
-            # Mean choppiness
+            # Raw choppiness values without capping
             choppiness = choppiness_values.mean()
             
             # Tick ATR
@@ -577,7 +574,7 @@ def display_rankings_table(df):
     # Rename and format columns
     display_df = display_df.rename(columns={
         'efficiency': 'Efficiency Score', 
-        'win_rate': 'Win Rate (%)', 
+        'win_rate': 'Choppiness (Win Rate)', 
         'dropout_rate': 'Dropout Rate (%)',
         'choppiness': 'Choppiness',
         'direction_change_pct': 'Direction Changes (%)',
@@ -586,34 +583,18 @@ def display_rankings_table(df):
         'data_points': 'Data Points'
     })
     
-    # Format numeric columns
+    # Display raw values without formatting for accuracy
+    # Only format liquidity for readability
     for col in display_df.columns:
-        if col not in ['Exchange', 'exchange']:
-            if col in ['Win Rate (%)', 'Dropout Rate (%)', 'Direction Changes (%)']:
-                display_df[col] = display_df[col].apply(
-                    lambda x: f"{x:.1f}%" if not pd.isna(x) else "N/A"
-                )
-            elif col == 'Tick ATR (%)':
-                display_df[col] = display_df[col].apply(
-                    lambda x: f"{x:.4f}" if not pd.isna(x) else "N/A"
-                )
-            elif col == 'Efficiency Score':
-                display_df[col] = display_df[col].apply(
-                    lambda x: f"{x:.2f}" if not pd.isna(x) else "N/A"
-                )
-            elif col == 'Choppiness':
-                display_df[col] = display_df[col].apply(
-                    lambda x: f"{x:.1f}" if not pd.isna(x) else "N/A"
-                )
-            elif col == 'Avg Liquidity':
-                display_df[col] = display_df[col].apply(
-                    lambda x: f"{int(x):,}" if not pd.isna(x) and x is not None else "N/A"
-                )
+        if col == 'Avg Liquidity':
+            display_df[col] = display_df[col].apply(
+                lambda x: f"{int(x):,}" if not pd.isna(x) and x is not None else "N/A"
+            )
     
     # Select columns for display
     display_columns = [
-        'Exchange', 'Efficiency Score', 'Win Rate (%)', 
-        'Dropout Rate (%)', 'Choppiness', 'Avg Liquidity'
+        'Exchange', 'Efficiency Score', 'Choppiness (Win Rate)', 
+        'Dropout Rate (%)', 'Avg Liquidity'
     ]
     
     # Filter to columns that exist
@@ -623,9 +604,9 @@ def display_rankings_table(df):
     st.markdown("### Exchange Rankings")
     st.markdown("""
     <div style="background-color: #f0f2f6; padding: 8px; border-radius: 5px; margin-bottom: 15px;">
-        <p style="margin: 3px 0;"><strong>Efficiency Score</strong> = Win Rate (%) / Dropout Rate (%)</p>
-        <p style="margin: 3px 0;"><strong>Win Rate</strong>: Based on relative choppiness ranking (100% for top exchange)</p>
-        <p style="margin: 3px 0;"><strong>Dropout Rate</strong>: Percentage of missing or zero values in the feed</p>
+        <p style="margin: 3px 0;"><strong>Efficiency Score</strong> = Choppiness × (100% - Dropout Rate)</p>
+        <p style="margin: 3px 0;"><strong>Choppiness (Win Rate)</strong>: Raw choppiness value used as win rate</p>
+        <p style="margin: 3px 0;"><strong>Dropout Rate (%)</strong>: Raw percentage of missing or zero values</p>
     </div>
     """, unsafe_allow_html=True)
     
@@ -650,15 +631,18 @@ def display_rankings_table(df):
         """, unsafe_allow_html=True)
         
         st.markdown("""
-        ### Implementation Guide
+        ### Raw Data
         
-        For real-time implementation, use this approach:
-        
-        1. **Multi-Exchange Monitoring**: Subscribe to all three exchanges simultaneously
-        2. **Zero-Tolerance Fallback**: If primary exchange returns zero/missing value, IMMEDIATELY use data from fallback exchange 1
-        3. **Global Ranking**: The recommended exchanges are ranked based on efficiency
-        4. **Auto-Update**: This analysis refreshes every 10 minutes to adapt to changing market conditions
+        Below is the complete dataset with all raw metrics:
         """)
+        
+        # Show all columns with raw data
+        all_columns = ['Exchange', 'Efficiency Score', 'Choppiness (Win Rate)', 
+                      'Dropout Rate (%)', 'Direction Changes (%)', 
+                      'Tick ATR (%)', 'Data Points', 'Avg Liquidity']
+        available_all_columns = [col for col in all_columns if col in display_df.columns]
+        
+        st.markdown(display_df[available_all_columns].to_html(escape=False), unsafe_allow_html=True)
 
 def main():
     # Get current Singapore time
@@ -683,7 +667,7 @@ def main():
         st.session_state.auto_refresh_enabled = False
 
     # Main layout
-    st.markdown("<h1 style='text-align: center; font-size:28px; margin-bottom: 10px;'>Exchange Efficiency Analyzer</h1>", unsafe_allow_html=True)
+    st.markdown("<h1 style='text-align: center; font-size:28px; margin-bottom: 10px;'>Exchange Efficiency Analyzer (Raw Formula)</h1>", unsafe_allow_html=True)
 
     # Display current time
     st.markdown(f"<p style='text-align: center; font-size:14px; color:gray;'>Current time: {current_time_sg} (SGT)</p>", unsafe_allow_html=True)
@@ -797,18 +781,14 @@ def main():
         st.markdown("""
         ### About This Tool
         
-        This analyzer helps you find the best exchange by:
+        This analyzer helps you find the best exchange using a raw efficiency formula:
         
-        1. **Global Ranking**: Ranks all exchanges in a single list
-        2. **Efficiency Score**: Calculates Win Rate / Dropout Rate for optimal selection
+        1. **Raw Formula**: Efficiency = Choppiness × (100% - Dropout Rate)
+        2. **No Normalization**: Uses raw values without capping or normalization
         3. **Fallback Strategy**: Recommends primary and fallback exchanges
         4. **Auto-Refresh**: Updates analysis every 10 minutes when enabled
         
-        The analyzer focuses on 5000-point analysis to evaluate exchange performance based on:
-        - **Choppiness**: Higher values indicate more trading opportunities
-        - **Dropout Rate**: Percentage of missing/zero values in the data feed
-        
-        Our ranking metric (Efficiency Score) balances win rate and data reliability to recommend the best exchange for each pair.
+        The analyzer shows all raw metrics for complete transparency.
         """)
 
 if __name__ == "__main__":
