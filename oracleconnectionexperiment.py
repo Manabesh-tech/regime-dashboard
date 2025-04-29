@@ -144,21 +144,36 @@ def analyze_tiers(pair_name, progress_bar=None):
             ]
             
             tier_values = {
-                'price_1': '10k',
-                'price_2': '50k',
-                'price_3': '100k',
-                'price_4': '200k',
-                'price_5': '300k',
-                'price_6': '400k',
-                'price_7': '500k',
-                'price_8': '600k',
-                'price_9': '700k',
-                'price_10': '800k',
-                'price_11': '900k',
-                'price_12': '1M',
-                'price_13': '2M',
-                'price_14': '3M',
-                'price_15': '4M',
+                'price_1':'1k',
+                'price_2':'3k',
+                'price_3':'5k',
+                'price_4':'7k',
+                'price_5': '10k',
+                'price_6': '50k',
+                'price_7': '100k',
+                'price_8': '200k',
+                'price_9': '300k',
+                'price_10': '400k',
+                'price_11': '500k',
+                'price_12': '600k',
+                'price_13': '700k',
+                'price_14': '800k',
+                'price_15': '900k',
+                'price_16': '1M',
+                'price_17': '1.5M',
+                'price_18': '2M',
+                'price_19': '3M',
+                'price_20': '4M',
+                'price_21':'5M',
+                'price_22':'6M',
+                'price_23':'7M',
+                'price_24': '8M',
+                'price_25':'9M',
+                'price_26':'10M',
+                'price_27':'11M',
+                'price_28':'12M',
+                'price_29':'13M',
+                'price_30':'14M',
             }
             
             # Join all tier columns for the query
@@ -384,6 +399,11 @@ def analyze_tiers(pair_name, progress_bar=None):
                     if best_tier not in win_counts:
                         win_counts[best_tier] = 0
                     win_counts[best_tier] += 1
+                    
+                    # Log which tier won for the first few windows to diagnose
+                    if window_idx < 5 and progress_bar:
+                        progress_bar.progress(0.5 + (0.4 * window_idx / num_windows), 
+                                             text=f"Window {window_idx+1}: Winner is {best_tier} with choppiness {best_choppiness:.1f}")
             
             if progress_bar:
                 progress_bar.progress(0.9, text="Calculating final rankings...")
@@ -398,6 +418,30 @@ def analyze_tiers(pair_name, progress_bar=None):
             
             # Create results list
             results = []
+            
+            # Add average choppiness across all exchanges for each tier
+            tier_to_avg_choppiness = {}
+            
+            # Calculate average choppiness per tier across all exchanges
+            for exchange_tier_key, choppiness_values in exchange_tier_choppiness.items():
+                _, tier = exchange_tier_key.split(':', 1)
+                if tier not in tier_to_avg_choppiness:
+                    tier_to_avg_choppiness[tier] = []
+                tier_to_avg_choppiness[tier].extend(choppiness_values)
+            
+            # Calculate averages
+            tier_avg_choppiness = {}
+            for tier, choppiness_list in tier_to_avg_choppiness.items():
+                if choppiness_list:
+                    tier_avg_choppiness[tier] = sum(choppiness_list) / len(choppiness_list)
+            
+            # Sort tiers by average choppiness
+            sorted_tiers = sorted(tier_avg_choppiness.items(), key=lambda x: x[1], reverse=True)
+            
+            # Log the top tiers by average choppiness
+            if progress_bar:
+                top_tiers_str = ", ".join([f"{tier}: {chop:.1f}" for tier, chop in sorted_tiers[:5]])
+                progress_bar.progress(0.95, text=f"Top 5 tiers by avg choppiness: {top_tiers_str}")
             
             # Process each exchange:tier that was analyzed
             for exchange_tier_key in set(exchange_tier_choppiness.keys()) | set(win_counts.keys()):
