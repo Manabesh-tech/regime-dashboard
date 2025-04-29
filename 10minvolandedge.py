@@ -1358,3 +1358,17 @@ with st.expander("Understanding the Matrix"):
         - **Green**: Low volatility (<30%)
         - **Yellow**: Medium volatility (30-60%)
         - **Orange**: High volatility (60-100%)
+        - **Red**: Extreme volatility (>100%)
+        
+        #### Trading Implications
+        - **Green areas**: Periods of low volatility, often suitable for range-bound trading strategies
+        - **Yellow/Orange areas**: Periods of increased volatility, may require wider stops but offer more trading opportunities 
+        - **Red areas**: Extreme volatility periods, requiring careful risk management but potentially offering significant opportunities
+        
+        #### Technical Details
+        - Volatility is calculated as the standard deviation of log returns
+        - Values are annualized to represent expected price variation over a year
+        - Calculations use a rolling window approach on 1-minute price data
+        - All times are shown in Singapore timezone
+        - Missing values (gray cells) indicate insufficient data
+        """)
