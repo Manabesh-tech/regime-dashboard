@@ -90,7 +90,7 @@ def get_session():
 # Get available pairs from the database
 def get_available_pairs():
     """Fetch available trading pairs"""
-    default_pairs = ["BTC/USDT", "SOL/USDT", "ETH/USDT", "DOGE/USDT", "XRP/USDT"]
+    default_pairs = ["BTC", "SOL", "ETH", "DOGE", "XRP"]
     
     try:
         with get_session() as session:
@@ -260,17 +260,23 @@ def analyze_tiers(pair_name, progress_bar=None):
             num_windows = total_points // window_size
             
             # Lower the minimum window size requirement if needed
-            if num_windows < 5 and total_points >= 2500:
-                # If we don't have enough 5000-tick windows but have sufficient data,
-                # try using a smaller window size
-                window_size = 2500
+            if num_windows < 3 and total_points >= 1000:
+                # If we don't have enough data for 5000-tick windows, try smaller ones
+                window_size = min(total_points // 3, 2500)  # Ensure at least 3 windows if possible
                 num_windows = total_points // window_size
                 if progress_bar:
                     progress_bar.progress(0.5, text=f"Using smaller window size ({window_size}). Created {num_windows} windows.")
             
+            # Accept even just 1 window if that's all we have
+            if num_windows == 0 and total_points >= 1000:
+                window_size = total_points
+                num_windows = 1
+                if progress_bar:
+                    progress_bar.progress(0.5, text=f"Using all available data as single window ({window_size} points)")
+                
             if num_windows == 0:
                 if progress_bar:
-                    progress_bar.progress(1.0, text=f"Insufficient data: found {total_points} points, need at least {window_size}")
+                    progress_bar.progress(1.0, text=f"Insufficient data: found {total_points} points, need at least 1000")
                 return None
                 
             if progress_bar:
@@ -336,8 +342,8 @@ def analyze_tiers(pair_name, progress_bar=None):
                         prices = exchange_df[tier_col].dropna()
                         prices = prices[prices > 0]
                         
-                        # Skip if not enough data
-                        if len(prices) < 0.8 * window_size:  # Need at least 80% of data points
+                # Skip if not enough data or too high dropout rate
+                if len(prices) < 0.5 * window_size or dropout_rate > 95:  # More lenient
                             continue
                         
                         # Calculate choppiness with 20-tick window
