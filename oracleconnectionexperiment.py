@@ -435,6 +435,12 @@ def analyze_tiers(pair_name, progress_bar=None):
                 
                 # Calculate average choppiness across all windows
                 choppiness_values = exchange_tier_choppiness.get(exchange_tier_key, [0])
+                
+                # Use the most recent choppiness as current choppiness
+                current_choppiness = choppiness_values[0] if choppiness_values else 0
+                current_choppiness = round(current_choppiness, 1)
+                
+                # Calculate average choppiness across all windows from the past 24 hours
                 avg_choppiness = sum(choppiness_values) / len(choppiness_values)
                 avg_choppiness = round(avg_choppiness, 1)
                 
@@ -455,7 +461,8 @@ def analyze_tiers(pair_name, progress_bar=None):
                     'exchange': exchange,
                     'tier': tier,
                     'exchange_tier': exchange_tier_key,
-                    'choppiness': avg_choppiness,
+                    'current_choppiness': current_choppiness,
+                    'avg_choppiness': avg_choppiness,
                     'dropout_rate': avg_dropout,
                     'win_rate': win_rate,
                     'efficiency': efficiency,
@@ -470,8 +477,8 @@ def analyze_tiers(pair_name, progress_bar=None):
                 
             results_df = pd.DataFrame(results)
             
-            # Sort by efficiency score (primary) and choppiness (secondary for ties)
-            results_df = results_df.sort_values(['efficiency', 'choppiness'], ascending=[False, False])
+            # Sort by efficiency score (primary) and current_choppiness (secondary for ties)
+            results_df = results_df.sort_values(['efficiency', 'current_choppiness'], ascending=[False, False])
             results_df['rank'] = range(1, len(results_df) + 1)
             
             if progress_bar:
@@ -574,7 +581,8 @@ def main():
             display_df = display_df.rename(columns={
                 'exchange_tier': 'Exchange:Tier',
                 'efficiency': 'Efficiency Score',
-                'choppiness': 'Choppiness',
+                'current_choppiness': 'Current Choppiness',
+                'avg_choppiness': 'Avg Choppiness',
                 'dropout_rate': 'Dropout Rate (%)',
                 'win_rate': 'Win Rate (%)',
                 'rank': 'Rank'
@@ -587,7 +595,8 @@ def main():
                 'Efficiency Score',
                 'Win Rate (%)',
                 'Dropout Rate (%)',
-                'Choppiness'
+                'Current Choppiness',
+                'Avg Choppiness'
             ]
             
             # Filter to columns that exist
