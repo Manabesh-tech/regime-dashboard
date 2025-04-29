@@ -144,9 +144,9 @@ def analyze_tiers(pair_name, progress_bar=None):
             ]
             
             tier_values = {
-                'price_1': '10k',
-                'price_2': '30k',
-                'price_3': '50k',
+                'price_1': '100k',
+                'price_2': '300k',
+                'price_3': '500k',
                 'price_4': '1M',
                 'price_5': '1.5M',
                 'price_6': '2M',
