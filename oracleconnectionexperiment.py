@@ -488,10 +488,15 @@ def analyze_tiers(pair_name, progress_bar=None):
                 win_rate = (win_counts.get(exchange_tier_key, 0) / total_wins) * 100
                 win_rate = round(win_rate, 1)
                 
-                # Calculate validity rate (valid ticks / theoretical maximum)
+                # Calculate validity rate (valid ticks / actual exchange points)
                 valid_points = exchange_tier_valid_points.get(exchange_tier_key, 0)
-                theoretical_maximum = 172800  # 24 hours * 3600 seconds * 2 ticks per second (500ms)
-                validity_rate = (valid_points / theoretical_maximum) * 100
+                
+                # Get the actual exchange's total points instead of using the theoretical maximum
+                exchange_total_points = analysis_metadata['exchange_counts'].get(exchange, 0)
+                
+                # Use actual points as denominator if available, otherwise use theoretical
+                denominator = max(exchange_total_points, 1)  # Avoid division by zero
+                validity_rate = (valid_points / denominator) * 100
                 validity_rate = round(validity_rate, 1)
                 
                 # Calculate average choppiness across all windows
@@ -611,7 +616,7 @@ def main():
     st.markdown("""
     **Key Metrics:**
     - **Win Rate:** Percentage of 5000-tick windows where this tier had the highest choppiness
-    - **Validity Rate:** Percentage of theoretical maximum ticks that have valid data (Valid Ticks ÷ 172,800)
+    - **Validity Rate:** Percentage of exchange's data points that have valid data for this tier
     - **Efficiency Score:** Win Rate % × Validity Rate % ÷ 100
     - **Current Choppiness:** Most recent choppiness value using 20-tick rolling window
     - **Avg Choppiness:** Average choppiness across all windows
