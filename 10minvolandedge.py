@@ -5,63 +5,75 @@ import plotly.graph_objects as go
 from sqlalchemy import create_engine
 from datetime import datetime, timedelta
 import pytz
-import time
 
-# Page config
-st.set_page_config(page_title="Edge & Volatility Matrix", layout="wide")
-st.title("Edge & Volatility Matrix (10min slots, 24 hours)")
+st.set_page_config(
+    page_title="Edge & Volatility Matrix",
+    page_icon="📊",
+    layout="wide"
+)
 
-# DB Connection
-@st.cache_resource
-def init_connection():
-    try:
-        db_config = st.secrets["database"]
-        db_uri = f"postgresql+psycopg2://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
-        return create_engine(db_uri)
-    except Exception as e:
-        st.error(f"Database connection error: {e}")
-        return None
-
-engine = init_connection()
-if not engine:
-    st.error("Failed to connect to database")
+# --- DB CONFIG ---
+try:
+    db_config = st.secrets["database"]
+    db_uri = (
+        f"postgresql+psycopg2://{db_config['user']}:{db_config['password']}"
+        f"@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+    )
+    engine = create_engine(db_uri)
+except Exception as e:
+    st.error(f"Error connecting to the database: {e}")
     st.stop()
 
-# Create time slots for the past 24 hours
-sg_tz = pytz.timezone('Asia/Singapore')
-now_sg = datetime.now(sg_tz)
-start_time_sg = now_sg - timedelta(days=1)
+# --- UI Setup ---
+st.set_option('deprecation.showPyplotGlobalUse', False)
+st.title("Edge & Volatility Matrix (10min)")
+st.subheader("All Trading Pairs - Last 24 Hours (Singapore Time)")
 
-# Generate 10-minute time slots
-time_slots = []
-current_slot = start_time_sg.replace(minute=(start_time_sg.minute//10)*10, second=0, microsecond=0)
-while current_slot < now_sg:
-    time_slots.append(current_slot)
-    current_slot += timedelta(minutes=10)
+# Define parameters
+timeframe = "10min"
+lookback_days = 1  # 24 hours
+expected_points = 144  # Expected data points per pair over 24 hours (24 hours * 6 intervals per hour)
+singapore_timezone = pytz.timezone('Asia/Singapore')
 
-# Get pairs
-@st.cache_data(ttl=600)
-def get_pairs():
+# Get current time in Singapore timezone
+now_utc = datetime.now(pytz.utc)
+now_sg = now_utc.astimezone(singapore_timezone)
+st.write(f"Current Singapore Time: {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
+
+# Fetch all available pairs from DB
+@st.cache_data(ttl=600, show_spinner="Fetching pairs...")
+def fetch_all_pairs():
+    query = "SELECT DISTINCT pair_name FROM public.trade_pool_pairs ORDER BY pair_name"
     try:
-        query = "SELECT DISTINCT pair_name FROM public.trade_fill_fresh ORDER BY pair_name"
-        return pd.read_sql(query, engine)['pair_name'].tolist()
+        df = pd.read_sql(query, engine)
+        if df.empty:
+            st.error("No pairs found in the database.")
+            return []
+        return df['pair_name'].tolist()
     except Exception as e:
-        st.error(f"Error getting pairs: {e}")
-        return []
+        st.error(f"Error fetching pairs: {e}")
+        return ["BTC/USDT", "ETH/USDT", "SOL/USDT", "DOGE/USDT", "PEPE/USDT"]  # Default fallback
 
-pairs = get_pairs()
+all_pairs = fetch_all_pairs()
 
-# UI controls
+# UI Controls
 col1, col2 = st.columns([3, 1])
+
 with col1:
+    # Let user select pairs to display (or select all)
     select_all = st.checkbox("Select All Pairs", value=False)
+    
     if select_all:
-        selected_pairs = pairs
+        selected_pairs = all_pairs
     else:
-        default_pairs = pairs[:5] if len(pairs) >= 5 else pairs
-        selected_pairs = st.multiselect("Select Pairs", pairs, default=default_pairs)
-        
+        selected_pairs = st.multiselect(
+            "Select Pairs", 
+            all_pairs,
+            default=all_pairs[:5] if len(all_pairs) > 5 else all_pairs
+        )
+
 with col2:
+    # Add a refresh button
     if st.button("Refresh Data"):
         st.cache_data.clear()
         st.experimental_rerun()
@@ -70,252 +82,362 @@ if not selected_pairs:
     st.warning("Please select at least one pair")
     st.stop()
 
-# Fetch data for each pair
-@st.cache_data(ttl=600)
-def get_data_for_pair(pair_name):
-    """Get edge and volatility for a pair"""
+# Function to generate aligned 10-minute time blocks for the past 24 hours
+def generate_aligned_time_blocks(current_time):
+    """
+    Generate fixed 10-minute time blocks for past 24 hours,
+    aligned with standard 10-minute intervals (e.g., 4:00-4:10, 4:10-4:20)
+    """
+    # Round down to the nearest 10-minute mark
+    minute = current_time.minute
+    rounded_minute = (minute // 10) * 10
+    latest_complete_block_end = current_time.replace(minute=rounded_minute, second=0, microsecond=0)
+    
+    # Generate block labels for display
+    blocks = []
+    for i in range(144):  # 24 hours of 10-minute blocks
+        block_end = latest_complete_block_end - timedelta(minutes=i*10)
+        block_start = block_end - timedelta(minutes=10)
+        block_label = f"{block_start.strftime('%H:%M')}"
+        blocks.append((block_start, block_end, block_label))
+    
+    return blocks
+
+# Generate aligned time blocks
+aligned_time_blocks = generate_aligned_time_blocks(now_sg)
+time_block_labels = [block[2] for block in aligned_time_blocks]
+
+# Calculate Edge (PNL / Collateral) for each 10-minute time block
+@st.cache_data(ttl=600, show_spinner="Calculating edge...")
+def fetch_edge_data(pair_name):
+    # Get current time in Singapore timezone
+    now_utc = datetime.now(pytz.utc)
+    now_sg = now_utc.astimezone(singapore_timezone)
+    start_time_sg = now_sg - timedelta(days=lookback_days)
+    
+    # Convert back to UTC for database query
+    start_time_utc = start_time_sg.astimezone(pytz.utc)
+    end_time_utc = now_sg.astimezone(pytz.utc)
+
+    # This query calculates edge (PNL / Collateral) for each 10-minute interval
+    query = f"""
+    WITH time_intervals AS (
+      -- Generate 10-minute intervals for the past 24 hours
+      SELECT
+        generate_series(
+          date_trunc('hour', '{start_time_utc}'::timestamp) + 
+          INTERVAL '10 min' * floor(EXTRACT(MINUTE FROM '{start_time_utc}'::timestamp) / 10),
+          '{end_time_utc}'::timestamp,
+          INTERVAL '10 minutes'
+        ) AS time_slot
+    ),
+    
+    order_pnl AS (
+      -- Calculate platform order PNL
+      SELECT
+        date_trunc('hour', created_at + INTERVAL '8 hour') + 
+        INTERVAL '10 min' * FLOOR(EXTRACT(MINUTE FROM created_at + INTERVAL '8 hour')::INT / 10) AS timestamp,
+        COALESCE(SUM(taker_pnl * collateral_price), 0) AS platform_order_pnl
+      FROM
+        public.trade_fill_fresh
+      WHERE
+        created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
+        AND pair_name = '{pair_name}'
+        AND taker_way IN (1, 2, 3, 4)
+      GROUP BY
+        timestamp
+    ),
+    
+    fee_data AS (
+      -- Calculate fee revenue
+      SELECT
+        date_trunc('hour', created_at + INTERVAL '8 hour') + 
+        INTERVAL '10 min' * FLOOR(EXTRACT(MINUTE FROM created_at + INTERVAL '8 hour')::INT / 10) AS timestamp,
+        COALESCE(SUM(-1 * taker_fee * collateral_price), 0) AS fee_revenue
+      FROM
+        public.trade_fill_fresh
+      WHERE
+        created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
+        AND pair_name = '{pair_name}'
+        AND taker_fee_mode = 1
+        AND taker_way IN (1, 3)
+      GROUP BY
+        timestamp
+    ),
+    
+    funding_pnl AS (
+      -- Calculate funding fee PNL
+      SELECT
+        date_trunc('hour', created_at + INTERVAL '8 hour') + 
+        INTERVAL '10 min' * FLOOR(EXTRACT(MINUTE FROM created_at + INTERVAL '8 hour')::INT / 10) AS timestamp,
+        COALESCE(SUM(funding_fee * collateral_price), 0) AS funding_fee_pnl
+      FROM
+        public.trade_fill_fresh
+      WHERE
+        created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
+        AND pair_name = '{pair_name}'
+        AND taker_way = 0
+      GROUP BY
+        timestamp
+    ),
+    
+    sl_fees AS (
+      -- Calculate stop loss fees
+      SELECT
+        date_trunc('hour', created_at + INTERVAL '8 hour') + 
+        INTERVAL '10 min' * FLOOR(EXTRACT(MINUTE FROM created_at + INTERVAL '8 hour')::INT / 10) AS timestamp,
+        COALESCE(SUM(-taker_sl_fee * collateral_price - maker_sl_fee), 0) AS sl_fee_pnl
+      FROM
+        public.trade_fill_fresh
+      WHERE
+        created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
+        AND pair_name = '{pair_name}'
+      GROUP BY
+        timestamp
+    ),
+    
+    collateral_data AS (
+      -- Calculate open collateral
+      SELECT
+        date_trunc('hour', created_at + INTERVAL '8 hour') + 
+        INTERVAL '10 min' * FLOOR(EXTRACT(MINUTE FROM created_at + INTERVAL '8 hour')::INT / 10) AS timestamp,
+        COALESCE(SUM(CASE WHEN taker_fee_mode = 2 AND taker_way IN (1, 3) 
+                   THEN deal_vol * collateral_price ELSE 0 END), 0) AS total_collateral,
+        array_agg(deal_price ORDER BY created_at) AS price_array
+      FROM
+        public.trade_fill_fresh
+      WHERE
+        created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
+        AND pair_name = '{pair_name}'
+      GROUP BY
+        timestamp
+    )
+    
+    -- Combine all data sources
+    SELECT
+      ti.time_slot AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore' AS timestamp_sg,
+      COALESCE(o.platform_order_pnl, 0) + 
+      COALESCE(f.fee_revenue, 0) + 
+      COALESCE(ff.funding_fee_pnl, 0) + 
+      COALESCE(sl.sl_fee_pnl, 0) AS total_pnl,
+      COALESCE(c.total_collateral, 0) AS total_collateral,
+      c.price_array
+    FROM
+      time_intervals ti
+    LEFT JOIN
+      order_pnl o ON ti.time_slot = o.timestamp AT TIME ZONE 'Asia/Singapore' AT TIME ZONE 'UTC'
+    LEFT JOIN
+      fee_data f ON ti.time_slot = f.timestamp AT TIME ZONE 'Asia/Singapore' AT TIME ZONE 'UTC'
+    LEFT JOIN
+      funding_pnl ff ON ti.time_slot = ff.timestamp AT TIME ZONE 'Asia/Singapore' AT TIME ZONE 'UTC'
+    LEFT JOIN
+      sl_fees sl ON ti.time_slot = sl.timestamp AT TIME ZONE 'Asia/Singapore' AT TIME ZONE 'UTC'
+    LEFT JOIN
+      collateral_data c ON ti.time_slot = c.timestamp AT TIME ZONE 'Asia/Singapore' AT TIME ZONE 'UTC'
+    ORDER BY
+      ti.time_slot DESC
+    """
+    
     try:
-        # Convert to UTC for database query
-        start_time_utc = start_time_sg.astimezone(pytz.utc)
-        end_time_utc = now_sg.astimezone(pytz.utc)
-        
-        # Simple query that directly fetches trade data for 10-minute slots
-        query = f"""
-        WITH time_blocks AS (
-            SELECT
-                generate_series(
-                    date_trunc('hour', '{start_time_utc}'::timestamp) + 
-                    INTERVAL '10 min' * floor(EXTRACT(MINUTE FROM '{start_time_utc}'::timestamp) / 10),
-                    '{end_time_utc}'::timestamp,
-                    INTERVAL '10 minutes'
-                ) AS block_start
-        ),
-        
-        trade_data AS (
-            SELECT
-                date_trunc('hour', created_at) + 
-                INTERVAL '10 min' * floor(EXTRACT(MINUTE FROM created_at) / 10) AS time_slot,
-                
-                -- Order PNL
-                SUM(taker_pnl * collateral_price) AS order_pnl,
-                
-                -- Fee revenue (negative because it's income for platform)
-                SUM(CASE WHEN taker_fee_mode = 1 AND taker_way IN (1, 3) 
-                    THEN -1 * taker_fee * collateral_price ELSE 0 END) AS fee_pnl,
-                
-                -- Funding fees
-                SUM(CASE WHEN taker_way = 0 
-                    THEN funding_fee * collateral_price ELSE 0 END) AS funding_pnl,
-                
-                -- Stop loss fees
-                SUM(-taker_sl_fee * collateral_price - maker_sl_fee) AS sl_pnl,
-                
-                -- Open collateral
-                SUM(CASE WHEN taker_fee_mode = 2 AND taker_way IN (1, 3) 
-                    THEN deal_vol * collateral_price ELSE 0 END) AS collateral,
-                
-                -- Deal prices for volatility calc
-                array_agg(deal_price ORDER BY created_at) AS prices
-            FROM
-                public.trade_fill_fresh
-            WHERE
-                created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
-                AND pair_name = '{pair_name}'
-            GROUP BY
-                time_slot
-        )
-        
-        SELECT
-            tb.block_start AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore' AS time_sg,
-            td.order_pnl,
-            td.fee_pnl,
-            td.funding_pnl,
-            td.sl_pnl,
-            td.collateral,
-            td.prices
-        FROM
-            time_blocks tb
-        LEFT JOIN
-            trade_data td ON tb.block_start = td.time_slot
-        ORDER BY
-            tb.block_start
-        """
-        
         df = pd.read_sql(query, engine)
         
         if df.empty:
-            return pd.DataFrame()
+            return None
         
-        # Calculate total PNL and edge
-        df['total_pnl'] = df['order_pnl'].fillna(0) + df['fee_pnl'].fillna(0) + \
-                          df['funding_pnl'].fillna(0) + df['sl_pnl'].fillna(0)
-                          
-        df['edge'] = np.where(df['collateral'] > 0, 
-                              df['total_pnl'] / df['collateral'], 
-                              None)
+        # Process data
+        df['timestamp_sg'] = pd.to_datetime(df['timestamp_sg'])
+        df['time_label'] = df['timestamp_sg'].dt.strftime('%H:%M')
         
-        # Calculate volatility from price data
-        def calc_volatility(prices):
-            if prices is None or not isinstance(prices, list) or len(prices) < 2:
+        # Calculate Edge
+        df['edge'] = np.where(df['total_collateral'] > 0, 
+                            df['total_pnl'] / df['total_collateral'], 
+                            None)
+        
+        # Calculate volatility
+        def calculate_volatility(prices):
+            if prices is None or len(prices) < 2:
                 return None
+            
             try:
-                # Convert prices to numeric
-                if isinstance(prices, str):  # Handle PostgreSQL array format
+                # Handle PostgreSQL array formats
+                if isinstance(prices, str):
                     prices = prices.strip('{}').split(',')
-                prices = [float(p) for p in prices if p and p != 'NULL' and p != 'None']
+                    prices = [float(p) for p in prices if p and p != 'NULL' and p != 'None']
+                else:
+                    prices = [float(p) for p in prices if p]
                 
                 if len(prices) < 2:
                     return None
-                
+                    
                 # Calculate log returns and volatility
                 prices_array = np.array(prices)
                 log_returns = np.diff(np.log(prices_array))
-                std_dev = np.std(log_returns)
                 
-                # Annualize (10-min intervals -> 144 intervals per day * 365 days)
-                volatility = std_dev * np.sqrt(144 * 365)
+                # Calculate standard deviation and annualize (10-min intervals -> 6 * 24 * 365)
+                std_dev = np.std(log_returns)
+                volatility = std_dev * np.sqrt(6 * 24 * 365)
                 
                 return volatility
             except Exception as e:
-                print(f"Volatility calculation error: {e}")
                 return None
         
         # Apply volatility calculation
-        df['volatility'] = df['prices'].apply(calc_volatility)
-        
-        # Format time and create time_label
-        df['time_sg'] = pd.to_datetime(df['time_sg'])
-        df['time_label'] = df['time_sg'].dt.strftime('%H:%M')
+        df['volatility'] = df['price_array'].apply(calculate_volatility)
         
         return df
-    
     except Exception as e:
-        st.error(f"Error fetching data for {pair_name}: {e}")
-        return pd.DataFrame()
+        st.error(f"Error calculating edge for {pair_name}: {e}")
+        print(f"[{pair_name}] Error calculating edge: {e}")
+        return None
 
-# Progress bar
+# Show progress bar while calculating
 progress_bar = st.progress(0)
 status_text = st.empty()
 
-# Fetch data for all pairs
-all_data = {}
-for i, pair in enumerate(selected_pairs):
-    progress_bar.progress(i / len(selected_pairs))
-    status_text.text(f"Processing {pair} ({i+1}/{len(selected_pairs)})")
-    
-    df = get_data_for_pair(pair)
-    if not df.empty:
-        all_data[pair] = df
+# Calculate edge for each pair
+pair_results = {}
+for i, pair_name in enumerate(selected_pairs):
+    try:
+        progress_bar.progress((i) / len(selected_pairs))
+        status_text.text(f"Processing {pair_name} ({i+1}/{len(selected_pairs)})")
+        
+        # Fetch edge data
+        edge_data = fetch_edge_data(pair_name)
+        
+        if edge_data is not None:
+            pair_results[pair_name] = edge_data
+    except Exception as e:
+        st.error(f"Error processing pair {pair_name}: {e}")
+        print(f"Error processing pair {pair_name} in main loop: {e}")
 
+# Final progress update
 progress_bar.progress(1.0)
-status_text.text(f"Finished processing {len(all_data)}/{len(selected_pairs)} pairs")
+status_text.text(f"Processed {len(pair_results)}/{len(selected_pairs)} pairs successfully")
 
-if not all_data:
-    st.error("No data found for any selected pairs")
-    st.stop()
-
-# Create a unified time grid across all pairs
-all_times = set()
-for pair, df in all_data.items():
-    all_times.update(df['time_label'].tolist())
-
-time_grid = sorted(all_times)
-
-# Create tabs
+# Create tabs for Edge and Volatility
 tab1, tab2, tab3 = st.tabs(["Edge", "Volatility", "Combined"])
 
-# Helper functions for coloring
-def edge_color(value):
-    if pd.isna(value) or value is None:
-        return '#f5f5f5'  # Light gray for empty
-    
-    if value < -0.1:
+# Function to color edge values
+def edge_color(val):
+    if pd.isna(val) or val is None:
+        return '#f5f5f5'  # Gray for missing/zero
+    elif val < -0.1:
         return 'rgba(180, 0, 0, 0.9)'  # Deep red
-    elif value < -0.05:
+    elif val < -0.05:
         return 'rgba(255, 0, 0, 0.9)'  # Red
-    elif value < -0.01:
+    elif val < -0.01:
         return 'rgba(255, 150, 150, 0.9)'  # Light red
-    elif value < 0.01:
+    elif val < 0.01:
         return 'rgba(255, 255, 150, 0.9)'  # Yellow
-    elif value < 0.05:
+    elif val < 0.05:
         return 'rgba(150, 255, 150, 0.9)'  # Light green
-    elif value < 0.1:
+    elif val < 0.1:
         return 'rgba(0, 255, 0, 0.9)'  # Green
     else:
         return 'rgba(0, 180, 0, 0.9)'  # Deep green
 
-def vol_color(value):
-    if pd.isna(value) or value is None:
-        return '#f5f5f5'  # Light gray for empty
-    
-    if value < 0.3:
+# Function to color volatility values
+def vol_color(val):
+    if pd.isna(val) or val is None:
+        return '#f5f5f5'  # Gray for missing/zero
+    elif val < 0.3:
         return 'rgba(0, 255, 0, 0.9)'  # Green
-    elif value < 0.6:
+    elif val < 0.6:
         return 'rgba(255, 255, 0, 0.9)'  # Yellow
-    elif value < 1.0:
+    elif val < 1.0:
         return 'rgba(255, 165, 0, 0.9)'  # Orange
     else:
         return 'rgba(255, 0, 0, 0.9)'  # Red
 
-def format_value(value, type='edge'):
-    if pd.isna(value) or value is None:
+# Format values for display
+def format_value(val, type='edge'):
+    if pd.isna(val) or val is None:
         return '-'
     
     if type == 'edge':
-        return f"{value*100:.2f}%"
+        return f"{val*100:.2f}%"
     else:  # volatility
-        return f"{value*100:.1f}%"
+        return f"{val*100:.1f}%"
 
-# Tab 1: Edge Matrix
-with tab1:
-    st.markdown("## Edge Matrix (10min timeframe, Last 24 hours, Singapore Time)")
-    st.markdown("### Edge = PNL / Total Open Collateral")
+# Function to create matrix and handle duplicates
+def create_time_matrix(data_dict, time_labels, metric):
+    # Create a dict of dicts to handle potential duplicates
+    matrix_data = {}
     
-    # Create edge matrix
-    edge_matrix = go.Figure()
+    for pair_name, df in data_dict.items():
+        matrix_data[pair_name] = {}
+        
+        # Group by time_label and take the average for any duplicates
+        grouped = df.groupby('time_label')[metric].mean()
+        
+        # Fill the matrix with values
+        for time_label in time_labels:
+            if time_label in grouped.index:
+                matrix_data[pair_name][time_label] = grouped[time_label]
+            else:
+                matrix_data[pair_name][time_label] = None
     
-    # Add edge data for each pair
-    for pair in selected_pairs:
-        if pair in all_data:
-            df = all_data[pair]
-            if df.empty:
-                continue
-                
-            # Create a map of time_label -> edge value
-            edge_map = dict(zip(df['time_label'], df['edge']))
+    return matrix_data
+
+if pair_results:
+    # Create a list of all time labels we have data for
+    all_time_labels = set()
+    for pair, df in pair_results.items():
+        all_time_labels.update(df['time_label'].tolist())
+    
+    # Find which time labels match our standard blocks
+    ordered_times = []
+    for t in time_block_labels:
+        if t in all_time_labels:
+            ordered_times.append(t)
+    
+    # If no matches found, use the existing times
+    if not ordered_times:
+        ordered_times = sorted(list(all_time_labels), reverse=True)
+    
+    # With tab 1 (Edge)
+    with tab1:
+        st.markdown("## Edge Matrix (10min timeframe, Last 24 hours, Singapore Time)")
+        st.markdown("### Edge = PNL / Total Open Collateral")
+        
+        # Create edge matrix
+        edge_matrix = create_time_matrix(pair_results, ordered_times, 'edge')
+        
+        # Create visualization
+        fig = go.Figure()
+        
+        # Add each pair to the matrix
+        for pair_name, time_data in edge_matrix.items():
+            # Extract values in the correct order
+            edge_values = [time_data.get(t) for t in ordered_times]
             
-            # Create arrays for visualization
-            edge_values = []
-            for time_label in time_grid:
-                edge_values.append(edge_map.get(time_label, None))
-            
-            # Add pair to matrix
-            edge_matrix.add_trace(go.Heatmap(
-                z=[edge_values],  # Each row is a pair
-                x=time_grid,      # X-axis is time
-                y=[pair],         # Y-axis is pair name
-                colorscale=[[0, 'rgba(255,255,255,0)']],  # Transparent (we'll add custom colors)
+            # Add trace for hover
+            fig.add_trace(go.Heatmap(
+                z=[edge_values],
+                x=ordered_times,
+                y=[pair_name],
+                colorscale=[[0, 'rgba(255,255,255,0)']],  # Transparent
                 showscale=False,
                 hoverinfo='text',
-                text=[[format_value(val) for val in edge_values]],
+                text=[[format_value(v) for v in edge_values]],
                 hovertemplate='<b>%{y}</b><br>Time: %{x}<br>Edge: %{text}<extra></extra>'
             ))
             
-            # Add custom colored rectangles and text
+            # Add colored rectangles and text
             for i, val in enumerate(edge_values):
                 if not pd.isna(val) and val is not None:
                     # Add colored rectangle
-                    edge_matrix.add_shape(
+                    fig.add_shape(
                         type="rect",
                         x0=i-0.5, x1=i+0.5,
                         y0=-0.5, y1=0.5,
-                        xref="x", yref=f"y{len(edge_matrix.data)}",
+                        xref="x", yref=f"y{len(fig.data)}",
                         fillcolor=edge_color(val),
                         line=dict(width=1, color='white'),
                     )
                     
-                    # Add text label
-                    edge_matrix.add_annotation(
+                    # Add text annotation
+                    fig.add_annotation(
                         x=i, y=0,
                         text=format_value(val),
                         showarrow=False,
@@ -323,80 +445,73 @@ with tab1:
                             color='black' if abs(val) < 0.05 else 'white',
                             size=10
                         ),
-                        xref="x", yref=f"y{len(edge_matrix.data)}",
+                        xref="x", yref=f"y{len(fig.data)}",
                     )
+        
+        # Update layout
+        fig.update_layout(
+            title="Edge Matrix (10min intervals, Last 24 hours)",
+            xaxis=dict(
+                title="Time (Singapore)",
+                tickangle=45,
+                side="top"
+            ),
+            yaxis=dict(
+                title="Trading Pair",
+                autorange="reversed"
+            ),
+            height=max(500, len(pair_results) * 40),
+            margin=dict(t=50, l=120, r=20, b=50),
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Legend
+        st.markdown("**Edge Legend:** <span style='color:red'>Negative</span> | <span style='color:yellow'>Neutral</span> | <span style='color:green'>Positive</span>", unsafe_allow_html=True)
     
-    # Update layout
-    edge_matrix.update_layout(
-        title="Edge Matrix (10min intervals)",
-        xaxis=dict(
-            title="Time (Singapore)",
-            tickangle=45,
-            side="top"
-        ),
-        yaxis=dict(
-            title="Trading Pair",
-            autorange="reversed"
-        ),
-        height=max(500, len(selected_pairs) * 40),
-        margin=dict(t=50, l=120, r=20, b=50),
-    )
-    
-    st.plotly_chart(edge_matrix, use_container_width=True)
-    
-    # Legend
-    st.markdown("**Edge Legend:** <span style='color:red'>Negative</span> | <span style='color:yellow'>Neutral</span> | <span style='color:green'>Positive</span>", unsafe_allow_html=True)
-
-# Tab 2: Volatility Matrix
-with tab2:
-    st.markdown("## Volatility Matrix (10min timeframe, Last 24 hours, Singapore Time)")
-    st.markdown("### Annualized Volatility = StdDev(Log Returns) * sqrt(trading periods per year)")
-    
-    # Create volatility matrix
-    vol_matrix = go.Figure()
-    
-    # Add volatility data for each pair
-    for pair in selected_pairs:
-        if pair in all_data:
-            df = all_data[pair]
-            if df.empty:
-                continue
-                
-            # Create a map of time_label -> volatility value
-            vol_map = dict(zip(df['time_label'], df['volatility']))
+    # With tab 2 (Volatility)
+    with tab2:
+        st.markdown("## Volatility Matrix (10min timeframe, Last 24 hours, Singapore Time)")
+        st.markdown("### Annualized Volatility = StdDev(Log Returns) * sqrt(trading periods per year)")
+        
+        # Create volatility matrix
+        vol_matrix = create_time_matrix(pair_results, ordered_times, 'volatility')
+        
+        # Create visualization
+        fig = go.Figure()
+        
+        # Add each pair to the matrix
+        for pair_name, time_data in vol_matrix.items():
+            # Extract values in the correct order
+            vol_values = [time_data.get(t) for t in ordered_times]
             
-            # Create arrays for visualization
-            vol_values = []
-            for time_label in time_grid:
-                vol_values.append(vol_map.get(time_label, None))
-            
-            # Add pair to matrix
-            vol_matrix.add_trace(go.Heatmap(
-                z=[vol_values],   # Each row is a pair
-                x=time_grid,      # X-axis is time
-                y=[pair],         # Y-axis is pair name
-                colorscale=[[0, 'rgba(255,255,255,0)']],  # Transparent (we'll add custom colors)
+            # Add trace for hover
+            fig.add_trace(go.Heatmap(
+                z=[vol_values],
+                x=ordered_times,
+                y=[pair_name],
+                colorscale=[[0, 'rgba(255,255,255,0)']],  # Transparent
                 showscale=False,
                 hoverinfo='text',
-                text=[[format_value(val, 'volatility') for val in vol_values]],
+                text=[[format_value(v, 'volatility') for v in vol_values]],
                 hovertemplate='<b>%{y}</b><br>Time: %{x}<br>Volatility: %{text}<extra></extra>'
             ))
             
-            # Add custom colored rectangles and text
+            # Add colored rectangles and text
             for i, val in enumerate(vol_values):
                 if not pd.isna(val) and val is not None:
                     # Add colored rectangle
-                    vol_matrix.add_shape(
+                    fig.add_shape(
                         type="rect",
                         x0=i-0.5, x1=i+0.5,
                         y0=-0.5, y1=0.5,
-                        xref="x", yref=f"y{len(vol_matrix.data)}",
+                        xref="x", yref=f"y{len(fig.data)}",
                         fillcolor=vol_color(val),
                         line=dict(width=1, color='white'),
                     )
                     
-                    # Add text label
-                    vol_matrix.add_annotation(
+                    # Add text annotation
+                    fig.add_annotation(
                         x=i, y=0,
                         text=format_value(val, 'volatility'),
                         showarrow=False,
@@ -404,85 +519,75 @@ with tab2:
                             color='black' if val < 0.6 else 'white',
                             size=10
                         ),
-                        xref="x", yref=f"y{len(vol_matrix.data)}",
+                        xref="x", yref=f"y{len(fig.data)}",
                     )
+        
+        # Update layout
+        fig.update_layout(
+            title="Volatility Matrix (10min intervals, Last 24 hours)",
+            xaxis=dict(
+                title="Time (Singapore)",
+                tickangle=45,
+                side="top"
+            ),
+            yaxis=dict(
+                title="Trading Pair",
+                autorange="reversed"
+            ),
+            height=max(500, len(pair_results) * 40),
+            margin=dict(t=50, l=120, r=20, b=50),
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Legend
+        st.markdown("**Volatility Legend:** <span style='color:green'>Low</span> | <span style='color:yellow'>Medium</span> | <span style='color:orange'>High</span> | <span style='color:red'>Extreme</span>", unsafe_allow_html=True)
     
-    # Update layout
-    vol_matrix.update_layout(
-        title="Volatility Matrix (10min intervals)",
-        xaxis=dict(
-            title="Time (Singapore)",
-            tickangle=45,
-            side="top"
-        ),
-        yaxis=dict(
-            title="Trading Pair",
-            autorange="reversed"
-        ),
-        height=max(500, len(selected_pairs) * 40),
-        margin=dict(t=50, l=120, r=20, b=50),
-    )
-    
-    st.plotly_chart(vol_matrix, use_container_width=True)
-    
-    # Legend
-    st.markdown("**Volatility Legend:** <span style='color:green'>Low</span> | <span style='color:yellow'>Medium</span> | <span style='color:orange'>High</span> | <span style='color:red'>Extreme</span>", unsafe_allow_html=True)
-
-# Tab 3: Combined View
-with tab3:
-    st.markdown("## Combined Edge & Volatility Matrix (10min intervals, Last 24 hours)")
-    st.markdown("### Each cell shows: Edge (top) and Volatility (bottom)")
-    
-    # Create combined matrix
-    combined_matrix = go.Figure()
-    
-    # Add data for each pair
-    for pair in selected_pairs:
-        if pair in all_data:
-            df = all_data[pair]
-            if df.empty:
-                continue
-                
-            # Create maps of time_label -> value
-            edge_map = dict(zip(df['time_label'], df['edge']))
-            vol_map = dict(zip(df['time_label'], df['volatility']))
+    # With tab 3 (Combined View)
+    with tab3:
+        st.markdown("## Combined Edge & Volatility Matrix (10min intervals, Last 24 hours)")
+        st.markdown("### Each cell shows: Edge (top) and Volatility (bottom)")
+        
+        # Create visualization
+        fig = go.Figure()
+        
+        # Add each pair to the matrix
+        for pair_name in pair_results.keys():
+            edge_data = edge_matrix[pair_name]
+            vol_data = vol_matrix[pair_name]
             
-            # Create arrays for visualization
-            combined_values = []
-            for time_label in time_grid:
-                combined_values.append({
-                    'edge': edge_map.get(time_label, None),
-                    'vol': vol_map.get(time_label, None)
-                })
+            # Extract values in the correct order
+            edge_values = [edge_data.get(t) for t in ordered_times]
+            vol_values = [vol_data.get(t) for t in ordered_times]
             
-            # Add placeholder for this pair
-            combined_matrix.add_trace(go.Heatmap(
-                z=[np.zeros(len(time_grid))],  # Just placeholder values
-                x=time_grid,
-                y=[pair],
+            # Add placeholder trace
+            fig.add_trace(go.Heatmap(
+                z=[np.zeros(len(ordered_times))],
+                x=ordered_times,
+                y=[pair_name],
                 colorscale=[[0, 'rgba(255,255,255,0)']],  # Transparent
                 showscale=False,
                 hoverinfo='none'
             ))
             
-            # Add custom rectangles for each cell
-            for i, val_dict in enumerate(combined_values):
-                edge_val = val_dict['edge']
-                vol_val = val_dict['vol']
+            # Add split colored rectangles for each cell
+            for i in range(len(ordered_times)):
+                edge_val = edge_values[i]
+                vol_val = vol_values[i]
                 
-                # Top half: Edge
+                # Top half - Edge
                 if not pd.isna(edge_val) and edge_val is not None:
-                    combined_matrix.add_shape(
+                    fig.add_shape(
                         type="rect",
                         x0=i-0.5, x1=i+0.5,
                         y0=0, y1=0.5,  # Top half
-                        xref="x", yref=f"y{len(combined_matrix.data)}",
+                        xref="x", yref=f"y{len(fig.data)}",
                         fillcolor=edge_color(edge_val),
                         line=dict(width=1, color='white'),
                     )
                     
-                    # Edge value text
-                    combined_matrix.add_annotation(
+                    # Add edge text
+                    fig.add_annotation(
                         x=i, y=0.25,  # Top quarter
                         text=format_value(edge_val),
                         showarrow=False,
@@ -490,22 +595,22 @@ with tab3:
                             color='black' if abs(edge_val) < 0.05 else 'white',
                             size=9
                         ),
-                        xref="x", yref=f"y{len(combined_matrix.data)}",
+                        xref="x", yref=f"y{len(fig.data)}",
                     )
                 
-                # Bottom half: Volatility
+                # Bottom half - Volatility
                 if not pd.isna(vol_val) and vol_val is not None:
-                    combined_matrix.add_shape(
+                    fig.add_shape(
                         type="rect",
                         x0=i-0.5, x1=i+0.5,
                         y0=-0.5, y1=0,  # Bottom half
-                        xref="x", yref=f"y{len(combined_matrix.data)}",
+                        xref="x", yref=f"y{len(fig.data)}",
                         fillcolor=vol_color(vol_val),
                         line=dict(width=1, color='white'),
                     )
                     
-                    # Volatility value text
-                    combined_matrix.add_annotation(
+                    # Add volatility text
+                    fig.add_annotation(
                         x=i, y=-0.25,  # Bottom quarter
                         text=format_value(vol_val, 'volatility'),
                         showarrow=False,
@@ -513,62 +618,64 @@ with tab3:
                             color='black' if vol_val < 0.6 else 'white',
                             size=9
                         ),
-                        xref="x", yref=f"y{len(combined_matrix.data)}",
+                        xref="x", yref=f"y{len(fig.data)}",
                     )
                 
-                # Add dividing line
+                # Add separator line
                 if (not pd.isna(edge_val) and edge_val is not None) or (not pd.isna(vol_val) and vol_val is not None):
-                    combined_matrix.add_shape(
+                    fig.add_shape(
                         type="line",
                         x0=i-0.5, x1=i+0.5,
                         y0=0, y1=0,  # Middle
-                        xref="x", yref=f"y{len(combined_matrix.data)}",
+                        xref="x", yref=f"y{len(fig.data)}",
                         line=dict(width=1, color='white'),
                     )
             
             # Add hover information
             hover_texts = []
-            for val_dict in combined_values:
-                edge_val = val_dict['edge']
-                vol_val = val_dict['vol']
+            for i in range(len(ordered_times)):
+                edge_val = edge_values[i]
+                vol_val = vol_values[i]
                 edge_text = format_value(edge_val) if not pd.isna(edge_val) and edge_val is not None else '-'
                 vol_text = format_value(vol_val, 'volatility') if not pd.isna(vol_val) and vol_val is not None else '-'
                 hover_texts.append(f"Edge: {edge_text}<br>Vol: {vol_text}")
             
-            # Add invisible hover trace
-            combined_matrix.add_trace(go.Scatter(
-                x=time_grid,
-                y=[0] * len(time_grid),
+            # Add invisible trace for hover text
+            fig.add_trace(go.Scatter(
+                x=ordered_times,
+                y=[0] * len(ordered_times),
                 mode='markers',
                 marker=dict(size=0, color='rgba(0,0,0,0)'),
                 hoverinfo='text',
                 text=hover_texts,
-                hovertemplate=f'<b>{pair}</b><br>Time: %{{x}}<br>%{{text}}<extra></extra>',
-                showlegend=False,
-                yaxis=f"y{len(combined_matrix.data)-1}"
+                hovertemplate=f'<b>{pair_name}</b><br>Time: %{{x}}<br>%{{text}}<extra></extra>',
+                showlegend=False
             ))
-    
-    # Update layout
-    combined_matrix.update_layout(
-        title="Combined Edge & Volatility Matrix (10min intervals)",
-        xaxis=dict(
-            title="Time (Singapore)",
-            tickangle=45,
-            side="top"
-        ),
-        yaxis=dict(
-            title="Trading Pair",
-            autorange="reversed"
-        ),
-        height=max(500, len(selected_pairs) * 40),
-        margin=dict(t=50, l=120, r=20, b=50),
-    )
-    
-    st.plotly_chart(combined_matrix, use_container_width=True)
-    
-    # Legend
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown("**Edge (Top):** <span style='color:red'>Negative</span> | <span style='color:yellow'>Neutral</span> | <span style='color:green'>Positive</span>", unsafe_allow_html=True)
-    with col2:
-        st.markdown("**Volatility (Bottom):** <span style='color:green'>Low</span> | <span style='color:yellow'>Medium</span> | <span style='color:orange'>High</span> | <span style='color:red'>Extreme</span>", unsafe_allow_html=True)
+        
+        # Update layout
+        fig.update_layout(
+            title="Combined Edge & Volatility Matrix (10min intervals, Last 24 hours)",
+            xaxis=dict(
+                title="Time (Singapore)",
+                tickangle=45,
+                side="top"
+            ),
+            yaxis=dict(
+                title="Trading Pair",
+                autorange="reversed"
+            ),
+            height=max(500, len(pair_results) * 40),
+            margin=dict(t=50, l=120, r=20, b=50),
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Legend
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Edge (Top):** <span style='color:red'>Negative</span> | <span style='color:yellow'>Neutral</span> | <span style='color:green'>Positive</span>", unsafe_allow_html=True)
+        with col2:
+            st.markdown("**Volatility (Bottom):** <span style='color:green'>Low</span> | <span style='color:yellow'>Medium</span> | <span style='color:orange'>High</span> | <span style='color:red'>Extreme</span>", unsafe_allow_html=True)
+
+else:
+    st.warning("No data available for the selected pairs. Try selecting different pairs or refreshing the data.")
