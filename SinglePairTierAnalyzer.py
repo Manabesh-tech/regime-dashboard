@@ -169,7 +169,7 @@ def get_current_bid_ask(pair_name, use_replication=True):
 
             # Get the most recent partition table
             today = datetime.now().strftime("%Y%m%d")
-            table_name = f'oracle_order_book_level_price_data_partition_v4_{today}'
+            table_name = f'oracle_order_book_level_price_data_partition_v5_{today}'
 
             # Check if table exists
             check_table = text("""
@@ -183,7 +183,7 @@ def get_current_bid_ask(pair_name, use_replication=True):
             if not session.execute(check_table, {"table_name": table_name}).scalar():
                 # Try yesterday if today doesn't exist
                 yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
-                table_name = f'oracle_order_book_level_price_data_partition_v4_{yesterday}'
+                table_name = f'oracle_order_book_level_price_data_partition_v5_{yesterday}'
 
                 # Check if yesterday's table exists
                 if not session.execute(check_table, {"table_name": table_name}).scalar():
@@ -237,45 +237,48 @@ class EnhancedDepthTierAnalyzer:
         self.point_time_ranges = {point: None for point in self.point_counts}
 
         # Define depth tiers
+
+        # Define depth tiers
         self.depth_tier_columns = [
             'price_1', 'price_2', 'price_3', 'price_4', 'price_5',
             'price_6', 'price_7', 'price_8', 'price_9', 'price_10',
             'price_11', 'price_12', 'price_13', 'price_14', 'price_15',
             'price_16','price_17','price_18','price_19','price_20','price_21',
-            'price_22','price_23','price_24','price_25','price_26','price_27','price_28','price_29'
+            'price_22','price_23','price_24','price_25','price_26','price_27','price_28','price_29','price_30'
         ]
 
         # Map column names to actual depth values
         self.depth_tier_values = {
-            'price_26':'1k',
-            'price_27':'3k',
-            'price_28':'5k',
-            'price_29':'7k',
-            'price_1': '10k',
-            'price_2': '50k',
-            'price_3': '100k',
-            'price_4': '200k',
-            'price_5': '300k',
-            'price_6': '400k',
-            'price_7': '500k',
-            'price_8': '600k',
-            'price_9': '700k',
-            'price_10': '800k',
-            'price_11': '900k',
-            'price_12': '1000k',
-            'price_13': '2000k',
-            'price_14': '3000k',
-            'price_15': '4000k',
-            'price_16':'5000k',
-            'price_17':'6000k',
-            'price_18':'7000k',
-            'price_19': '8000k',
-            'price_20':'9000k',
-            'price_21':'10000k',
-            'price_22':'11000k',
-            'price_23':'12000k',
-            'price_24':'13000k',
-            'price_25':'14000k',
+            'price_1':'1k',
+            'price_2':'3k',
+            'price_3':'5k',
+            'price_4':'7k',
+            'price_5': '10k',
+            'price_6': '50k',
+            'price_7': '100k',
+            'price_8': '200k',
+            'price_9': '300k',
+            'price_10': '400k',
+            'price_11': '500k',
+            'price_12': '600k',
+            'price_13': '700k',
+            'price_14': '800k',
+            'price_15': '900k',
+            'price_16': '1M',
+            'price_17': '1.5M',
+            'price_18': '2M',
+            'price_19': '3M',
+            'price_20': '4M',
+            'price_21':'5M',
+            'price_22':'6M',
+            'price_23':'7M',
+            'price_24': '8M',
+            'price_25':'9M',
+            'price_26':'10M',
+            'price_27':'11M',
+            'price_28':'12M',
+            'price_29':'13M',
+            'price_30':'14M',
         }
 
         # Metrics to calculate
@@ -372,7 +375,7 @@ class EnhancedDepthTierAnalyzer:
                 all_data = []
                 
                 for table_date in table_dates:
-                    table_name = f"oracle_order_book_level_price_data_partition_v4_{table_date}"
+                    table_name = f"oracle_order_book_level_price_data_partition_v5_{table_date}"
                     
                     # Check if table exists
                     check_table = text("""
@@ -808,18 +811,14 @@ def create_point_count_table(analyzer, point_count):
     
     # Add explanatory text
     if '% Time Highest Choppiness' in display_df.columns:
-        explanation_text = """
-        <div style="background-color: #f7f7f7; padding: 8px; border-radius: 5px; margin-bottom: 15px;">
-            <p style="margin: 3px 0;"><strong>% Time Highest Choppiness</strong>: Percentage of time intervals where this tier had the highest choppiness value compared to other tiers</p>
-        """
+        explanation_text = '<div style="background-color: #f7f7f7; padding: 10px; border-radius: 5px; margin-bottom: 15px;">'
+        explanation_text += '<p style="margin: 5px 0;"><strong>% Time Highest Choppiness</strong>: Percentage of time intervals where this tier had the highest choppiness value compared to other tiers</p>'
         
         # Add winrate explanation only for 5000 points
         if point_count == 5000 and 'Win Rate (%)' in display_df.columns:
-            explanation_text += """
-            <p style="margin: 3px 0;"><strong>Win Rate (%)</strong>: Percentage of price movements that resulted in profitable direction across multiple timeframes</p>
-            """
+            explanation_text += '<p style="margin: 5px 0;"><strong>Win Rate (%)</strong>: Percentage of price movements that resulted in profitable direction across multiple timeframes</p>'
             
-        explanation_text += "</div>"
+        explanation_text += '</div>'
         st.markdown(explanation_text, unsafe_allow_html=True)
 
     # Show the full table with enhanced styling
