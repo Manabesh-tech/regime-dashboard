@@ -204,6 +204,9 @@ def analyze_tiers(pair_name, progress_bar=None):
                 if progress_bar:
                     progress_bar.progress(0.1, text=f"Fetching data from {table_name}...")
                 
+                # Get timestamp from 24 hours ago in UTC
+                utc_24h_ago = now_sg.replace(tzinfo=None) - timedelta(hours=24)
+                
                 query = text(f"""
                     WITH latest_data AS (
                         SELECT 
@@ -214,9 +217,10 @@ def analyze_tiers(pair_name, progress_bar=None):
                             {table_name}
                         WHERE 
                             pair_name = :pair_name
+                            AND created_at >= :start_time
                         ORDER BY 
                             created_at DESC
-                        LIMIT 100000
+                        LIMIT 500000
                     )
                     SELECT * FROM latest_data
                     ORDER BY 
@@ -224,7 +228,7 @@ def analyze_tiers(pair_name, progress_bar=None):
                         created_at DESC
                 """)
                 
-                result = session.execute(query, {"pair_name": pair_name})
+                result = session.execute(query, {"pair_name": pair_name, "start_time": utc_24h_ago})
                 table_data = result.fetchall()
                 
                 if table_data:
@@ -232,8 +236,8 @@ def analyze_tiers(pair_name, progress_bar=None):
                     if progress_bar:
                         progress_bar.progress(0.2, text=f"Found {len(table_data)} rows in {table_name}")
                         
-                # Stop if we have enough data
-                if len(all_data) >= 50000:  # This should be enough for multiple 5000-tick windows
+                # Stop if we have enough data - increased to 400,000 to get more complete coverage
+                if len(all_data) >= 400000:  # This should be enough for multiple 5000-tick windows
                     break
             
             if not all_data:
@@ -241,8 +245,18 @@ def analyze_tiers(pair_name, progress_bar=None):
                     progress_bar.progress(1.0, text=f"No data found for {pair_name}")
                 return None
                 
-            if progress_bar:
-                progress_bar.progress(0.3, text=f"Processing {len(all_data)} data points...")
+            # Calculate total time span of analyzed data
+            if len(all_data) > 0:
+                newest_timestamp = max(row[1] for row in all_data)
+                oldest_timestamp = min(row[1] for row in all_data)
+                time_span_seconds = (newest_timestamp - oldest_timestamp).total_seconds()
+                time_span_hours = time_span_seconds / 3600
+                
+                if progress_bar:
+                    progress_bar.progress(0.3, text=f"Processing {len(all_data)} data points spanning {time_span_hours:.2f} hours...")
+            else:
+                if progress_bar:
+                    progress_bar.progress(0.3, text=f"Processing {len(all_data)} data points...")
             
             # Create DataFrame
             columns = ['exchange_name', 'created_at'] + tier_columns
@@ -578,6 +592,15 @@ def main():
             st.header("Global Tier Rankings")
             st.markdown("**Efficiency Formula:** Win Rate % × (100% - Dropout Rate %)")
             
+            # Display time span analyzed along with data metrics
+            if 'time_span_hours' in locals():
+                st.markdown(f"**Analysis Coverage:** {time_span_hours:.2f} hours of data analyzed ({len(all_data):,} total data points)")
+                
+                # Calculate theoretical vs actual data coverage
+                theoretical_max = int(time_span_seconds * 2)  # 2 ticks per second (500ms)
+                coverage_percent = (len(all_data) / theoretical_max) * 100 if theoretical_max > 0 else 0
+                st.markdown(f"**Data Density:** {coverage_percent:.1f}% of theoretical maximum ({theoretical_max:,} points at 500ms intervals)")
+                
             # Verify win rates sum to approximately 100%
             total_win_rate = rankings['win_rate'].sum()
             st.markdown(f"**Total Win Rate:** {total_win_rate:.1f}% (Should be approximately 100%)")
