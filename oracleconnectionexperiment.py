@@ -218,49 +218,49 @@ def analyze_tiers(pair_name, progress_bar=None):
                     continue
                 
                 # Get timestamp from 24 hours ago in UTC
-            utc_24h_ago = now_sg.replace(tzinfo=None) - timedelta(hours=24)
-            
-            # Query with optimized filters and fewer columns to reduce data transfer
-            if progress_bar:
-                progress_bar.progress(0.1, text=f"Fetching data from {table_name} (optimized)...")
-            
-            # Only fetch columns we need for better performance
-            query = text(f"""
-                WITH latest_data AS (
-                    SELECT 
-                        source as exchange_name,
-                        created_at,
-                        {price_columns}
-                    FROM 
-                        {table_name}
-                    WHERE 
-                        pair_name = :pair_name
-                        AND created_at >= :start_time
-                        AND created_at <= :end_time
-                        AND source IN ('binanceFuture', 'bitgetFuture', 'okxFuture', 'bybitFuture', 
-                                      'gateFuture', 'mexcFuture', 'hyperliquidFuture')
+                utc_24h_ago = now_sg.replace(tzinfo=None) - timedelta(hours=24)
+                
+                # Query with optimized filters and fewer columns to reduce data transfer
+                if progress_bar:
+                    progress_bar.progress(0.1, text=f"Fetching data from {table_name} (optimized)...")
+                
+                # Only fetch columns we need for better performance
+                query = text(f"""
+                    WITH latest_data AS (
+                        SELECT 
+                            source as exchange_name,
+                            created_at,
+                            {price_columns}
+                        FROM 
+                            {table_name}
+                        WHERE 
+                            pair_name = :pair_name
+                            AND created_at >= :start_time
+                            AND created_at <= :end_time
+                            AND source IN ('binanceFuture', 'bitgetFuture', 'okxFuture', 'bybitFuture', 
+                                          'gateFuture', 'mexcFuture', 'hyperliquidFuture')
+                        ORDER BY 
+                            created_at DESC
+                        LIMIT 300000
+                    )
+                    SELECT * FROM latest_data
                     ORDER BY 
+                        exchange_name,
                         created_at DESC
-                    LIMIT 300000
-                )
-                SELECT * FROM latest_data
-                ORDER BY 
-                    exchange_name,
-                    created_at DESC
-            """)
-            
-            # Only fetch the minimum data needed for analysis
-            result = session.execute(query, {"pair_name": pair_name, "start_time": start_time, "end_time": end_time})
-            table_data = result.fetchall()
+                """)
+                
+                # Only fetch the minimum data needed for analysis
+                result = session.execute(query, {"pair_name": pair_name, "start_time": start_time, "end_time": end_time})
+                table_data = result.fetchall()
                 
                 if table_data:
                     all_data.extend(table_data)
                     if progress_bar:
                         progress_bar.progress(0.2, text=f"Found {len(table_data)} rows in {table_name}")
-                        
-                # Skip if we have enough data - reduced to 250,000 for faster processing
-                if len(all_data) >= 250000:  # Reduced from 600,000
-                    break
+                            
+                    # Skip if we have enough data - reduced to 250,000 for faster processing
+                    if len(all_data) >= 250000:  # Reduced from 600,000
+                        break
             
             if not all_data:
                 if progress_bar:
@@ -321,6 +321,11 @@ def analyze_tiers(pair_name, progress_bar=None):
             exchange_tier_choppiness = {}  # Store the overall choppiness average
             exchange_tier_dropout = {}  # Store the overall dropout rate
             exchange_tier_valid_points = {}  # Store the count of valid data points
+            exchange_tier_validity = {}  # Store the validity rate
+            exchange_choppiness_by_range = {}  # Store choppiness by range group
+            
+            # Define range groups for time-based windows
+            range_groups = list(range(1, 11))  # 1 to 10 groups
             
             # Process each exchange separately
             for exchange in exchanges:
@@ -354,6 +359,9 @@ def analyze_tiers(pair_name, progress_bar=None):
                     # Get the data for this window
                     window_df = exchange_df.iloc[start_idx:end_idx].copy()
                     
+                    # Assign a range group to this window based on its time
+                    range_group = window_idx % len(range_groups) + 1
+                    
                     # Skip if window is too small
                     if len(window_df) < 0.8 * window_size:
                         continue
@@ -379,6 +387,10 @@ def analyze_tiers(pair_name, progress_bar=None):
                         valid_points = total_points_in_window - nan_or_zero
                         dropout_rate = (nan_or_zero / total_points_in_window) * 100
                         
+                        # Initialize validity tracking if not already done
+                        if exchange_tier_key not in exchange_tier_validity:
+                            exchange_tier_validity[exchange_tier_key] = 0
+                            
                         # Track overall dropout rate
                         if exchange_tier_key not in exchange_tier_dropout:
                             exchange_tier_dropout[exchange_tier_key] = []
@@ -388,6 +400,12 @@ def analyze_tiers(pair_name, progress_bar=None):
                         if exchange_tier_key not in exchange_tier_valid_points:
                             exchange_tier_valid_points[exchange_tier_key] = 0
                         exchange_tier_valid_points[exchange_tier_key] += valid_points
+                        
+                        # Calculate validity rate (valid ticks / actual exchange points)
+                        exchange_total_points = metadata['exchange_counts'].get(exchange, 0)
+                        if exchange_total_points > 0:
+                            validity_rate = (exchange_tier_valid_points[exchange_tier_key] / exchange_total_points) * 100
+                            exchange_tier_validity[exchange_tier_key] = validity_rate
                         
                         # Skip if dropout rate is too high
                         if dropout_rate > 90:
@@ -447,69 +465,40 @@ def analyze_tiers(pair_name, progress_bar=None):
                             best_choppiness = avg_choppiness
                             best_tier = exchange_tier_key
                     
-                # Win rate calculation section (after all range groups are processed)
-                if progress_bar:
-                    progress_bar.progress(0.9, text=f"Calculating win rates for {exchange}...")
-                
-                # SQL-like win rate calculation
-                # For each range group, determine which tier had the highest choppiness
-                range_winners = {}
-                
-                # Get all choppiness values by range group
-                range_group_choppiness = {}
-                
-                # For each tier, get the average choppiness per range group
-                for tier_col in tier_columns:
-                    if tier_col not in range_df.columns:
-                        continue
+                    # Save choppiness values for this range group by tier
+                    for tier_col in tier_columns:
+                        if tier_col not in window_df.columns:
+                            continue
+                            
+                        tier_name = tier_values.get(tier_col, tier_col)
+                        exchange_tier_key = f"{exchange}:{tier_name}"
                         
+                        # Store choppiness for this range group
+                        if exchange_tier_key not in exchange_choppiness_by_range:
+                            exchange_choppiness_by_range[exchange_tier_key] = {}
+                        
+                        if window_tier_choppiness.get(tier_name) is not None:
+                            exchange_choppiness_by_range[exchange_tier_key][range_group] = window_tier_choppiness[tier_name]
+                    
+                    # Record the winner for this window
+                    if best_tier:
+                        if best_tier not in win_counts:
+                            win_counts[best_tier] = 0
+                        win_counts[best_tier] += 1
+                
+                # After processing all windows for this exchange, update validity rates
+                for tier_col in tier_columns:
                     tier_name = tier_values.get(tier_col, tier_col)
                     exchange_tier_key = f"{exchange}:{tier_name}"
                     
-                    # Skip tiers that don't have choppiness calculated
-                    if exchange_tier_key not in exchange_tier_choppiness:
-                        continue
-                        
-                    # Group choppiness values by range group
-                    choppiness_values = exchange_tier_choppiness[exchange_tier_key]
-                    if len(choppiness_values) != len(range_groups):
-                        # Skip tiers with incomplete data across range groups
-                        continue
-                        
-                    # Store choppiness by range group
-                    for i, range_group in enumerate(range_groups):
-                        if range_group not in range_group_choppiness:
-                            range_group_choppiness[range_group] = {}
-                        
-                        if i < len(choppiness_values):
-                            range_group_choppiness[range_group][exchange_tier_key] = choppiness_values[i]
-                
-                # For each range group, determine the winner
-                for range_group, tier_choppiness in range_group_choppiness.items():
-                    if not tier_choppiness:
-                        continue
-                        
-                    # Find tier with highest choppiness
-                    max_choppiness = -1
-                    winner = None
+                    # Use the exchange's total points for validity calculation
+                    exchange_total_points = metadata['exchange_counts'].get(exchange, 0)
+                    valid_points = exchange_tier_valid_points.get(exchange_tier_key, 0)
                     
-                    for tier_key, choppiness in tier_choppiness.items():
-                        if choppiness > max_choppiness:
-                            max_choppiness = choppiness
-                            winner = tier_key
-                    
-                    if winner:
-                        range_winners[range_group] = winner
-                
-                # Count wins by tier
-                win_counts = {}
-                for winner in range_winners.values():
-                    if winner not in win_counts:
-                        win_counts[winner] = 0
-                    win_counts[winner] += 1
-                
-                # Calculate total wins across all range groups
-                total_wins = len(range_winners)
+                    # Calculate validity rate
+                    if exchange_total_points > 0:
+                        validity_rate = (valid_points / exchange_total_points) * 100
+                        exchange_tier_validity[exchange_tier_key] = validity_rate
             
             if progress_bar:
                 progress_bar.progress(0.9, text="Calculating final rankings...")
@@ -555,15 +544,11 @@ def analyze_tiers(pair_name, progress_bar=None):
                 win_rate = (win_counts.get(exchange_tier_key, 0) / total_wins) * 100
                 win_rate = round(win_rate, 1)
                 
-                # Calculate validity rate (valid ticks / actual exchange points)
+                # Get valid points
                 valid_points = exchange_tier_valid_points.get(exchange_tier_key, 0)
                 
-                # Get the actual exchange's total points instead of using the theoretical maximum
-                exchange_total_points = metadata['exchange_counts'].get(exchange, 0)
-                
-                # Use actual points as denominator if available, otherwise use theoretical
-                denominator = max(exchange_total_points, 1)  # Avoid division by zero
-                validity_rate = (valid_points / denominator) * 100
+                # Calculate validity rate (already calculated above)
+                validity_rate = exchange_tier_validity.get(exchange_tier_key, 0)
                 validity_rate = round(validity_rate, 1)
                 
                 # Calculate average choppiness across all windows
@@ -586,13 +571,10 @@ def analyze_tiers(pair_name, progress_bar=None):
                 efficiency = (win_rate * validity_rate) / 100
                 efficiency = round(efficiency, 1)
                 
-                # Get valid points
-                valid_points = exchange_tier_valid_points.get(exchange_tier_key, 0)
-                
                 # Parse exchange and tier from the key
                 exchange, tier = exchange_tier_key.split(':', 1)
                 
-                # Store result with updated validity rate
+                # Store result
                 results.append({
                     'exchange': exchange,
                     'tier': tier,
@@ -601,8 +583,8 @@ def analyze_tiers(pair_name, progress_bar=None):
                     'avg_choppiness': avg_choppiness,
                     'dropout_rate': avg_dropout,
                     'win_rate': win_rate,
-                    'validity_rate': exchange_tier_validity.get(exchange_tier_key, 0),  # From SQL-style validity calculation
-                    'efficiency': (win_rate * exchange_tier_validity.get(exchange_tier_key, 0)) / 100,  # Win rate * validity rate
+                    'validity_rate': validity_rate,
+                    'efficiency': efficiency,
                     'valid_points': valid_points,
                     'rank': 0  # Will be filled in later
                 })
