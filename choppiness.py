@@ -3,1358 +3,785 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
-import psycopg2
 import pytz
-from concurrent.futures import ThreadPoolExecutor
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import sessionmaker
+from contextlib import contextmanager
 import time
-import re
+import traceback
 
-st.set_page_config(
-    page_title="10-Minute System Edge & Volatility Matrix",
-    page_icon="📊",
-    layout="wide"
-)
+# Clear cache at startup to ensure fresh data
+if hasattr(st, 'cache_data'):
+    st.cache_data.clear()
 
-# --- PERFORMANCE OPTIONS ---
-# Allow user to select resolution to speed up loading
-resolution_options = {
-    "10-minute": 10,
-    "20-minute": 20,
-    "30-minute": 30
+# Page configuration
+st.set_page_config(page_title="User-defined Interval Choppiness", layout="wide")
+
+# Enhanced CSS for better UI
+st.markdown("""
+<style>
+    .main .block-container {max-width: 98% !important; padding-top: 1rem !important;}
+    h1, h2, h3 {margin-bottom: 0.5rem !important;}
+    .stButton > button {width: 100%; font-weight: bold; height: 46px; font-size: 18px;}
+    div.stProgress > div > div {height: 8px !important;}
+    .metric-container {
+        background-color: rgba(28, 131, 225, 0.1);
+        border-radius: 5px;
+        padding: 15px;
+        margin: 10px 0;
+    }
+    .metric-title {
+        font-weight: bold;
+        margin-bottom: 5px;
+    }
+    .info-box {
+        background-color: #f0f2f6;
+        border-radius: 5px;
+        padding: 10px;
+        margin: 10px 0;
+    }
+    .success {
+        background-color: #d4edda;
+        color: #155724;
+        padding: 10px;
+        border-radius: 5px;
+        margin: 10px 0;
+    }
+    .warning {
+        background-color: #fff3cd;
+        color: #856404;
+        padding: 10px;
+        border-radius: 5px;
+        margin: 10px 0;
+    }
+    .error {
+        background-color: #f8d7da;
+        color: #721c24;
+        padding: 10px;
+        border-radius: 5px;
+        margin: 10px 0;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Database configuration
+DB_CONFIG = {
+    'rollbit': {
+        'url': "postgresql://public_rw:aTJ92^kl04hllk@aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com:5432/report_dev"
+    },
+    'surf': {
+        'url': "postgresql://public_replication:866^FKC4hllk@aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com:5432/replication_report"
+    }
 }
 
-# --- DB CONFIG ---
-try:
-    # You can use st.secrets in production, or hardcode for testing
+# Create database engines
+@st.cache_resource
+def get_engine(platform='surf'):
+    """Create database engine for the specified platform"""
     try:
-        db_config = st.secrets["database"]
-        db_params = {
-            'host': db_config['host'],
-            'port': db_config['port'],
-            'database': db_config['database'],
-            'user': db_config['user'],
-            'password': db_config['password']
-        }
-    except:
-        # Fallback to hardcoded credentials if secrets aren't available
-        db_params = {
-            'host': 'aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com',
-            'port': 5432,
-            'database': 'replication_report',
-            'user': 'public_replication',
-            'password': '866^FKC4hllk'
-        }
-    
-    conn = psycopg2.connect(
-        host=db_params['host'],
-        port=db_params['port'],
-        database=db_params['database'],
-        user=db_params['user'],
-        password=db_params['password']
-    )
-except Exception as e:
-    st.error(f"Error connecting to the database: {e}")
-    st.stop()
+        return create_engine(DB_CONFIG[platform]['url'], pool_size=5, max_overflow=10)
+    except Exception as e:
+        st.error(f"Error creating {platform} database engine: {e}")
+        return None
 
-# --- UI Setup ---
-st.title("System Edge & Volatility Matrix")
-st.subheader("All Trading Pairs - Last 24 Hours (Singapore Time)")
-
-# Add performance options in the sidebar
-st.sidebar.header("Performance Settings")
-resolution_minutes = st.sidebar.selectbox(
-    "Select Time Resolution", 
-    list(resolution_options.keys()), 
-    index=0, 
-    help="Higher resolution (lower minutes) provides more detail but may load slower"
-)
-resolution_min = resolution_options[resolution_minutes]
-max_tokens = st.sidebar.slider("Maximum Tokens to Display", 5, 50, 20, help="Limit the number of tokens to improve performance")
-parallel_workers = st.sidebar.slider("Parallel Processing Threads", 1, 8, 4, help="More threads can improve speed but may impact stability")
-
-cache_ttl = st.sidebar.slider("Cache Duration (minutes)", 5, 120, 30, help="How long to keep data cached before refreshing")
-
-# Get current time in Singapore timezone
-singapore_timezone = pytz.timezone('Asia/Singapore')
-now_utc = datetime.now(pytz.utc)
-now_sg = now_utc.astimezone(singapore_timezone)
-st.write(f"Current Singapore Time: {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
-
-# Calculate timeframes
-lookback_days = 1  # 24 hours
-start_time_sg = now_sg - timedelta(days=lookback_days)
-start_time_utc = start_time_sg.astimezone(pytz.UTC)
-
-# Set thresholds
-extreme_vol_threshold = 1.0  # 100% annualized volatility
-high_edge_threshold = 0.5    # 50% house edge
-negative_edge_threshold = -0.2  # -20% house edge (system losing)
-
-# Calculate expected data points based on resolution
-expected_points = int(24 * 60 / resolution_min)  # Number of intervals in 24 hours
-
-# Function to get partition tables based on date range
-@st.cache_data(ttl=60*cache_ttl, show_spinner=False)
-def get_partition_tables(conn, start_date, end_date):
-    """
-    Get list of partition tables that need to be queried based on date range.
-    Returns a list of table names (oracle_price_log_partition_YYYYMMDD)
-    """
-    # Convert to datetime objects if they're strings
-    if isinstance(start_date, str):
-        start_date = pd.to_datetime(start_date)
-    if isinstance(end_date, str) and end_date:
-        end_date = pd.to_datetime(end_date)
-    elif end_date is None:
-        end_date = datetime.now()
+@contextmanager
+def get_session(platform='surf'):
+    """Database session context manager for the specified platform"""
+    engine = get_engine(platform)
+    if not engine:
+        yield None
+        return
         
-    # Ensure timezone is removed
-    start_date = start_date.replace(tzinfo=None)
-    end_date = end_date.replace(tzinfo=None)
-        
-    # Generate list of dates between start and end
-    current_date = start_date
-    dates = []
-    
-    while current_date <= end_date:
-        dates.append(current_date.strftime("%Y%m%d"))
-        current_date += timedelta(days=1)
-    
-    # Create table names from dates
-    table_names = [f"oracle_price_log_partition_{date}" for date in dates]
-    
-    # Verify which tables actually exist in the database
-    cursor = conn.cursor()
-    existing_tables = []
-    
-    for table in table_names:
-        # Check if table exists
-        cursor.execute("""
-            SELECT EXISTS (
-                SELECT FROM information_schema.tables 
-                WHERE table_schema = 'public' 
-                AND table_name = %s
-            );
-        """, (table,))
-        
-        if cursor.fetchone()[0]:
-            existing_tables.append(table)
-    
-    cursor.close()
-    
-    if not existing_tables:
-        print(f"No partition tables found for the date range {start_date.date()} to {end_date.date()}")
-    
-    return existing_tables
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    try:
+        yield session
+    except Exception as e:
+        st.error(f"Database error for {platform}: {e}")
+        session.rollback()
+    finally:
+        session.close()
 
-# Function to build query across partition tables
-def build_price_query(tables, pair_name, start_time, end_time):
-    """
-    Build a complete UNION query for multiple partition tables.
-    This creates a complete, valid SQL query with correct WHERE clauses.
-    """
-    if not tables:
-        return ""
-        
-    union_parts = []
-    
-    for table in tables:
-        # Query for price data (source_type = 0)
-        query = f"""
-        SELECT 
-            pair_name,
-            created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore' AS timestamp,
-            final_price
-        FROM 
-            public.{table}
-        WHERE 
-            created_at >= '{start_time}'::timestamp - INTERVAL '8 hour'
-            AND created_at <= '{end_time}'::timestamp - INTERVAL '8 hour'
-            AND source_type = 0
-            AND pair_name = '{pair_name}'
-        """
-        
-        union_parts.append(query)
-    
-    # Join with UNION and add ORDER BY at the end
-    complete_query = " UNION ".join(union_parts) + " ORDER BY timestamp"
-    return complete_query
+# Pre-defined pairs as a fallback
+PREDEFINED_PAIRS = [
+    "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT", 
+    "AVAX/USDT", "DOGE/USDT", "ADA/USDT", "TRX/USDT", "DOT/USDT"
+]
 
-# Function to verify if table exists and get its columns
-def get_table_columns(conn, table_name):
-    """Check if a table exists and return its columns"""
-    cursor = conn.cursor()
-    cursor.execute("""
+# Get available pairs from database
+@st.cache_data(ttl=300)  # Cache for 5 minutes
+def get_available_pairs():
+    try:
+        pairs = set()
+        
+        # Try to get pairs from Surf
+        with get_session('surf') as session:
+            if session:
+                # Try the trade_pool_pairs table first
+                try:
+                    query = text("SELECT pair_name FROM trade_pool_pairs WHERE status = 1")
+                    result = session.execute(query)
+                    pairs_surf = [row[0] for row in result]
+                    if pairs_surf:
+                        return sorted(pairs_surf)
+                except:
+                    pass
+                
+                # If that doesn't work, try to get pairs from partition tables
+                singapore_tz = pytz.timezone('Asia/Singapore')
+                today = datetime.now(singapore_tz).strftime("%Y%m%d")
+                yesterday = (datetime.now(singapore_tz) - timedelta(days=1)).strftime("%Y%m%d")
+                
+                for date in [today, yesterday]:
+                    try:
+                        table_name = f"oracle_price_log_partition_{date}"
+                        query = text(f"""
+                            SELECT DISTINCT pair_name 
+                            FROM public."{table_name}" 
+                            LIMIT 50
+                        """)
+                        result = session.execute(query)
+                        pairs_from_table = [row[0] for row in result]
+                        if pairs_from_table:
+                            pairs.update(pairs_from_table)
+                            break
+                    except:
+                        continue
+        
+        # If we found any pairs, return them, otherwise use predefined list
+        if pairs:
+            return sorted(list(pairs))
+        return PREDEFINED_PAIRS
+    
+    except Exception as e:
+        st.error(f"Error fetching available pairs: {e}")
+        return PREDEFINED_PAIRS
+
+# Check if a table exists
+def table_exists(session, table_name):
+    """Check if a table exists in the database"""
+    check_query = text("""
         SELECT EXISTS (
             SELECT FROM information_schema.tables 
             WHERE table_schema = 'public' 
-            AND table_name = %s
+            AND table_name = :table_name
         );
-    """, (table_name,))
-    
-    exists = cursor.fetchone()[0]
-    
-    if not exists:
-        cursor.close()
-        return False, []
-    
-    # Get columns
-    cursor.execute("""
-        SELECT column_name
-        FROM information_schema.columns
-        WHERE table_schema = 'public'
-        AND table_name = %s
-        ORDER BY ordinal_position;
-    """, (table_name,))
-    
-    columns = [row[0] for row in cursor.fetchall()]
-    cursor.close()
-    
-    return exists, columns
+    """)
+    return session.execute(check_query, {"table_name": table_name}).scalar()
 
-# Function to fetch house edge data for all pairs
-@st.cache_data(ttl=60*cache_ttl, show_spinner=False)
-def fetch_house_edge_data(resolution_min=10):
+# Get available partition tables
+def get_partition_tables(session, platform, start_date, end_date):
     """
-    Fetch house edge data for all pairs with the specified resolution
-    using trade_fill_fresh table
+    Get list of partition tables that need to be queried based on date range.
+    Returns a list of table names
     """
-    # First verify trade_fill_fresh exists and get its columns
-    exists, columns = get_table_columns(conn, "trade_fill_fresh")
+    # Ensure we have datetime objects
+    if isinstance(start_date, str):
+        start_date = pd.to_datetime(start_date)
+    if isinstance(end_date, str):
+        end_date = pd.to_datetime(end_date)
     
-    if not exists:
-        st.error("Error: trade_fill_fresh table does not exist in the database")
-        return pd.DataFrame()
+    # Ensure timezone is properly set to Singapore
+    singapore_tz = pytz.timezone('Asia/Singapore')
+    if start_date.tzinfo is None:
+        start_date = singapore_tz.localize(start_date)
+    if end_date.tzinfo is None:
+        end_date = singapore_tz.localize(end_date)
     
-    # Check required columns
-    required_columns = ['pair_name', 'taker_way', 'taker_fee_mode', 'taker_pnl', 
-                        'funding_fee', 'rebate', 'deal_vol', 'collateral_price', 'created_at']
+    # Convert to Singapore time
+    start_date = start_date.astimezone(singapore_tz)
+    end_date = end_date.astimezone(singapore_tz)
     
-    missing_columns = [col for col in required_columns if col.lower() not in [c.lower() for c in columns]]
+    # Generate list of dates between start and end
+    dates = []
+    current_date = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_date_day = end_date.replace(hour=0, minute=0, second=0, microsecond=0)
     
-    if missing_columns:
-        st.warning(f"Warning: Missing required columns in trade_fill_fresh: {missing_columns}")
-        # We can try with a simpler query using available columns
+    while current_date <= end_date_day:
+        dates.append(current_date.strftime("%Y%m%d"))
+        current_date += timedelta(days=1)
     
-    print(f"Available columns in trade_fill_fresh: {columns}")
+    # Create table names
+    table_names = [f"oracle_price_log_partition_{date}" for date in dates]
     
-    # Calculate time range for the query
-    end_time = now_sg
-    start_time = end_time - timedelta(days=lookback_days)
+    # Verify which tables actually exist
+    existing_tables = []
     
-    # Direct query using trade_fill_fresh
-    query = f"""
-    SELECT
-        pair_name,
-        DATE_TRUNC('{resolution_min} minutes', created_at + INTERVAL '8 hour') AS time_block,
-        
-        -- Calculate total PNL
-        SUM(CASE WHEN taker_way IN (1, 2, 3, 4) THEN -1 * taker_pnl * collateral_price ELSE 0 END) +
-        SUM(CASE WHEN taker_way = 0 THEN -1 * funding_fee * collateral_price ELSE 0 END) +
-        SUM(-1 * rebate * collateral_price) AS total_platform_pnl,
-        
-        -- Calculate margin amount (deal_vol for open positions)
-        SUM(CASE WHEN taker_way IN (1, 3) THEN deal_vol * collateral_price ELSE 0 END) AS margin_amount,
-        
-        -- Calculate house edge with bounds (-1 to 1)
-        CASE
-            WHEN SUM(CASE WHEN taker_way IN (1, 3) THEN deal_vol * collateral_price ELSE 0 END) = 0 THEN 0
-            WHEN (SUM(CASE WHEN taker_way IN (1, 2, 3, 4) THEN -1 * taker_pnl * collateral_price ELSE 0 END) +
-                SUM(CASE WHEN taker_way = 0 THEN -1 * funding_fee * collateral_price ELSE 0 END) +
-                SUM(-1 * rebate * collateral_price)) / 
-                SUM(CASE WHEN taker_way IN (1, 3) THEN deal_vol * collateral_price ELSE 0 END) > 1 THEN 1
-            WHEN (SUM(CASE WHEN taker_way IN (1, 2, 3, 4) THEN -1 * taker_pnl * collateral_price ELSE 0 END) +
-                SUM(CASE WHEN taker_way = 0 THEN -1 * funding_fee * collateral_price ELSE 0 END) +
-                SUM(-1 * rebate * collateral_price)) / 
-                SUM(CASE WHEN taker_way IN (1, 3) THEN deal_vol * collateral_price ELSE 0 END) < -1 THEN -1
-            ELSE (SUM(CASE WHEN taker_way IN (1, 2, 3, 4) THEN -1 * taker_pnl * collateral_price ELSE 0 END) +
-                SUM(CASE WHEN taker_way = 0 THEN -1 * funding_fee * collateral_price ELSE 0 END) +
-                SUM(-1 * rebate * collateral_price)) / 
-                NULLIF(SUM(CASE WHEN taker_way IN (1, 3) THEN deal_vol * collateral_price ELSE 0 END), 0)
-        END AS house_edge
-    FROM
-        trade_fill_fresh
-    WHERE
-        created_at >= NOW() - INTERVAL '24 hours'
-        AND taker_fee_mode = 2
-    GROUP BY
-        pair_name,
-        DATE_TRUNC('{resolution_min} minutes', created_at + INTERVAL '8 hour')
-    ORDER BY
-        pair_name,
-        DATE_TRUNC('{resolution_min} minutes', created_at + INTERVAL '8 hour')
+    for table in table_names:
+        if table_exists(session, table):
+            existing_tables.append(table)
+    
+    return existing_tables
+
+# Fetch tick data with timestamps for a specific time period
+def fetch_tick_data(pair_name, platform, hours=3, min_ticks=20000, progress_callback=None):
     """
-    
+    Fetch tick data for a specific pair from the specified platform.
+    Ensures we get at least min_ticks data points or data from the last hours, whichever is more.
+    """
     try:
-        print("Executing house edge query...")
-        start_time = time.time()
-        edge_df = pd.read_sql_query(query, conn)
-        query_time = time.time() - start_time
-        print(f"House edge query completed in {query_time:.2f} seconds. DataFrame shape: {edge_df.shape}")
-        
-        if edge_df.empty:
-            print("No house edge data found.")
-            return pd.DataFrame()
-        
-        # Convert timestamp to datetime
-        edge_df['timestamp'] = pd.to_datetime(edge_df['time_block'])
-        
-        # Format the time label (HH:MM) for later joining
-        edge_df['time_label'] = edge_df['timestamp'].dt.strftime('%H:%M')
-        
-        return edge_df
-        
+        with get_session(platform) as session:
+            if not session:
+                return None
+            
+            # Calculate time range in Singapore time
+            singapore_tz = pytz.timezone('Asia/Singapore')
+            now = datetime.now(singapore_tz)
+            start_time = now - timedelta(hours=hours)
+            
+            # Format for display and database
+            start_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
+            end_str = now.strftime("%Y-%m-%d %H:%M:%S")
+            
+            if progress_callback:
+                progress_callback(0.1, f"Fetching {platform} data from {start_str} to {end_str} (SGT)")
+            
+            # Get relevant partition tables
+            tables = get_partition_tables(session, platform, start_time, now)
+            
+            if progress_callback:
+                progress_callback(0.2, f"Found {len(tables)} {platform} partition tables")
+            
+            if not tables:
+                if progress_callback:
+                    progress_callback(0.2, f"No {platform} tables found for this time range")
+                return None
+            
+            # Build query for each table
+            union_parts = []
+            
+            for table in tables:
+                # For Surf data 
+                if platform == 'surf':
+                    query = f"""
+                    SELECT 
+                        pair_name,
+                        created_at + INTERVAL '8 hour' AS timestamp_sgt,
+                        final_price AS price
+                    FROM 
+                        public."{table}"
+                    WHERE 
+                        created_at >= '{start_str}'::timestamp - INTERVAL '8 hour'
+                        AND created_at <= '{end_str}'::timestamp - INTERVAL '8 hour'
+                        AND source_type = 0
+                        AND pair_name = '{pair_name}'
+                    """
+                else:
+                    # For Rollbit data
+                    query = f"""
+                    SELECT 
+                        pair_name,
+                        created_at + INTERVAL '8 hour' AS timestamp_sgt,
+                        final_price AS price
+                    FROM 
+                        public."{table}"
+                    WHERE 
+                        created_at >= '{start_str}'::timestamp - INTERVAL '8 hour'
+                        AND created_at <= '{end_str}'::timestamp - INTERVAL '8 hour'
+                        AND source_type = 1
+                        AND pair_name = '{pair_name}'
+                    """
+                union_parts.append(query)
+            
+            # Join with UNION and add ORDER BY
+            complete_query = " UNION ".join(union_parts) + " ORDER BY timestamp_sgt DESC"  # DESC to get newest first
+            
+            # Add LIMIT to get at least min_ticks
+            limited_query = complete_query + f" LIMIT {min_ticks * 2}"  # Get more than needed to account for potential duplicates
+            
+            if progress_callback:
+                progress_callback(0.4, f"Executing query for {platform}...")
+            
+            # Execute query
+            result = session.execute(text(limited_query))
+            data = result.fetchall()
+            
+            if not data:
+                if progress_callback:
+                    progress_callback(0.5, f"No {platform} data found for {pair_name}")
+                return None
+            
+            # Create DataFrame
+            df = pd.DataFrame(data, columns=['pair_name', 'timestamp_sgt', 'price'])
+            
+            # Convert price to numeric
+            df['price'] = pd.to_numeric(df['price'], errors='coerce')
+            
+            # Sort by timestamp (ascending)
+            df = df.sort_values('timestamp_sgt', ascending=True)
+            
+            # Remove duplicates
+            df = df.drop_duplicates(subset=['timestamp_sgt'])
+            
+            if progress_callback:
+                progress_callback(0.8, f"Processing {len(df)} {platform} ticks...")
+            
+            return df
+    
     except Exception as e:
-        error_msg = str(e)
-        print(f"Error fetching house edge data: {error_msg}")
-        
-        # Try simplified query if there's a specific column issue
-        if "column" in error_msg.lower() and "does not exist" in error_msg.lower():
-            column_name = re.search(r'"([^"]*)"', error_msg)
-            if column_name:
-                print(f"Column {column_name.group(1)} does not exist. Attempting simplified query.")
-            
-            return fetch_simplified_house_edge(resolution_min, columns)
-            
-        return pd.DataFrame()
-
-# Simplified house edge calculation as fallback
-def fetch_simplified_house_edge(resolution_min=10, available_columns=[]):
-    """Simplified version of house edge calculation as fallback"""
-    try:
-        simplified_query = ""
-        
-        # Check for minimum required columns
-        if all(col.lower() in [c.lower() for c in available_columns] 
-               for col in ['pair_name', 'taker_pnl', 'collateral_price', 'created_at']):
-            
-            simplified_query = f"""
-            SELECT
-                pair_name,
-                DATE_TRUNC('{resolution_min} minutes', created_at + INTERVAL '8 hour') AS time_block,
-                
-                -- Simplified platform PNL (orders only)
-                SUM(-1 * taker_pnl * collateral_price) AS total_platform_pnl
-            FROM
-                trade_fill_fresh
-            WHERE
-                created_at >= NOW() - INTERVAL '24 hours'
-            GROUP BY
-                pair_name,
-                DATE_TRUNC('{resolution_min} minutes', created_at + INTERVAL '8 hour')
-            ORDER BY
-                pair_name,
-                DATE_TRUNC('{resolution_min} minutes', created_at + INTERVAL '8 hour')
-            """
-        else:
-            # Create an even simpler query with whatever columns are available
-            select_columns = ["pair_name"]
-            if "created_at" in available_columns:
-                select_columns.append(f"DATE_TRUNC('{resolution_min} minutes', created_at + INTERVAL '8 hour') AS time_block")
-            else:
-                # If no timestamp column, we can't proceed
-                return pd.DataFrame()
-                
-            simplified_query = f"""
-            SELECT
-                {', '.join(select_columns)}
-            FROM
-                trade_fill_fresh
-            WHERE
-                created_at >= NOW() - INTERVAL '24 hours'
-            GROUP BY
-                {', '.join(select_columns)}
-            ORDER BY
-                {', '.join(select_columns)}
-            """
-        
-        print("Executing simplified house edge query...")
-        start_time = time.time()
-        edge_df = pd.read_sql_query(simplified_query, conn)
-        query_time = time.time() - start_time
-        print(f"Simplified query completed in {query_time:.2f} seconds. DataFrame shape: {edge_df.shape}")
-        
-        # If we don't have pnl data, just add placeholder columns
-        if 'total_platform_pnl' not in edge_df.columns:
-            edge_df['total_platform_pnl'] = np.nan
-            edge_df['margin_amount'] = np.nan
-            edge_df['house_edge'] = np.nan
-        
-        # Convert timestamp to datetime
-        edge_df['timestamp'] = pd.to_datetime(edge_df['time_block'])
-        
-        # Format the time label (HH:MM) for later joining
-        edge_df['time_label'] = edge_df['timestamp'].dt.strftime('%H:%M')
-        
-        return edge_df
-        
-    except Exception as e:
-        print(f"Error in simplified house edge calculation: {e}")
-        return pd.DataFrame()
-
-# Fetch all available tokens from DB
-@st.cache_data(ttl=60*cache_ttl, show_spinner=False)
-def fetch_all_tokens():
-    """Get a list of all trading pairs/tokens"""
-    all_tokens = set()
-    
-    try:
-        # First try trade_fill_fresh
-        exists, _ = get_table_columns(conn, "trade_fill_fresh")
-        
-        if exists:
-            cursor = conn.cursor()
-            cursor.execute("""
-            SELECT DISTINCT pair_name 
-            FROM trade_fill_fresh 
-            WHERE created_at >= NOW() - INTERVAL '24 hours'
-            ORDER BY pair_name
-            """)
-            
-            tokens_from_trades = [row[0] for row in cursor.fetchall()]
-            all_tokens.update(tokens_from_trades)
-            cursor.close()
-            
-        # Also get tokens from oracle price logs
-        partition_tables = get_partition_tables(conn, start_time_sg, now_sg)
-        
-        if partition_tables:
-            cursor = conn.cursor()
-            cursor.execute(f"""
-            SELECT DISTINCT pair_name 
-            FROM public.{partition_tables[0]}
-            WHERE source_type = 0
-            ORDER BY pair_name
-            """)
-            
-            tokens_from_price = [row[0] for row in cursor.fetchall()]
-            all_tokens.update(tokens_from_price)
-            cursor.close()
-        
-        return sorted(list(all_tokens))
-    except Exception as e:
-        st.error(f"Error fetching tokens: {e}")
-        return ["BTC", "ETH", "SOL", "DOGE", "PEPE"]  # Default fallback
-
-# Function to calculate volatility metrics
-def calculate_volatility_metrics(price_series):
-    if price_series is None or len(price_series) < 2:
-        return {
-            'realized_vol': np.nan,
-            'parkinson_vol': np.nan,
-            'gk_vol': np.nan,
-            'rs_vol': np.nan
-        }
-    
-    try:
-        # Calculate log returns
-        log_returns = np.diff(np.log(price_series))
-        
-        # Annualization factor depends on resolution
-        # 10min = 144 periods per day, 20min = 72, 30min = 48
-        periods_per_day = int(24 * 60 / resolution_min)
-        
-        # Realized volatility - adjusted for selected timeframe
-        realized_vol = np.std(log_returns) * np.sqrt(252 * periods_per_day)
-        
-        return {
-            'realized_vol': realized_vol,
-            'parkinson_vol': np.nan,
-            'gk_vol': np.nan,
-            'rs_vol': np.nan
-        }
-    except Exception as e:
-        print(f"Error in volatility calculation: {e}")
-        return {
-            'realized_vol': np.nan,
-            'parkinson_vol': np.nan,
-            'gk_vol': np.nan,
-            'rs_vol': np.nan
-        }
-
-# Volatility classification function
-def classify_volatility(vol):
-    if pd.isna(vol):
-        return ("UNKNOWN", 0, "Insufficient data")
-    elif vol < 0.30:  # 30% annualized volatility threshold for low volatility
-        return ("LOW", 1, "Low volatility")
-    elif vol < 0.60:  # 60% annualized volatility threshold for medium volatility
-        return ("MEDIUM", 2, "Medium volatility")
-    elif vol < 1.00:  # 100% annualized volatility threshold for high volatility
-        return ("HIGH", 3, "High volatility")
-    else:
-        return ("EXTREME", 4, "Extreme volatility")
-
-# House edge classification function
-def classify_house_edge(edge):
-    if pd.isna(edge):
-        return ("UNKNOWN", 0, "Insufficient data")
-    elif edge < negative_edge_threshold:  # System is losing money
-        return ("NEGATIVE", 1, "System losing")
-    elif edge < 0.1:  # Low edge
-        return ("LOW", 2, "Low edge")
-    elif edge < 0.3:  # Medium edge
-        return ("MEDIUM", 3, "Medium edge")
-    elif edge < high_edge_threshold:  # Good edge
-        return ("GOOD", 4, "Good edge")
-    else:  # High edge
-        return ("HIGH", 5, "High edge")
-
-# Function to generate aligned time blocks for the past 24 hours
-def generate_aligned_time_blocks(current_time, resolution_min):
-    """
-    Generate fixed time blocks for past 24 hours,
-    aligned with standard intervals (e.g., 10-minute, 20-minute)
-    """
-    # Round down to the nearest resolution mark
-    minutes = current_time.minute
-    rounded_minutes = (minutes // resolution_min) * resolution_min
-    latest_complete_block_end = current_time.replace(minute=rounded_minutes, second=0, microsecond=0)
-    
-    # Calculate number of blocks in 24 hours
-    blocks_per_day = int(24 * 60 / resolution_min)
-    
-    # Generate block labels for display
-    blocks = []
-    for i in range(blocks_per_day):
-        block_end = latest_complete_block_end - timedelta(minutes=i*resolution_min)
-        block_start = block_end - timedelta(minutes=resolution_min)
-        block_label = f"{block_start.strftime('%H:%M')}"
-        blocks.append((block_start, block_end, block_label))
-    
-    return blocks
-
-# Generate aligned time blocks
-aligned_time_blocks = generate_aligned_time_blocks(now_sg, resolution_min)
-time_block_labels = [block[2] for block in aligned_time_blocks]
-
-# Fetch and calculate volatility for a token
-@st.cache_data(ttl=60*cache_ttl, show_spinner=False)
-def fetch_and_calculate_volatility(token):
-    # Convert for database query (keep as Singapore time strings as the query will handle timezone)
-    start_time = start_time_sg.strftime("%Y-%m-%d %H:%M:%S")
-    end_time = now_sg.strftime("%Y-%m-%d %H:%M:%S")
-
-    # Get relevant partition tables
-    partition_tables = get_partition_tables(conn, start_time_sg, now_sg)
-    
-    if not partition_tables:
-        print(f"[{token}] No partition tables found for the specified date range")
+        if progress_callback:
+            progress_callback(1.0, f"{platform} error: {str(e)}")
+        st.error(f"Error fetching {platform} tick data: {e}")
         return None
+
+# Calculate choppiness for a dataframe EXACTLY like parameters.py does
+def calculate_params_choppiness(prices, window_size=20):
+    """
+    Calculate choppiness exactly like parameters.py implementation.
+    
+    Args:
+        prices: Series of price values
+        window_size: Size of the rolling window
+    
+    Returns:
+        Average choppiness value
+    """
+    try:
+        # Convert to Series if it's not already
+        if not isinstance(prices, pd.Series):
+            prices = pd.Series(prices)
         
-    # Build query using partition tables
-    query = build_price_query(
-        partition_tables,
-        pair_name=token,
-        start_time=start_time,
-        end_time=end_time
-    )
+        # Calculate absolute differences
+        diff = prices.diff().abs()
+        
+        # Calculate rolling sum of absolute changes
+        sum_abs_changes = diff.rolling(window=window_size, min_periods=1).sum()
+        
+        # Calculate rolling price range (max - min)
+        price_range = prices.rolling(window=window_size, min_periods=1).max() - prices.rolling(window=window_size, min_periods=1).min()
+        
+        # Handle zero price range
+        if (price_range == 0).any():
+            price_range = price_range.replace(0, 1e-10)
+        
+        # Calculate choppiness
+        epsilon = 1e-10
+        choppiness = 100 * sum_abs_changes / (price_range + epsilon)
+        
+        # Cap extreme values and handle NaN
+        choppiness = np.minimum(choppiness, 1000)
+        choppiness = choppiness.fillna(200)
+        
+        # Return mean
+        return choppiness.mean()
+    except Exception as e:
+        st.error(f"Error in choppiness calculation: {e}")
+        return 200.0  # Same default as parameters.py
+
+# Calculate synchronized choppiness at intervals
+def calculate_synchronized_choppiness(rollbit_df, surf_df, window_size=20, tick_count=5000, num_points=10, interval_minutes=5):
+    """
+    Calculate choppiness for both exchanges at exactly the same timestamps.
+    Uses exact parameters.py implementation.
+    
+    Args:
+        rollbit_df: DataFrame with Rollbit data
+        surf_df: DataFrame with Surf data
+        window_size: Size of the rolling window (default: 20)
+        tick_count: Number of ticks to use for calculation (default: 5000)
+        num_points: Number of points to calculate (default: 10)
+        interval_minutes: Minutes between points (default: 5)
+    
+    Returns:
+        Tuple of (timestamps, rollbit_choppiness, surf_choppiness)
+    """
+    # Validation checks
+    if rollbit_df is None or surf_df is None:
+        st.error("Missing data for one or both exchanges")
+        return [], [], []
+    
+    if len(rollbit_df) < tick_count or len(surf_df) < tick_count:
+        st.error(f"Not enough data: Rollbit has {len(rollbit_df)} ticks, Surf has {len(surf_df)} ticks. Need {tick_count}.")
+        return [], [], []
     
     try:
-        print(f"[{token}] Executing price query across {len(partition_tables)} partition tables")
-        start_query_time = time.time()
-        df = pd.read_sql_query(query, conn)
-        query_time = time.time() - start_query_time
-        print(f"[{token}] Query executed in {query_time:.2f} seconds. DataFrame shape: {df.shape}")
-
-        if df.empty:
-            print(f"[{token}] No price data found.")
-            return None
-
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        df = df.set_index('timestamp').sort_index()
+        # Sort dataframes by timestamp
+        rollbit_df = rollbit_df.sort_values('timestamp_sgt', ascending=True)
+        surf_df = surf_df.sort_values('timestamp_sgt', ascending=True)
         
-        # Create 1-minute OHLC data
-        one_min_ohlc = df['final_price'].resample('1min').ohlc().dropna()
-        if one_min_ohlc.empty:
-            print(f"[{token}] No OHLC data after resampling.")
-            return None
+        # Get the most recent common timestamp (use the earlier of the two latest timestamps)
+        latest_rollbit = rollbit_df['timestamp_sgt'].iloc[-1]
+        latest_surf = surf_df['timestamp_sgt'].iloc[-1]
+        latest_common = min(latest_rollbit, latest_surf)
+        
+        # Create evenly spaced timestamps going backwards
+        timestamps = []
+        for i in range(num_points):
+            timestamps.append(latest_common - timedelta(minutes=interval_minutes * (num_points - 1 - i)))
+        
+        # Calculate choppiness for each exchange at each timestamp
+        rollbit_values = []
+        surf_values = []
+        valid_timestamps = []
+        
+        for timestamp in timestamps:
+            # Get Rollbit data before this timestamp
+            rollbit_mask = rollbit_df['timestamp_sgt'] <= timestamp
+            rollbit_previous = rollbit_df[rollbit_mask]
             
-        # Calculate rolling volatility on 1-minute data
-        rolling_window = max(10, int(resolution_min / 2))  # Adjust window based on resolution
-        one_min_ohlc['realized_vol'] = one_min_ohlc['close'].rolling(window=rolling_window).apply(
-            lambda x: calculate_volatility_metrics(x)['realized_vol']
+            # Get Surf data before this timestamp
+            surf_mask = surf_df['timestamp_sgt'] <= timestamp
+            surf_previous = surf_df[surf_mask]
+            
+            # Skip if either exchange doesn't have enough data
+            if len(rollbit_previous) < tick_count or len(surf_previous) < tick_count:
+                continue
+            
+            # Get most recent tick_count ticks for each exchange
+            rollbit_recent = rollbit_previous.iloc[-tick_count:]
+            surf_recent = surf_previous.iloc[-tick_count:]
+            
+            # Calculate choppiness using parameters.py method
+            rollbit_choppiness = calculate_params_choppiness(rollbit_recent['price'], window_size)
+            surf_choppiness = calculate_params_choppiness(surf_recent['price'], window_size)
+            
+            # Store results
+            valid_timestamps.append(timestamp)
+            rollbit_values.append(rollbit_choppiness)
+            surf_values.append(surf_choppiness)
+            
+            # Debug - print values to verify
+            # st.write(f"Timestamp: {timestamp}, Rollbit: {rollbit_choppiness}, Surf: {surf_choppiness}")
+        
+        return valid_timestamps, rollbit_values, surf_values
+    
+    except Exception as e:
+        st.error(f"Error calculating synchronized choppiness: {str(e)}")
+        st.error(traceback.format_exc())
+        return [], [], []
+
+# Main app
+def main():
+    # Get current Singapore time
+    singapore_tz = pytz.timezone('Asia/Singapore')
+    now_sg = datetime.now(singapore_tz)
+    current_time_sg = now_sg.strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Main title
+    st.title("User-defined Interval Choppiness: Rollbit vs Surf")
+    st.markdown(f"<p style='text-align: center; font-size:14px; color:gray;'>Last updated: {current_time_sg} (SGT)</p>", unsafe_allow_html=True)
+    
+    st.markdown("Comparison of 5000-tick choppiness at user-defined intervals. Each point represents the average 20-tick choppiness across 5000 ticks. 10 points only")
+    
+    # Get available pairs
+    available_pairs = get_available_pairs()
+    
+    # Create columns for layout
+    col1, col2, col3 = st.columns([2, 1, 1])
+    
+    with col1:
+        # Selection UI
+        selected_pair = st.selectbox(
+            "Select cryptocurrency pair",
+            options=available_pairs,
+            index=0 if "BTC/USDT" in available_pairs else 0
+        )
+    
+    with col2:
+        # Interval selector
+        interval_minutes = st.number_input(
+            "Minutes between points",
+            min_value=1,
+            max_value=30,
+            value=5,
+            help="Time interval between data points (minutes)"
         )
         
-        # Resample to exactly the specified resolution
-        resolution_vol = one_min_ohlc['realized_vol'].resample(f'{resolution_min}min', closed='left', label='left').mean().dropna()
-        
-        if resolution_vol.empty:
-            print(f"[{token}] No {resolution_min}-min volatility data.")
-            return None
-            
-        # Get last 24 hours
-        periods_per_day = int(24 * 60 / resolution_min)
-        last_24h_vol = resolution_vol.tail(periods_per_day)
-        last_24h_vol = last_24h_vol.to_frame()
-        
-        # Store original datetime index for reference
-        last_24h_vol['original_datetime'] = last_24h_vol.index
-        
-        # Format time label to match our aligned blocks (HH:MM format)
-        last_24h_vol['time_label'] = last_24h_vol.index.strftime('%H:%M')
-        
-        # Calculate 24-hour average volatility
-        last_24h_vol['avg_24h_vol'] = last_24h_vol['realized_vol'].mean()
-        
-        # Classify volatility
-        last_24h_vol['vol_info'] = last_24h_vol['realized_vol'].apply(classify_volatility)
-        last_24h_vol['vol_regime'] = last_24h_vol['vol_info'].apply(lambda x: x[0])
-        last_24h_vol['vol_desc'] = last_24h_vol['vol_info'].apply(lambda x: x[2])
-        
-        # Also classify the 24-hour average
-        last_24h_vol['avg_vol_info'] = last_24h_vol['avg_24h_vol'].apply(classify_volatility)
-        last_24h_vol['avg_vol_regime'] = last_24h_vol['avg_vol_info'].apply(lambda x: x[0])
-        last_24h_vol['avg_vol_desc'] = last_24h_vol['avg_vol_info'].apply(lambda x: x[2])
-        
-        # Flag extreme volatility events
-        last_24h_vol['is_extreme'] = last_24h_vol['realized_vol'] >= extreme_vol_threshold
-        
-        print(f"[{token}] Successful Volatility Calculation")
-        return last_24h_vol
-    except Exception as e:
-        print(f"[{token}] Error processing: {e}")
-        return None
-
-# Function to combine volatility and house edge data
-def combine_volatility_and_edge(volatility_results, house_edge_data):
-    """
-    Combine volatility and house edge data into a single DataFrame for display.
-    Returns a dictionary with tokens as keys and combined dataframes as values.
-    """
-    combined_results = {}
+    with col3:
+        # Hours to fetch
+        hours_to_fetch = st.number_input(
+            "Hours of data to fetch",
+            min_value=1,
+            max_value=24,
+            value=3,
+            help="How many hours of historical data to fetch"
+        )
     
-    for token in volatility_results.keys():
-        # Get volatility data for this token
-        vol_df = volatility_results[token]
+    # Create plot button
+    if st.button("Generate User-defined Interval Choppiness Plot", use_container_width=True):
+        # Progress bars for data fetching
+        col_rollbit, col_surf = st.columns(2)
         
-        # Get house edge data for this token
-        edge_df = pd.DataFrame()
-        if not house_edge_data.empty:
-            edge_df = house_edge_data[house_edge_data['pair_name'] == token].copy()
+        with col_rollbit:
+            st.write("Rollbit")
+            progress_bar_rollbit = st.progress(0)
+            
+            def update_rollbit(progress, text):
+                progress_bar_rollbit.progress(progress, text)
         
-        if vol_df is not None and not vol_df.empty:
-            if not edge_df.empty:
-                # Format timestamps for joining
-                edge_df['time_label'] = edge_df['timestamp'].dt.strftime('%H:%M')
+        with col_surf:
+            st.write("Surf")
+            progress_bar_surf = st.progress(0)
+            
+            def update_surf(progress, text):
+                progress_bar_surf.progress(progress, text)
+        
+        # Fetch data for both platforms
+        with st.spinner(f"Fetching {hours_to_fetch} hours of tick data..."):
+            # We want to fetch enough data for all our points plus 5000 ticks for each
+            min_ticks_needed = max(20000, (interval_minutes * 10) * 100)  # Estimate roughly 100 ticks per minute
+            rollbit_df = fetch_tick_data(selected_pair, 'rollbit', hours_to_fetch, min_ticks_needed, update_rollbit)
+            surf_df = fetch_tick_data(selected_pair, 'surf', hours_to_fetch, min_ticks_needed, update_surf)
+        
+        # Process data if available
+        if rollbit_df is not None and surf_df is not None:
+            st.success(f"Fetched {len(rollbit_df)} ticks from Rollbit and {len(surf_df)} ticks from Surf")
+            
+            # Fixed window size of 20 for choppiness calculation
+            window_size = 20
+            tick_count = 5000  # Use 5000 ticks for each calculation
+            num_points = 10   # Calculate 10 points
+            
+            # Calculate synchronized choppiness with error handling
+            with st.spinner(f"Calculating synchronized choppiness at {interval_minutes}-minute intervals..."):
+                try:
+                    timestamps, rollbit_chop, surf_chop = calculate_synchronized_choppiness(
+                        rollbit_df, surf_df, window_size, tick_count, num_points, interval_minutes)
+                    
+                    # Log the calculation for debugging
+                    st.info(f"Generated {len(timestamps)} synchronized timestamps")
+                    
+                    if len(timestamps) == 0:
+                        st.error("No timestamps were generated. There may not be enough data.")
+                        
+                except Exception as e:
+                    st.error(f"Error in choppiness calculation: {str(e)}")
+                    st.error(traceback.format_exc())
+                    timestamps, rollbit_chop, surf_chop = [], [], []
+            
+            # Check if we got any data points
+            if len(timestamps) > 0 and len(rollbit_chop) > 0 and len(surf_chop) > 0:
+                # Calculate the most recent (latest) values
+                rollbit_latest = rollbit_chop[-1] if rollbit_chop else None
+                surf_latest = surf_chop[-1] if surf_chop else None
                 
-                # Get available columns for merging
-                edge_columns = ['time_label']
-                if 'house_edge' in edge_df.columns:
-                    edge_columns.append('house_edge')
-                if 'total_platform_pnl' in edge_df.columns:
-                    edge_columns.append('total_platform_pnl')
-                if 'margin_amount' in edge_df.columns:
-                    edge_columns.append('margin_amount')
+                # Display latest values (most recent time point)
+                st.subheader("Latest 5000-Tick Choppiness Values")
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric(
+                        "Rollbit",
+                        f"{rollbit_latest:.2f}" if rollbit_latest is not None else "N/A", 
+                        f"{rollbit_latest - surf_latest:.2f} vs Surf" if (rollbit_latest is not None and surf_latest is not None) else "N/A"
+                    )
+                with col2:
+                    st.metric(
+                        "Surf",
+                        f"{surf_latest:.2f}" if surf_latest is not None else "N/A",
+                        f"{surf_latest - rollbit_latest:.2f} vs Rollbit" if (rollbit_latest is not None and surf_latest is not None) else "N/A"
+                    )
                 
-                # Merge on time_label
-                merged = pd.merge(
-                    vol_df.reset_index(), 
-                    edge_df[edge_columns], 
-                    on='time_label', 
-                    how='outer'
+                # Create plot
+                fig = go.Figure()
+                
+                # Format timestamps for better display
+                formatted_timestamps = [t.strftime("%H:%M:%S") for t in timestamps]
+                
+                # Add Rollbit line
+                fig.add_trace(go.Scatter(
+                    x=formatted_timestamps,
+                    y=rollbit_chop,
+                    mode='lines+markers',
+                    name='Rollbit Choppiness',
+                    line=dict(color='red', width=2),
+                    marker=dict(size=10, color='red'),
+                    hoverinfo='text',
+                    hovertext=[f'Time: {t}<br>Choppiness: {v:.2f}' 
+                              for t, v in zip(formatted_timestamps, rollbit_chop)]
+                ))
+                
+                # Add Surf line
+                fig.add_trace(go.Scatter(
+                    x=formatted_timestamps,
+                    y=surf_chop,
+                    mode='lines+markers',
+                    name='Surf Choppiness',
+                    line=dict(color='blue', width=2),
+                    marker=dict(size=10, color='blue'),
+                    hoverinfo='text',
+                    hovertext=[f'Time: {t}<br>Choppiness: {v:.2f}' 
+                              for t, v in zip(formatted_timestamps, surf_chop)]
+                ))
+                
+                # Add horizontal line for reference value 250
+                fig.add_shape(
+                    type="line",
+                    x0=0,
+                    y0=250,
+                    x1=1,
+                    y1=250,
+                    xref="paper",
+                    line=dict(color="grey", width=1, dash="dash"),
                 )
                 
-                # Classify house edge if available
-                if 'house_edge' in merged.columns:
-                    merged['edge_info'] = merged['house_edge'].apply(classify_house_edge)
-                    merged['edge_regime'] = merged['edge_info'].apply(lambda x: x[0] if x else "UNKNOWN")
-                    merged['edge_desc'] = merged['edge_info'].apply(lambda x: x[2] if x else "Insufficient data")
+                # Calculate y-axis range with a 10% buffer
+                all_values = rollbit_chop + surf_chop
+                if all_values:
+                    min_val = min(all_values) * 0.9
+                    max_val = max(all_values) * 1.1
                 else:
-                    merged['house_edge'] = np.nan
-                    merged['edge_info'] = None
-                    merged['edge_regime'] = "UNKNOWN"
-                    merged['edge_desc'] = "Insufficient data"
+                    min_val, max_val = 100, 400
                 
-                # Set index back to timestamp
-                if 'timestamp_x' in merged.columns:
-                    merged.set_index('timestamp_x', inplace=True)
-                elif 'index' in merged.columns:
-                    merged.set_index('index', inplace=True)
+                # Add annotations for latest values on the chart
+                fig.add_annotation(
+                    xref='paper',
+                    x=1.0,
+                    y=rollbit_latest,
+                    text=f"Latest Rollbit: {rollbit_latest:.2f}",
+                    showarrow=True,
+                    arrowhead=7,
+                    ax=50,
+                    ay=0,
+                    font=dict(color="red"),
+                    bgcolor="white",
+                    bordercolor="red",
+                    borderwidth=1
+                )
                 
-                combined_results[token] = merged
-            else:
-                # If no edge data, still include volatility data
-                vol_df['house_edge'] = np.nan
-                vol_df['total_platform_pnl'] = np.nan
-                vol_df['margin_amount'] = np.nan
-                vol_df['edge_info'] = None
-                vol_df['edge_regime'] = "UNKNOWN"
-                vol_df['edge_desc'] = "Insufficient data"
-                combined_results[token] = vol_df
-            
-    return combined_results
-
-# Function to process tokens in parallel
-def process_tokens_in_parallel(tokens, max_workers):
-    """Process volatility calculations for multiple tokens in parallel"""
-    results = {}
-    
-    def process_single_token(token):
-        try:
-            result = fetch_and_calculate_volatility(token)
-            return (token, result)
-        except Exception as e:
-            print(f"Error processing {token}: {e}")
-            return (token, None)
-    
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all tasks and gather results
-        futures = [executor.submit(process_single_token, token) for token in tokens]
-        
-        # Create a progress bar
-        progress_bar = st.progress(0)
-        
-        # Track completed futures
-        completed = 0
-        total = len(futures)
-        
-        # Wait for all futures to complete
-        for future in futures:
-            token, result = future.result()
-            completed += 1
-            progress_bar.progress(completed / total)
-            
-            if result is not None:
-                results[token] = result
+                fig.add_annotation(
+                    xref='paper',
+                    x=1.0,
+                    y=surf_latest,
+                    text=f"Latest Surf: {surf_latest:.2f}",
+                    showarrow=True,
+                    arrowhead=7,
+                    ax=50,
+                    ay=0,
+                    font=dict(color="blue"),
+                    bgcolor="white",
+                    bordercolor="blue",
+                    borderwidth=1
+                )
                 
-    return results
-
-# Main code begins here
-# Fetch all tokens
-all_tokens = fetch_all_tokens()
-
-# UI Controls
-col1, col2 = st.columns([3, 1])
-
-with col1:
-    # Let user select tokens to display (or select all)
-    select_all = st.checkbox("Select All Tokens", value=False)
-    
-    if select_all:
-        selected_tokens = all_tokens[:max_tokens]  # Limit to max_tokens for performance
-        if len(all_tokens) > max_tokens:
-            st.info(f"Showing top {max_tokens} tokens for performance. Adjust max tokens in sidebar if needed.")
-    else:
-        default_tokens = all_tokens[:min(5, len(all_tokens))]
-        selected_tokens = st.multiselect(
-            "Select Tokens", 
-            all_tokens,
-            default=default_tokens
-        )
-
-with col2:
-    # Add a refresh button
-    if st.button("Refresh Data"):
-        st.cache_data.clear()
-        st.experimental_rerun()
-    
-    # Show current settings
-    st.caption(f"Resolution: {resolution_min} minutes")
-    st.caption(f"Cache TTL: {cache_ttl} minutes")
-
-if not selected_tokens:
-    st.warning("Please select at least one token")
-    st.stop()
-
-# Show processing information
-st.write(f"Processing {len(selected_tokens)} tokens with {resolution_min}-minute resolution...")
-
-# Show the blocks we're analyzing
-with st.expander("View Time Blocks Being Analyzed"):
-    time_blocks_df = pd.DataFrame([(b[0].strftime('%Y-%m-%d %H:%M'), b[1].strftime('%Y-%m-%d %H:%M'), b[2]) 
-                                  for b in aligned_time_blocks], 
-                                 columns=['Start Time', 'End Time', 'Block Label'])
-    st.dataframe(time_blocks_df)
-
-# Initialize progress placeholder
-progress_status = st.empty()
-progress_status.info("Starting data processing...")
-
-# Fetch house edge data (for all tokens)
-progress_status.info("Fetching house edge data for all tokens...")
-start_time = time.time()
-house_edge_data = fetch_house_edge_data(resolution_min)
-edge_time = time.time() - start_time
-progress_status.info(f"House edge data fetched in {edge_time:.2f} seconds. Processing volatility...")
-
-# Calculate volatility for each token in parallel
-token_volatility_results = process_tokens_in_parallel(selected_tokens, parallel_workers)
-
-# Combine volatility and house edge data
-progress_status.info("Combining edge and volatility data...")
-combined_results = combine_volatility_and_edge(token_volatility_results, house_edge_data)
-
-# Final progress update
-total_time = time.time() - start_time
-progress_status.success(f"Processing complete in {total_time:.2f} seconds. Processed {len(combined_results)}/{len(selected_tokens)} tokens.")
-
-# Create table for display
-if combined_results:
-    # Check if we got house edge data
-    has_edge_data = False
-    for token, df in combined_results.items():
-        if 'house_edge' in df.columns and not df['house_edge'].isna().all():
-            has_edge_data = True
-            break
-    
-    # Display appropriate title based on available data
-    if has_edge_data:
-        st.markdown(f"## Combined {resolution_min}-Minute Edge and Volatility Matrix")
-        st.markdown("### Values shown as: Volatility % / House Edge %")
-    else:
-        st.markdown(f"## {resolution_min}-Minute Volatility Matrix")
-        st.markdown("### Values shown as: Volatility %")
-    
-    # Create table data
-    table_data = {}
-    
-    for token, df in combined_results.items():
-        # Create a series with appropriate values
-        if has_edge_data:
-            # Combined format: "vol% / edge%"
-            combined_series = pd.Series(
-                [f"{(v*100):.1f}% / {(e*100):.1f}%" if not pd.isna(v) and not pd.isna(e) else 
-                 f"{(v*100):.1f}% / N/A" if not pd.isna(v) else
-                 f"N/A / {(e*100):.1f}%" if not pd.isna(e) else "N/A" 
-                 for v, e in zip(df['realized_vol'], df['house_edge'])],
-                index=df['time_label']
-            )
-        else:
-            # Volatility only format: "vol%"
-            combined_series = pd.Series(
-                [f"{(v*100):.1f}%" if not pd.isna(v) else "N/A" 
-                 for v in df['realized_vol']],
-                index=df['time_label']
-            )
-            
-        table_data[token] = combined_series
-    
-    # Create DataFrame with all tokens
-    combined_table = pd.DataFrame(table_data)
-    
-    # Apply the time blocks in the proper order (most recent first)
-    available_times = set(combined_table.index)
-    ordered_times = [t for t in time_block_labels if t in available_times]
-    
-    # If no matches are found in aligned blocks, fallback to the available times
-    if not ordered_times and available_times:
-        ordered_times = sorted(list(available_times), reverse=True)
-    
-    # Reindex with the ordered times
-    combined_table = combined_table.reindex(ordered_times)
-    
-    # Create a separate table for visualization that shows numeric values
-    numeric_data = {}
-    for token, df in combined_results.items():
-        # Create dataframes with the numeric values for coloring
-        vol_series = pd.Series(df['realized_vol'] if 'realized_vol' in df else np.nan, 
-                              index=df['time_label'] if 'time_label' in df else [])
-        edge_series = pd.Series(df['house_edge'] if 'house_edge' in df else np.nan, 
-                               index=df['time_label'] if 'time_label' in df else [])
-        numeric_data[token] = {'vol': vol_series, 'edge': edge_series}
-    
-    # Function to color cells
-    def color_matrix_cells(val, token, time_label, has_edge_data):
-        if val == "N/A":
-            return 'background-color: #f5f5f5; color: #666666;'  # Grey for missing
-        
-        # Extract vol and edge values
-        vol_value = np.nan
-        edge_value = np.nan
-        
-        if has_edge_data:
-            # Extract from combined format "vol% / edge%"
-            if "N/A" not in val:
-                # Format: "vol% / edge%"
-                parts = val.split(" / ")
-                if len(parts) == 2:
-                    try:
-                        vol_value = float(parts[0].replace("%", "")) / 100
-                        edge_value = float(parts[1].replace("%", "")) / 100
-                    except:
-                        pass
-            elif "/ N/A" in val:
-                # Format: "vol% / N/A"
-                try:
-                    vol_value = float(val.split(" / ")[0].replace("%", "")) / 100
-                except:
-                    pass
-            elif "N/A /" in val:
-                # Format: "N/A / edge%"
-                try:
-                    edge_value = float(val.split(" / ")[1].replace("%", "")) / 100
-                except:
-                    pass
-        else:
-            # Extract from volatility-only format
-            try:
-                vol_value = float(val.replace("%", "")) / 100
-            except:
-                pass
-        
-        # If we couldn't parse the values, try to get them from numeric_data
-        if pd.isna(vol_value) or (has_edge_data and pd.isna(edge_value)):
-            try:
-                if token in numeric_data and time_label in numeric_data[token]['vol'].index:
-                    vol_value = numeric_data[token]['vol'].loc[time_label]
-                if has_edge_data and token in numeric_data and time_label in numeric_data[token]['edge'].index:
-                    edge_value = numeric_data[token]['edge'].loc[time_label]
-            except:
-                pass
-        
-        if pd.isna(vol_value) and (not has_edge_data or pd.isna(edge_value)):
-            return 'background-color: #f5f5f5; color: #666666;'  # Grey for missing
-        
-        # Create colors based on combinations of edge and volatility
-        if has_edge_data:
-            # Define edge colors (red to green)
-            if pd.isna(edge_value):
-                edge_color = "200,200,200"  # Grey for missing edge
-            elif edge_value < negative_edge_threshold:  # Negative edge (system losing)
-                edge_color = "255,100,100"  # Red
-            elif edge_value < 0.1:  # Low edge
-                edge_color = "255,200,100"  # Orange yellow
-            elif edge_value < 0.3:  # Medium edge
-                edge_color = "200,255,100"  # Yellow green
-            elif edge_value < high_edge_threshold:  # Good edge
-                edge_color = "150,255,150"  # Light green
-            else:  # High edge
-                edge_color = "100,255,100"  # Green
+                # Layout
+                fig.update_layout(
+                    title=f"5000-Tick Choppiness at {interval_minutes}-Minute Intervals: {selected_pair}",
+                    xaxis_title="Time (SGT)",
+                    yaxis_title="5000-Tick Choppiness (20-tick window average)",
+                    legend=dict(
+                        orientation="h",
+                        yanchor="bottom",
+                        y=1.02,
+                        xanchor="right",
+                        x=1
+                    ),
+                    height=600,
+                    hovermode="closest",
+                    yaxis=dict(
+                        range=[min_val, max_val],
+                    ),
+                    plot_bgcolor='white',  # White background
+                    xaxis=dict(
+                        showgrid=True,
+                        gridwidth=1,
+                        gridcolor='rgba(220,220,220,0.5)',
+                        zeroline=False,
+                    ),
+                    yaxis_gridwidth=1,
+                    yaxis_gridcolor='rgba(220,220,220,0.5)',
+                    margin=dict(l=50, r=50, t=80, b=50),
+                )
                 
-            # Define volatility intensity (transparency)
-            if pd.isna(vol_value):
-                vol_alpha = 0.5  # Medium transparency for missing vol
-                text_color = "black"
-            elif vol_value < 0.3:  # Low volatility
-                vol_alpha = 0.4
-                text_color = "black"
-            elif vol_value < 0.6:  # Medium volatility
-                vol_alpha = 0.6
-                text_color = "black"
-            elif vol_value < 1.0:  # High volatility
-                vol_alpha = 0.8
-                text_color = "black"
-            else:  # Extreme volatility
-                vol_alpha = 1.0
-                text_color = "white"
+                # Show plot
+                st.plotly_chart(fig, use_container_width=True)
                 
-            return f'background-color: rgba({edge_color}, {vol_alpha}); color: {text_color}'
-            
-        else:
-            # Volatility-only color scheme
-            if pd.isna(vol_value):
-                return 'background-color: #f5f5f5; color: #666666;'  # Grey for missing
-            elif vol_value < 0.3:  # Low volatility
-                intensity = max(0, min(255, int(255 * vol_value / 0.3)))
-                return f'background-color: rgba({255-intensity}, 255, {255-intensity}, 0.7); color: black'
-            elif vol_value < 0.6:  # Medium volatility
-                intensity = max(0, min(255, int(255 * (vol_value - 0.3) / 0.3)))
-                return f'background-color: rgba(255, 255, {255-intensity}, 0.7); color: black'
-            elif vol_value < 1.0:  # High volatility
-                intensity = max(0, min(255, int(255 * (vol_value - 0.6) / 0.4)))
-                return f'background-color: rgba(255, {255-(intensity//2)}, 0, 0.7); color: black'
-            else:  # Extreme volatility
-                return 'background-color: rgba(255, 0, 0, 0.7); color: white'
-    
-    # Apply styling for the combined table
-    styled_table = combined_table.style.apply(
-        lambda x: pd.Series([color_matrix_cells(val, x.name, idx, has_edge_data) for idx, val in x.items()], index=x.index),
-        axis=1
-    )
-    
-    # Color legends
-    if has_edge_data:
-        st.markdown("""
-        #### Color Legend: 
-        - **Background Color**: House Edge (Red = Negative, Yellow = Low, Green = High)
-        - **Color Intensity**: Volatility (Darker = Higher Volatility)
-        """)
-    else:
-        st.markdown("""
-        #### Color Legend: 
-        - **Green**: Low volatility (<30%)
-        - **Yellow**: Medium volatility (30-60%)
-        - **Orange**: High volatility (60-100%)
-        - **Red**: Extreme volatility (>100%)
-        """)
-    
-    # Display the matrix
-    st.dataframe(styled_table, height=700, use_container_width=True)
-    
-    # Create a summary dashboard
-    st.subheader("24-Hour Summary Dashboard")
-    
-    # Summary metrics
-    summary_data = []
-    for token, df in combined_results.items():
-        if not df.empty:
-            avg_vol = df['realized_vol'].mean() if 'realized_vol' in df and not df['realized_vol'].isna().all() else np.nan
-            avg_edge = df['house_edge'].mean() if 'house_edge' in df and not df['house_edge'].isna().all() else np.nan
-            total_pnl = df['total_platform_pnl'].sum() if 'total_platform_pnl' in df and not df['total_platform_pnl'].isna().all() else np.nan
-            total_margin = df['margin_amount'].sum() if 'margin_amount' in df and not df['margin_amount'].isna().all() else np.nan
-            
-            # Get peak volatility time
-            if 'realized_vol' in df and not df['realized_vol'].isna().all():
-                max_vol_idx = df['realized_vol'].idxmax() 
-                max_vol_time = df.loc[max_vol_idx, 'time_label'] if 'time_label' in df.columns else "N/A"
-            else:
-                max_vol_time = "N/A"
-            
-            # Get best edge time
-            if 'house_edge' in df and not df['house_edge'].isna().all():
-                max_edge_idx = df['house_edge'].idxmax()
-                max_edge_time = df.loc[max_edge_idx, 'time_label'] if 'time_label' in df.columns else "N/A"
-            else:
-                max_edge_time = "N/A"
-            
-            # Create summary row with available data
-            summary_row = {
-                'Token': token,
-                'Avg Vol (%)': (avg_vol * 100).round(1) if not pd.isna(avg_vol) else np.nan,
-                'Peak Vol Time': max_vol_time
-            }
-            
-            # Add edge data if available
-            if has_edge_data:
-                summary_row.update({
-                    'Avg Edge (%)': (avg_edge * 100).round(1) if not pd.isna(avg_edge) else np.nan,
-                    'Total PNL': int(total_pnl) if not pd.isna(total_pnl) else np.nan,
-                    'Total Margin': int(total_margin) if not pd.isna(total_margin) else np.nan,
-                    'Best Edge Time': max_edge_time
-                })
+                # Display data collection time ranges
+                st.subheader("Data Collection Time Ranges")
+                time_data = []
                 
-            summary_data.append(summary_row)
-    
-    if summary_data:
-        summary_df = pd.DataFrame(summary_data)
-        
-        # Sort based on available data
-        if has_edge_data and 'Avg Edge (%)' in summary_df.columns:
-            summary_df = summary_df.sort_values(by='Avg Edge (%)', ascending=False)
-        else:
-            summary_df = summary_df.sort_values(by='Avg Vol (%)', ascending=False)
-        
-        # Add rank column
-        summary_df.insert(0, 'Rank', range(1, len(summary_df) + 1))
-        
-        # Reset the index to remove it
-        summary_df = summary_df.reset_index(drop=True)
-        
-        # Format summary table with colors
-        def color_vol_column(val):
-            if pd.isna(val):
-                return ''
-            elif val < 30:
-                return 'color: green'
-            elif val < 60:
-                return 'color: #aaaa00'
-            elif val < 100:
-                return 'color: orange'
-            else:
-                return 'color: red'
-        
-        def color_edge_column(val):
-            if pd.isna(val):
-                return ''
-            elif val < negative_edge_threshold * 100:
-                return 'color: red'
-            elif val < 10:
-                return 'color: orange'
-            elif val < 30:
-                return 'color: #aaaa00'
-            elif val < high_edge_threshold * 100:
-                return 'color: lightgreen'
-            else:
-                return 'color: green; font-weight: bold'
-        
-        def color_pnl_column(val):
-            if pd.isna(val):
-                return ''
-            elif val < 0:
-                return 'color: red'
-            else:
-                return 'color: green'
-        
-        # Apply styling based on available columns
-        styled_summary = summary_df.style
-        styled_summary = styled_summary.applymap(color_vol_column, subset=['Avg Vol (%)'])
-        
-        if has_edge_data:
-            if 'Avg Edge (%)' in summary_df.columns:
-                styled_summary = styled_summary.applymap(color_edge_column, subset=['Avg Edge (%)'])
-            if 'Total PNL' in summary_df.columns:
-                styled_summary = styled_summary.applymap(color_pnl_column, subset=['Total PNL'])
-        
-        # Display the styled dataframe
-        st.dataframe(styled_summary, height=500, use_container_width=True)
-        
-        # Create summary metrics at the top based on available data
-        if has_edge_data:
-            total_pnl = sum(row.get('Total PNL', 0) for row in summary_data if 'Total PNL' in row and not pd.isna(row['Total PNL']))
-            
-            # Calculate weighted average edge if we have valid data
-            valid_data = [(row['Avg Edge (%)'], row['Total Margin']) for row in summary_data 
-                         if 'Avg Edge (%)' in row and 'Total Margin' in row and
-                         not pd.isna(row['Avg Edge (%)']) and not pd.isna(row['Total Margin']) and row['Total Margin'] != 0]
-            
-            if valid_data:
-                total_margin = sum(margin for _, margin in valid_data)
-                if total_margin > 0:
-                    avg_portfolio_edge = sum(edge * margin / 100 for edge, margin in valid_data) / total_margin * 100
-                else:
-                    avg_portfolio_edge = np.nan
-            else:
-                avg_portfolio_edge = np.nan
-            
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Total Portfolio PNL (24h)", f"${total_pnl:,.2f}")
-            col2.metric("Weighted Avg Edge", f"{avg_portfolio_edge:.2f}%" if not pd.isna(avg_portfolio_edge) else "N/A")
-            col3.metric("Tokens Analyzed", f"{len(summary_data)}")
-        else:
-            # Volatility-only metrics
-            col1, col2 = st.columns(2)
-            col1.metric("Average Volatility", f"{summary_df['Avg Vol (%)'].mean():.2f}%")
-            col2.metric("Tokens Analyzed", f"{len(summary_data)}")
-    else:
-        st.warning("No summary data available.")
-    
-    # Identify and display opportunities
-    st.subheader("Trading Opportunities & Events")
-    
-    if has_edge_data:
-        # Trading opportunities section with both edge and volatility
-        col1, col2 = st.columns(2)
-        
-        # 1. High Edge with Low Volatility (Good Risk/Reward)
-        high_edge_tokens = [row for row in summary_data 
-                            if 'Avg Edge (%)' in row and 'Avg Vol (%)' in row
-                            and not pd.isna(row['Avg Edge (%)']) 
-                            and not pd.isna(row['Avg Vol (%)'])
-                            and row['Avg Edge (%)'] > 20
-                            and row['Avg Vol (%)'] < 60]
-        
-        with col1:
-            st.markdown("### High Edge / Low Volatility Pairs")
-            if high_edge_tokens:
-                for token in high_edge_tokens:
-                    edge = token['Avg Edge (%)']
-                    vol = token['Avg Vol (%)']
-                    edge_color = "green" if edge > 30 else "lightgreen"
-                    st.markdown(f"- **{token['Token']}**: Edge: <span style='color:{edge_color}'>{edge:.1f}%</span>, Vol: <span style='color:green'>{vol:.1f}%</span>", unsafe_allow_html=True)
-            else:
-                st.markdown("*No tokens in this category*")
-    
-    # Extreme volatility events
-    extreme_vol_events = []
-    for token, df in combined_results.items():
-        if not df.empty and 'realized_vol' in df.columns:
-            extreme_periods = df[df['realized_vol'] >= extreme_vol_threshold]
-            for idx, row in extreme_periods.iterrows():
-                vol_value = float(row['realized_vol']) if 'realized_vol' in row and not pd.isna(row['realized_vol']) else 0.0
-                edge_value = float(row['house_edge']) if 'house_edge' in row and not pd.isna(row['house_edge']) else 0.0
-                time_label = str(row['time_label']) if 'time_label' in row and not pd.isna(row['time_label']) else "Unknown"
+                for i, timestamp in enumerate(timestamps):
+                    # Get the corresponding 5000 ticks before this timestamp for both exchanges
+                    rollbit_mask = rollbit_df['timestamp_sgt'] <= timestamp
+                    rollbit_previous = rollbit_df[rollbit_mask]
+                    rollbit_recent = rollbit_previous.iloc[-tick_count:] if len(rollbit_previous) >= tick_count else None
+                    
+                    surf_mask = surf_df['timestamp_sgt'] <= timestamp
+                    surf_previous = surf_df[surf_mask]
+                    surf_recent = surf_previous.iloc[-tick_count:] if len(surf_previous) >= tick_count else None
+                    
+                    if rollbit_recent is not None and surf_recent is not None:
+                        time_data.append({
+                            'Pair': selected_pair,
+                            'Rollbit Start': rollbit_recent['timestamp_sgt'].iloc[0],
+                            'Rollbit End': rollbit_recent['timestamp_sgt'].iloc[-1],
+                            'Rollbit Count': len(rollbit_recent),
+                            'Surf Start': surf_recent['timestamp_sgt'].iloc[0],
+                            'Surf End': surf_recent['timestamp_sgt'].iloc[-1],
+                            'Surf Count': len(surf_recent)
+                        })
                 
-                extreme_vol_events.append({
-                    'Token': token,
-                    'Time': time_label,
-                    'Volatility (%)': round(vol_value * 100, 1),
-                    'Edge (%)': round(edge_value * 100, 1) if has_edge_data else np.nan,
-                    'Full Timestamp': idx.strftime('%Y-%m-%d %H:%M') if hasattr(idx, 'strftime') else str(idx)
-                })
-    
-    if has_edge_data:
-        with col2:
-            st.markdown("### Extreme Volatility Events")
-            if extreme_vol_events:
-                extreme_vol_events_sorted = sorted(extreme_vol_events, key=lambda x: x['Volatility (%)'], reverse=True)
-                for event in extreme_vol_events_sorted[:5]:  # Show top 5
-                    token = event['Token']
-                    time = event['Time']
-                    vol = event['Volatility (%)']
-                    edge = event['Edge (%)']
-                    edge_color = "red" if edge < 0 else "green"
-                    st.markdown(f"- **{token}** at **{time}**: Vol: <span style='color:red'>{vol}%</span>, Edge: <span style='color:{edge_color}'>{edge}%</span>", unsafe_allow_html=True)
+                if time_data:
+                    time_df = pd.DataFrame(time_data)
+                    
+                    # Format datetime columns to be more readable
+                    for col in time_df.columns:
+                        if 'Start' in col or 'End' in col:
+                            try:
+                                time_df[col] = pd.to_datetime(time_df[col]).dt.strftime('%Y-%m-%d %H:%M:%S')
+                            except:
+                                pass
+                    
+                    st.dataframe(time_df, use_container_width=True)
+                    st.info("Note: 'Start' is the oldest data point, 'End' is the most recent data point in the analysis.")
                 
-                if len(extreme_vol_events) > 5:
-                    st.markdown(f"*... and {len(extreme_vol_events) - 5} more extreme events*")
-            else:
-                st.markdown("*No events in this category*")
-    else:
-        # Volatility-only events display
-        st.markdown("### Extreme Volatility Events")
-        if extreme_vol_events:
-            extreme_df = pd.DataFrame(extreme_vol_events)
-            # Sort by volatility (highest first)
-            extreme_df = extreme_df.sort_values(by='Volatility (%)', ascending=False)
-            
-            # Reset the index to remove it
-            extreme_df = extreme_df.reset_index(drop=True)
-            
-            # Display the dataframe
-            st.dataframe(extreme_df, height=300, use_container_width=True)
-            
-            # Create a more visually appealing list of extreme events
-            st.markdown("### Top Extreme Volatility Events")
-            
-            # Only process top 10 events if there are any
-            top_events = extreme_df.head(10).to_dict('records')
-            for i, event in enumerate(top_events):
-                token = event['Token']
-                time = event['Time']
-                vol = event['Volatility (%)']
-                date = event['Full Timestamp'].split(' ')[0] if ' ' in event['Full Timestamp'] else ""
+                # Display table of values
+                st.subheader("Choppiness Values")
                 
-                st.markdown(f"**{i+1}. {token}** at **{time}** on {date}: <span style='color:red; font-weight:bold;'>{vol}%</span> volatility", unsafe_allow_html=True)
-            
-            if len(extreme_vol_events) > 10:
-                st.markdown(f"*... and {len(extreme_vol_events) - 10} more extreme events*")
-        else:
-            st.info("No extreme volatility events detected in the selected tokens.")
-    
-    # Only show the edge vs. volatility visualization if we have edge data
-    if has_edge_data:
-        # Visualize the relationship between edge and volatility
-        st.subheader("Edge vs. Volatility Relationship")
-        
-        # Prepare data for scatter plot
-        scatter_data = []
-        for token, df in combined_results.items():
-            if not df.empty:
-                avg_vol = df['realized_vol'].mean() if 'realized_vol' in df and not df['realized_vol'].isna().all() else np.nan
-                avg_edge = df['house_edge'].mean() if 'house_edge' in df and not df['house_edge'].isna().all() else np.nan
-                if not pd.isna(avg_vol) and not pd.isna(avg_edge):
-                    scatter_data.append({
-                        'Token': token,
-                        'Volatility': avg_vol * 100,  # Convert to percentage
-                        'Edge': avg_edge * 100        # Convert to percentage
+                # Create a dataframe with all the data points
+                data = []
+                
+                for i in range(len(timestamps)):
+                    formatted_time = timestamps[i].strftime("%H:%M:%S")
+                    rollbit_value = rollbit_chop[i]
+                    surf_value = surf_chop[i]
+                    
+                    data.append({
+                        "Time": formatted_time,
+                        "Rollbit": f"{rollbit_value:.2f}",
+                        "Surf": f"{surf_value:.2f}",
+                        "Difference": f"{(rollbit_value - surf_value):.2f}"
                     })
-        
-        if scatter_data:
-            scatter_df = pd.DataFrame(scatter_data)
-            
-            # Create scatter plot
-            fig = go.Figure()
-            
-            # Add scatter points
-            fig.add_trace(go.Scatter(
-                x=scatter_df['Volatility'],
-                y=scatter_df['Edge'],
-                mode='markers+text',
-                marker=dict(
-                    size=12,
-                    color=scatter_df['Volatility'],
-                    colorscale='Viridis',
-                    showscale=True,
-                    colorbar=dict(title="Volatility (%)"),
-                    line=dict(width=1, color='black')
-                ),
-                text=scatter_df['Token'],
-                textposition="top center",
-                name='Tokens'
-            ))
-            
-            # Add quadrant lines
-            fig.add_shape(
-                type="line",
-                x0=0, x1=max(scatter_df['Volatility']) * 1.1,
-                y0=0, y1=0,
-                line=dict(color="black", width=1, dash="dash")
-            )
-            
-            fig.add_shape(
-                type="line",
-                x0=60, x1=60,
-                y0=min(scatter_df['Edge']) * 1.1, y1=max(scatter_df['Edge']) * 1.1,
-                line=dict(color="black", width=1, dash="dash")
-            )
-            
-            # Add quadrant labels
-            fig.add_annotation(
-                x=30, y=20,
-                text="IDEAL:<br>High Edge, Low Vol",
-                showarrow=False,
-                font=dict(size=12, color="green")
-            )
-            
-            fig.add_annotation(
-                x=80, y=20,
-                text="GOOD:<br>High Edge, High Vol",
-                showarrow=False,
-                font=dict(size=12, color="darkgreen")
-            )
-            
-            fig.add_annotation(
-                x=30, y=-20,
-                text="POOR:<br>Negative Edge, Low Vol",
-                showarrow=False,
-                font=dict(size=12, color="red")
-            )
-            
-            fig.add_annotation(
-                x=80, y=-20,
-                text="AVOID:<br>Negative Edge, High Vol",
-                showarrow=False,
-                font=dict(size=12, color="darkred")
-            )
-            
-            # Update layout
-            fig.update_layout(
-                title="Average Edge vs. Volatility by Token (24h)",
-                xaxis_title="Volatility (%)",
-                yaxis_title="Edge (%)",
-                height=600,
-                template="plotly_white",
-                showlegend=False
-            )
-            
-            st.plotly_chart(fig, use_container_width=True)
+                
+                # Create a DataFrame and display it
+                df_results = pd.DataFrame(data)
+                st.dataframe(df_results, use_container_width=True)
+                
+                # Add explanation of the chart
+                with st.expander("About This Choppiness Plot"):
+                    st.markdown("""
+                    **How Choppiness Is Calculated:**
+                    
+                    1. For each point in time (spaced user-defined minutes apart):
+                       - We take the most recent 5000 ticks up to that point
+                       - Calculate the choppiness using the exact same method as in parameters.py
+                       - The calculation uses a 20-tick rolling window across all 5000 ticks
+                    
+                    2. The formula for calculating choppiness is:
+                       `choppiness = 100 * sum_abs_changes / (price_range + epsilon)`
+                       - Where `sum_abs_changes` is the sum of all absolute price changes in the window
+                       - And `price_range` is the difference between max and min prices in the window
+                    
+                    3. The latest values (rightmost points) exactly match the values shown in parameters.py.
+                    
+                    **Interpretation:**
+                    - Values below 200: Low choppiness (trending market)
+                    - Values around 250: Moderate choppiness
+                    - Values above 300: High choppiness (sideways/volatile market)
+                    """)
+            else:
+                st.error("Not enough data to calculate choppiness at the requested intervals")
+                st.info(f"""
+                We need at least {tick_count} ticks before each time point for both exchanges.
+                Try:
+                1. Increasing the 'Hours of data to fetch'
+                2. Reducing the interval between points
+                3. Selecting a more actively traded pair
+                """)
         else:
-            st.warning("Insufficient data for scatter plot.")
+            if rollbit_df is None:
+                st.error(f"Could not fetch Rollbit data for {selected_pair}")
+            if surf_df is None:
+                st.error(f"Could not fetch Surf data for {selected_pair}")
 
-with st.expander("Understanding the Matrix"):
-    if has_edge_data:
-        st.markdown(f"""
-        ### How to Read This Table
-        
-        The {resolution_min}-Minute System Edge & Volatility Matrix shows combined data for each token across time intervals during the last 24 hours. Each cell contains both volatility and house edge information.
-        
-        #### Cell Values
-        Each cell shows **Volatility % / House Edge %** for that specific token and time period.
-        
-        #### Color Coding
-        - **Background Color** represents the house edge:
-            - **Red**: Negative edge (system is losing money)
-            - **Orange/Yellow**: Low/medium edge
-            - **Green**: High edge (good for the system)
-        
-        - **Color Intensity** represents volatility:
-            - **Lighter shades**: Lower volatility
-            - **Darker shades**: Higher volatility
-            - **White text**: Extreme volatility (≥100%)
-        
-        #### Trading Implications
-        - **Green cells with light background**: High edge with low volatility - best trading opportunities
-        - **Green cells with dark background**: High edge but high volatility - good but riskier
-        - **Red cells with dark background**: Negative edge with high volatility - avoid these
-        
-        #### Technical Details
-        - Volatility is calculated as the standard deviation of log returns, annualized 
-        - House edge represents the system's profitability, calculated as (platform PNL / total margin)
-        - Edge values range from -1 to 1, with positive values indicating system profit
-        - All times are shown in Singapore timezone
-        - Missing values (gray cells) indicate insufficient data
-        """)
-    else:
-        st.markdown(f"""
-        ### How to Read This Table
-        
-        The {resolution_min}-Minute Volatility Matrix shows volatility data for each token across time intervals during the last 24 hours.
-        
-        #### Cell Values
-        Each cell shows the **annualized volatility percentage** for that specific token and time period.
-        
-        #### Color Coding
-        - **Green**: Low volatility (<30%)
-        - **Yellow**: Medium volatility (30-60%)
-        - **Orange**: High volatility (60-100%)
+if __name__ == "__main__":
+    main()
