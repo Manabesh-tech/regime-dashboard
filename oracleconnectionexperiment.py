@@ -492,7 +492,7 @@ def analyze_tiers(pair_name, progress_bar=None):
                 valid_points = exchange_tier_valid_points.get(exchange_tier_key, 0)
                 
                 # Get the actual exchange's total points instead of using the theoretical maximum
-                exchange_total_points = analysis_metadata['exchange_counts'].get(exchange, 0)
+                exchange_total_points = metadata['exchange_counts'].get(exchange, 0)
                 
                 # Use actual points as denominator if available, otherwise use theoretical
                 denominator = max(exchange_total_points, 1)  # Avoid division by zero
