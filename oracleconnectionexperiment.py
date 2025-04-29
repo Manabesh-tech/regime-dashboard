@@ -11,6 +11,7 @@ import threading
 
 # Clear cache at startup to ensure fresh data
 st.cache_data.clear()
+
 # Page configuration
 st.set_page_config(
     page_title="Exchange Efficiency Analyzer",
@@ -252,7 +253,7 @@ class ExchangeAnalyzer:
                 
                 # Execute query with parameters
                 if progress_bar:
-                    progress_bar.progress(0.1, text="Executing database query...")
+                    progress_bar.progress(0.1, text=f"Executing database query tablename:{table_name}...")
                 
                 result = session.execute(
                     query,
