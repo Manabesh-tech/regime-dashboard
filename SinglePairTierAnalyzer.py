@@ -302,6 +302,9 @@ class EnhancedDepthTierAnalyzer:
         
         # New: Store time highest percentages
         self.time_highest_choppiness = {point: {} for point in self.point_counts}
+        
+        # New: Store winrate data (only for 5000 ticks)
+        self.winrate_data = {5000: {}}
 
     def fetch_and_analyze(self, pair_name, hours=24, progress_bar=None, use_replication=True, time_intervals=12):
         """Fetch data and calculate metrics for each depth tier with time-based analysis
@@ -457,82 +460,84 @@ class EnhancedDepthTierAnalyzer:
                                 'count': len(point_df)
                             }
                         
-                        # New: Historical analysis by time intervals
-                        # Divide data into time intervals for historical analysis
-                        interval_size = min(len(all_df) // time_intervals, point_count)
-                        
-                        if interval_size < 50:  # Ensure meaningful sample size
-                            time_intervals = max(1, len(all_df) // 50)
+                        # Only perform time-based choppiness analysis for 5000 points to improve speed
+                        if point_count == 5000:
+                            # New: Historical analysis by time intervals
+                            # Divide data into time intervals for historical analysis
                             interval_size = min(len(all_df) // time_intervals, point_count)
-                        
-                        # Initialize storage for this point count's historical analysis
-                        self.historical_choppiness[point_count] = {
-                            'intervals': [],
-                            'tier_data': {}
-                        }
-                        
-                        # Track which tier had highest choppiness in each interval
-                        highest_choppiness_counts = {}
-                        
-                        # Process each time interval
-                        for j in range(time_intervals):
-                            start_idx = j * interval_size
-                            end_idx = min((j + 1) * interval_size, len(all_df))
                             
-                            if end_idx - start_idx < interval_size * 0.5:  # Skip if too small
-                                continue
-                                
-                            interval_df = all_df.iloc[start_idx:end_idx].copy()
+                            if interval_size < 50:  # Ensure meaningful sample size
+                                time_intervals = max(1, len(all_df) // 50)
+                                interval_size = min(len(all_df) // time_intervals, point_count)
                             
-                            # Get interval time range for reference
-                            interval_range = {
-                                'start': interval_df['timestamp_sgt'].iloc[-1],
-                                'end': interval_df['timestamp_sgt'].iloc[0]
+                            # Initialize storage for this point count's historical analysis
+                            self.historical_choppiness[point_count] = {
+                                'intervals': [],
+                                'tier_data': {}
                             }
                             
-                            self.historical_choppiness[point_count]['intervals'].append(interval_range)
+                            # Track which tier had highest choppiness in each interval
+                            highest_choppiness_counts = {}
                             
-                            # Calculate choppiness for each tier in this interval
-                            interval_results = {}
-                            highest_choppiness = 0
-                            highest_tier = None
-                            
-                            for column in self.depth_tier_columns:
-                                # Extract price data for this tier
-                                if column in interval_df.columns:
-                                    # Make a clean copy of the data for this specific tier
-                                    df_tier = interval_df[['pair_name', column]].copy()
+                            # Process each time interval
+                            for j in range(time_intervals):
+                                start_idx = j * interval_size
+                                end_idx = min((j + 1) * interval_size, len(all_df))
+                                
+                                if end_idx - start_idx < interval_size * 0.5:  # Skip if too small
+                                    continue
                                     
-                                    # Calculate choppiness metric
-                                    metrics = self._calculate_metrics(df_tier, column, end_idx - start_idx)
-                                    
-                                    if metrics and 'choppiness' in metrics:
-                                        tier = self.depth_tier_values[column]
+                                interval_df = all_df.iloc[start_idx:end_idx].copy()
+                                
+                                # Get interval time range for reference
+                                interval_range = {
+                                    'start': interval_df['timestamp_sgt'].iloc[-1],
+                                    'end': interval_df['timestamp_sgt'].iloc[0]
+                                }
+                                
+                                self.historical_choppiness[point_count]['intervals'].append(interval_range)
+                                
+                                # Calculate choppiness for each tier in this interval
+                                interval_results = {}
+                                highest_choppiness = 0
+                                highest_tier = None
+                                
+                                for column in self.depth_tier_columns:
+                                    # Extract price data for this tier
+                                    if column in interval_df.columns:
+                                        # Make a clean copy of the data for this specific tier
+                                        df_tier = interval_df[['pair_name', column]].copy()
                                         
-                                        # Store the choppiness value
-                                        if tier not in self.historical_choppiness[point_count]['tier_data']:
-                                            self.historical_choppiness[point_count]['tier_data'][tier] = []
+                                        # Calculate choppiness metric
+                                        metrics = self._calculate_metrics(df_tier, column, end_idx - start_idx)
+                                        
+                                        if metrics and 'choppiness' in metrics:
+                                            tier = self.depth_tier_values[column]
                                             
-                                        self.historical_choppiness[point_count]['tier_data'][tier].append(metrics['choppiness'])
-                                        
-                                        # Track which tier had highest choppiness in this interval
-                                        if metrics['choppiness'] > highest_choppiness:
-                                            highest_choppiness = metrics['choppiness']
-                                            highest_tier = tier
+                                            # Store the choppiness value
+                                            if tier not in self.historical_choppiness[point_count]['tier_data']:
+                                                self.historical_choppiness[point_count]['tier_data'][tier] = []
+                                                
+                                            self.historical_choppiness[point_count]['tier_data'][tier].append(metrics['choppiness'])
+                                            
+                                            # Track which tier had highest choppiness in this interval
+                                            if metrics['choppiness'] > highest_choppiness:
+                                                highest_choppiness = metrics['choppiness']
+                                                highest_tier = tier
+                                
+                                # Increment count for the tier with highest choppiness
+                                if highest_tier:
+                                    if highest_tier not in highest_choppiness_counts:
+                                        highest_choppiness_counts[highest_tier] = 0
+                                    highest_choppiness_counts[highest_tier] += 1
                             
-                            # Increment count for the tier with highest choppiness
-                            if highest_tier:
-                                if highest_tier not in highest_choppiness_counts:
-                                    highest_choppiness_counts[highest_tier] = 0
-                                highest_choppiness_counts[highest_tier] += 1
-                        
-                        # Calculate percentage of time each tier had highest choppiness
-                        total_intervals = len(self.historical_choppiness[point_count]['intervals'])
-                        
-                        if total_intervals > 0:
-                            for tier, count in highest_choppiness_counts.items():
-                                percentage = (count / total_intervals) * 100
-                                self.time_highest_choppiness[point_count][tier] = percentage
+                            # Calculate percentage of time each tier had highest choppiness
+                            total_intervals = len(self.historical_choppiness[point_count]['intervals'])
+                            
+                            if total_intervals > 0:
+                                for tier, count in highest_choppiness_counts.items():
+                                    percentage = (count / total_intervals) * 100
+                                    self.time_highest_choppiness[point_count][tier] = percentage
 
                         # Process each depth tier for the main results
                         tier_results = {}
@@ -549,14 +554,24 @@ class EnhancedDepthTierAnalyzer:
                                     tier = self.depth_tier_values[column]
                                     tier_results[tier] = metrics
                                     
-                                    # Add time highest percentage if available
-                                    if tier in self.time_highest_choppiness[point_count]:
+                                    # Add time highest percentage only for 5000 points
+                                    if point_count == 5000 and tier in self.time_highest_choppiness[point_count]:
                                         tier_results[tier]['time_highest_choppiness'] = self.time_highest_choppiness[point_count][tier]
-                                    else:
-                                        tier_results[tier]['time_highest_choppiness'] = 0.0
+                                    
+                                    # Calculate winrate only for 5000 ticks
+                                    if point_count == 5000:
+                                        winrate = self._calculate_winrate(df_tier, column, point_count)
+                                        if winrate is not None:
+                                            tier_results[tier]['winrate'] = winrate
+                                            self.winrate_data[5000][tier] = winrate
 
-                        # Convert to DataFrame and sort by choppiness
-                        self.results[point_count] = self._create_results_table(tier_results)
+                        # Convert to DataFrame and sort appropriately
+                        if point_count == 5000:
+                            # For 5000 points, sort by time_highest_choppiness
+                            self.results[point_count] = self._create_results_table(tier_results, sort_by='time_highest_choppiness')
+                        else:
+                            # For other points, sort by choppiness
+                            self.results[point_count] = self._create_results_table(tier_results, sort_by='choppiness')
 
                 if progress_bar:
                     progress_bar.progress(1.0, text="Analysis complete!")
@@ -633,9 +648,57 @@ class EnhancedDepthTierAnalyzer:
         except Exception as e:
             print(f"Error calculating metrics: {e}")
             return None
+            
+    def _calculate_winrate(self, df, price_col, point_count):
+        """Calculate winrate for price actions (only for 5000 ticks)"""
+        try:
+            # Convert to numeric and drop any NaN values
+            prices = pd.to_numeric(df[price_col], errors='coerce').dropna()
+            prices = prices[prices>0]
+            if len(prices) < point_count * 0.8:  # Allow some flexibility for missing data
+                return None
 
-    def _create_results_table(self, tier_results):
-        """Create a results table including time highest percentages"""
+            # Take only the needed number of points
+            prices = prices.iloc[:point_count].copy()
+            
+            # For winrate, we'll use a simple approach: 
+            # Count how many price increases vs decreases over multiple timeframes
+            
+            # Define different timeframes to check (in ticks)
+            timeframes = [10, 20, 50, 100, 200]
+            results = []
+            
+            for tf in timeframes:
+                if len(prices) <= tf:
+                    continue
+                    
+                # Calculate price changes over this timeframe
+                price_shifts = prices.shift(-tf) - prices
+                increases = (price_shifts > 0).sum()
+                decreases = (price_shifts < 0).sum()
+                total = increases + decreases
+                
+                if total > 0:
+                    win_rate = (increases / total) * 100
+                    results.append(win_rate)
+            
+            # Average winrate across different timeframes
+            if results:
+                return sum(results) / len(results)
+            
+            return 50.0  # Neutral default if no results
+            
+        except Exception as e:
+            print(f"Error calculating winrate: {e}")
+            return None
+
+    def _create_results_table(self, tier_results, sort_by='choppiness'):
+        """Create a results table including time highest percentages
+        
+        Args:
+            tier_results: Dictionary of tier results
+            sort_by: Column to sort by (default: choppiness)
+        """
         if not tier_results:
             return None
 
@@ -648,10 +711,11 @@ class EnhancedDepthTierAnalyzer:
 
         df = pd.DataFrame(data)
 
-        # Sort by time highest choppiness as the primary metric
-        if 'time_highest_choppiness' in df.columns:
-            df = df.sort_values('time_highest_choppiness', ascending=False)
+        # Sort by specified column if it exists
+        if sort_by in df.columns:
+            df = df.sort_values(sort_by, ascending=False)
         elif 'choppiness' in df.columns:
+            # Fallback to choppiness
             df = df.sort_values('choppiness', ascending=False)
         else:
             # If choppiness is not available, try another metric
@@ -696,6 +760,10 @@ def create_point_count_table(analyzer, point_count):
     # Select only the columns we want to display
     display_columns = ['Tier', 'time_highest_choppiness', 'choppiness', 'direction_changes', 'tick_atr_pct', 'trend_strength']
     
+    # Add winrate only for 5000 tick display
+    if point_count == 5000 and 'winrate' in display_df.columns:
+        display_columns.append('winrate')
+    
     # Filter to columns that exist in the dataframe
     available_columns = [col for col in display_columns if col in display_df.columns]
     display_df = display_df[available_columns]
@@ -706,7 +774,8 @@ def create_point_count_table(analyzer, point_count):
         'direction_changes': 'Direction Changes (%)',
         'choppiness': 'Choppiness',
         'tick_atr_pct': 'Tick ATR %',
-        'trend_strength': 'Trend Strength'
+        'trend_strength': 'Trend Strength',
+        'winrate': 'Win Rate (%)'
     }
     
     # Only rename columns that exist
@@ -716,7 +785,7 @@ def create_point_count_table(analyzer, point_count):
     # Format numeric columns with appropriate decimal places
     for col in display_df.columns:
         if col != 'Tier':
-            if col == '% Time Highest Choppiness':
+            if col in ['% Time Highest Choppiness', 'Win Rate (%)']:
                 display_df[col] = display_df[col].apply(
                     lambda x: f"{x:.1f}%" if not pd.isna(x) else "0.0%"
                 )
@@ -739,11 +808,19 @@ def create_point_count_table(analyzer, point_count):
     
     # Add explanatory text
     if '% Time Highest Choppiness' in display_df.columns:
-        st.markdown("""
+        explanation_text = """
         <div style="background-color: #f7f7f7; padding: 8px; border-radius: 5px; margin-bottom: 15px;">
             <p style="margin: 3px 0;"><strong>% Time Highest Choppiness</strong>: Percentage of time intervals where this tier had the highest choppiness value compared to other tiers</p>
-        </div>
-        """, unsafe_allow_html=True)
+        """
+        
+        # Add winrate explanation only for 5000 points
+        if point_count == 5000 and 'Win Rate (%)' in display_df.columns:
+            explanation_text += """
+            <p style="margin: 3px 0;"><strong>Win Rate (%)</strong>: Percentage of price movements that resulted in profitable direction across multiple timeframes</p>
+            """
+            
+        explanation_text += "</div>"
+        st.markdown(explanation_text, unsafe_allow_html=True)
 
     # Show the full table with enhanced styling
     st.dataframe(
@@ -783,8 +860,8 @@ def main():
     # Get available pairs from the database
     available_pairs = get_available_pairs()
 
-    # Main selection area
-    col1, col2, col3 = st.columns([1, 1, 1])
+    # Main selection area - simplified with fixed 24 hours
+    col1, col2 = st.columns([2, 1])
 
     with col1:
         selected_pair = st.selectbox(
@@ -794,16 +871,10 @@ def main():
         )
 
     with col2:
-        # Add hours selection
-        hours_options = [6, 12, 24, 48]
-        selected_hours = st.selectbox(
-            "Analysis Hours",
-            hours_options,
-            index=2  # Default to 24 hours
-        )
-
-    with col3:
         run_analysis = st.button("ANALYZE", use_container_width=True)
+        
+    # Fixed analysis at 24 hours
+    selected_hours = 24
 
     # Main content
     if run_analysis and selected_pair:
@@ -812,7 +883,7 @@ def main():
 
         # Show analysis time in Singapore timezone
         analysis_start_time = datetime.now(singapore_tz).strftime("%Y-%m-%d %H:%M:%S")
-        st.markdown(f"<p style='text-align: center; font-size:14px; color:green;'>Analysis started at: {analysis_start_time} (SGT) for {selected_hours} hours of data</p>", unsafe_allow_html=True)
+        st.markdown(f"<p style='text-align: center; font-size:14px; color:green;'>Analysis started at: {analysis_start_time} (SGT) for 24 hours of data</p>", unsafe_allow_html=True)
 
         # Get current bid/ask data
         bid_ask_data = get_current_bid_ask(selected_pair)
@@ -830,7 +901,7 @@ def main():
 
         # Simple explanation of metrics (much shorter)
         st.markdown(f"""
-        **Analysis Period:** Looking back {selected_hours} hours
+        **Analysis Period:** Looking back 24 hours
         
         **Key Metrics:**
         - **% Time Highest Choppiness:** Percentage of time this tier had the highest choppiness
@@ -838,6 +909,7 @@ def main():
         - **Direction Changes (%):** Frequency of price direction reversals
         - **Tick ATR %:** Average tick-to-tick price change percentage
         - **Trend Strength:** Lower values indicate more choppy/mean-reverting behavior
+        - **Win Rate (%):** (5000 ticks only) Percentage of price movements in profitable direction
         """)
 
         # Set up tabs for results - updated to match point counts
