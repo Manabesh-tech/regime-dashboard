@@ -2,11 +2,9 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import seaborn as sns
 from sqlalchemy import create_engine
 from datetime import datetime, timedelta
 import pytz
-import statsmodels.api as sm
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import r2_score
 
@@ -288,8 +286,8 @@ def plot_spread_volatility(combined_df, pair_name):
         ax2.plot(x_range * 100, y_pred * 10000, 'r-', 
                  label=f'y = {model.coef_[0]:.6f}x + {model.intercept_:.6f}')
         ax2.legend()
-    except:
-        pass
+    except Exception as e:
+        st.error(f"Error creating regression line: {e}")
     
     plt.tight_layout()
     return fig
@@ -470,12 +468,6 @@ def fetch_rollbit_buffer_vs_spread(days=30):
         st.error(f"Error analyzing Rollbit buffer vs spread: {e}")
         return None
 
-def fetch_rollbit_buffer_vs_volatility(days=30):
-    """Analyze if Rollbit buffer rates correlate with market volatility"""
-    # This would require fetching volatility data as well
-    st.warning("This feature is under development")
-    return None
-
 def consolidate_results(results_dict):
     """Consolidate analysis results into a summary dataframe"""
     summary_data = []
@@ -608,16 +600,16 @@ def main():
         summary_df = consolidate_results(results_dict)
         
         if not summary_df.empty:
-            # Sort by correlation strength
-            summary_df = summary_df.sort_values(by='spread_volatility_correlation', 
-                                              key=abs, ascending=False)
+            # Sort by correlation strength (avoiding abs() function)
+            summary_df['abs_correlation'] = summary_df['spread_volatility_correlation'].apply(lambda x: abs(x))
+            summary_df = summary_df.sort_values(by='abs_correlation', ascending=False)
             
-            # Display summary table
-            st.dataframe(summary_df)
+            # Display summary table (without the abs column)
+            st.dataframe(summary_df.drop(columns=['abs_correlation']))
             
             # Create correlation distribution plot
             fig, ax = plt.subplots(figsize=(10, 6))
-            sns.histplot(summary_df['spread_volatility_correlation'], kde=True, ax=ax)
+            ax.hist(summary_df['spread_volatility_correlation'], bins=10, alpha=0.7)
             ax.set_xlabel('Correlation: Spread vs. Volatility')
             ax.set_ylabel('Count')
             ax.set_title('Distribution of Spread-Volatility Correlations Across Pairs')
@@ -629,7 +621,7 @@ def main():
             
             # Create lag distribution plot
             fig, ax = plt.subplots(figsize=(10, 6))
-            sns.histplot(summary_df['best_lag_hours'], kde=True, bins=10, ax=ax)
+            ax.hist(summary_df['best_lag_hours'], bins=10, alpha=0.7)
             ax.set_xlabel('Best Lag (hours)')
             ax.set_ylabel('Count')
             ax.set_title('Distribution of Lead-Lag Relationships')
@@ -644,10 +636,10 @@ def main():
             
             # Calculate aggregate statistics
             avg_corr = summary_df['spread_volatility_correlation'].mean()
-            abs_avg_corr = summary_df['spread_volatility_correlation'].abs().mean()
+            avg_abs_corr = summary_df['abs_correlation'].mean()
             avg_lag = summary_df['best_lag_hours'].mean()
             
-            st.write(f"**Average Correlation:** {avg_corr:.4f} (Absolute: {abs_avg_corr:.4f})")
+            st.write(f"**Average Correlation:** {avg_corr:.4f} (Absolute: {avg_abs_corr:.4f})")
             st.write(f"**Average Optimal Lag:** {avg_lag:.2f} hours")
             
             # Interpret results
@@ -658,11 +650,11 @@ def main():
             else:
                 st.write("**Overall Finding:** Spread and volatility changes occur nearly simultaneously")
             
-            if abs_avg_corr > 0.7:
+            if avg_abs_corr > 0.7:
                 st.write("**Correlation Strength:** Very strong correlation between spreads and volatility")
-            elif abs_avg_corr > 0.5:
+            elif avg_abs_corr > 0.5:
                 st.write("**Correlation Strength:** Moderate correlation between spreads and volatility")
-            elif abs_avg_corr > 0.3:
+            elif avg_abs_corr > 0.3:
                 st.write("**Correlation Strength:** Weak correlation between spreads and volatility")
             else:
                 st.write("**Correlation Strength:** Very weak correlation between spreads and volatility")
@@ -691,13 +683,14 @@ def main():
             buffer_spread_corr = fetch_rollbit_buffer_vs_spread(days)
             
             if buffer_spread_corr is not None and not buffer_spread_corr.empty:
-                buffer_spread_corr = buffer_spread_corr.sort_values(
-                    by='correlation', key=abs, ascending=False)
-                st.dataframe(buffer_spread_corr)
+                # Sort by correlation strength (avoiding abs() function)
+                buffer_spread_corr['abs_correlation'] = buffer_spread_corr['correlation'].apply(lambda x: abs(x))
+                buffer_spread_corr = buffer_spread_corr.sort_values(by='abs_correlation', ascending=False)
+                st.dataframe(buffer_spread_corr.drop(columns=['abs_correlation']))
                 
                 # Plot correlation distribution
                 fig, ax = plt.subplots(figsize=(10, 6))
-                sns.histplot(buffer_spread_corr['correlation'], kde=True, ax=ax)
+                ax.hist(buffer_spread_corr['correlation'], bins=10, alpha=0.7)
                 ax.set_xlabel('Correlation: Rollbit Buffer vs Market Spread')
                 ax.set_ylabel('Count')
                 ax.set_title('Distribution of Buffer-Spread Correlations')
@@ -710,26 +703,21 @@ def main():
                 
                 # Interpretation
                 avg_corr = buffer_spread_corr['correlation'].mean()
-                abs_avg_corr = buffer_spread_corr['correlation'].abs().mean()
+                avg_abs_corr = buffer_spread_corr['abs_correlation'].mean()
                 
                 st.write(f"**Average Correlation:** {avg_corr:.4f}")
-                st.write(f"**Average Absolute Correlation:** {abs_avg_corr:.4f}")
+                st.write(f"**Average Absolute Correlation:** {avg_abs_corr:.4f}")
                 
-                if abs_avg_corr > 0.7:
+                if avg_abs_corr > 0.7:
                     st.write("**Finding:** Rollbit's buffer rates are strongly correlated with market spreads")
-                elif abs_avg_corr > 0.5:
+                elif avg_abs_corr > 0.5:
                     st.write("**Finding:** Rollbit's buffer rates are moderately correlated with market spreads")
-                elif abs_avg_corr > 0.3:
+                elif avg_abs_corr > 0.3:
                     st.write("**Finding:** Rollbit's buffer rates are weakly correlated with market spreads")
                 else:
                     st.write("**Finding:** Rollbit's buffer rates show very little correlation with market spreads")
             else:
                 st.warning("No data available for Rollbit buffer vs spread analysis")
-            
-            # Analysis of Rollbit's buffer rates vs volatility would go here
-            st.markdown("### Rollbit Buffer Rate vs Market Volatility Correlation")
-            fetch_rollbit_buffer_vs_volatility(days)
-            
         else:
             st.warning("Please select a pair for Rollbit comparison")
 
