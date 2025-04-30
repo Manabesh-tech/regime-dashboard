@@ -87,7 +87,25 @@ def fetch_historical_spreads(pair_name, days=7):
     try:
         df = pd.read_sql(query, engine)
         if df.empty:
-            return None
+            # Try alternative query if no data found
+            alt_query = f"""
+            SELECT 
+                time_group,
+                source,
+                fee1 as spread
+            FROM 
+                oracle_exchange_fee
+            WHERE 
+                time_group BETWEEN '{start_time}' AND '{end_time}'
+                AND pair_name = '{pair_name}'
+                AND fee1 > 0.00001
+                AND fee1 < 0.05
+            ORDER BY 
+                time_group
+            """
+            df = pd.read_sql(alt_query, engine)
+            if df.empty:
+                return None
             
         # Convert time_group to datetime
         df['timestamp'] = pd.to_datetime(df['time_group'])
@@ -109,14 +127,15 @@ def fetch_historical_spreads(pair_name, days=7):
         st.error(f"Error fetching historical spreads for {pair_name}: {e}")
         return None
 
-# Calculate historical volatility with outlier filtering
+# Calculate historical volatility with improved granularity and method
 @st.cache_data(ttl=600)
 def fetch_historical_prices(pair_name, days=7):
-    """Fetch historical price data for volatility calculation with outlier handling"""
+    """Fetch historical price data for volatility calculation with improved granularity"""
     # Calculate time range
     end_time = datetime.now(pytz.utc)
     start_time = end_time - timedelta(days=days)
     
+    # Use a more direct and comprehensive query to get more data points
     query = f"""
     SELECT 
         created_at,
@@ -133,99 +152,215 @@ def fetch_historical_prices(pair_name, days=7):
     try:
         df = pd.read_sql(query, engine)
         if df.empty:
-            return None
+            st.warning(f"No price data available for {pair_name}. Trying alternative data source...")
             
+            # Try alternative query using oracle pricing data
+            alt_query = f"""
+            SELECT 
+                time_group as created_at,
+                price as deal_price
+            FROM 
+                oracle_pricing
+            WHERE 
+                time_group BETWEEN '{start_time}' AND '{end_time}'
+                AND pair_name = '{pair_name}'
+            ORDER BY 
+                time_group
+            """
+            
+            df = pd.read_sql(alt_query, engine)
+            if df.empty:
+                return None
+        
         # Convert created_at to datetime
         df['timestamp'] = pd.to_datetime(df['created_at'])
         
         # Detect and filter outliers (prices that are more than 3 std devs from mean)
         mean_price = df['deal_price'].mean()
         std_price = df['deal_price'].std()
-        lower_bound = mean_price - (3 * std_price)
-        upper_bound = mean_price + (3 * std_price)
-        df = df[(df['deal_price'] > lower_bound) & (df['deal_price'] < upper_bound)]
+        if std_price > 0:  # Avoid division by zero
+            lower_bound = mean_price - (3 * std_price)
+            upper_bound = mean_price + (3 * std_price)
+            df = df[(df['deal_price'] > lower_bound) & (df['deal_price'] < upper_bound)]
         
-        # Resample to hourly intervals
-        df['hour'] = df['timestamp'].dt.floor('H')
-        hourly_df = df.groupby('hour').agg({
-            'deal_price': ['first', 'last', 'mean', 'max', 'min', 'count']
+        # For more granular volatility, use 5-minute intervals instead of hourly
+        df['interval'] = df['timestamp'].dt.floor('5min')
+        
+        # Ensure sufficient data points in each interval
+        interval_counts = df.groupby('interval').size()
+        valid_intervals = interval_counts[interval_counts >= 3].index
+        df = df[df['interval'].isin(valid_intervals)]
+        
+        if len(df) < 10:  # Need minimum data points
+            return None
+            
+        # Calculate prices for each interval
+        interval_df = df.groupby('interval').agg({
+            'deal_price': ['first', 'last', 'mean', 'max', 'min', 'count', 'std']
         })
         
         # Flatten multi-index columns
-        hourly_df.columns = ['_'.join(col).strip() for col in hourly_df.columns.values]
-        hourly_df = hourly_df.reset_index()
+        interval_df.columns = ['_'.join(col).strip() for col in interval_df.columns.values]
+        interval_df = interval_df.reset_index()
         
-        # Additional check to ensure we have enough values for volatility calculation
-        hourly_df = hourly_df[hourly_df['deal_price_count'] >= 5]
-        
-        return hourly_df
+        # Ensure we have enough intervals
+        if len(interval_df) < 5:
+            return None
+            
+        return interval_df
     except Exception as e:
         st.error(f"Error fetching historical prices for {pair_name}: {e}")
         return None
 
-def calculate_volatility(price_df, window=24):
-    """Calculate rolling volatility from price data with better outlier handling"""
-    if price_df is None or len(price_df) < window:
+def calculate_volatility(price_df, window_minutes=60):
+    """Calculate rolling volatility from price data with more granular timeframes"""
+    if price_df is None or len(price_df) < 10:
         return None
     
     # Create a copy to avoid warnings
     vol_df = price_df.copy()
     
+    # Sort by time to ensure correct calculations
+    vol_df = vol_df.sort_values('interval')
+    
     # Calculate returns (with sanity check to avoid division by zero or negative prices)
     vol_df['prev_price'] = vol_df['deal_price_last'].shift(1)
     vol_df = vol_df[vol_df['prev_price'] > 0]  # Filter out zero or negative previous prices
     
+    # Use log returns for better statistical properties
     vol_df['log_return'] = np.log(vol_df['deal_price_last'] / vol_df['prev_price'])
     
+    # Add interval-specific volatility (using price std dev within interval)
+    vol_df['interval_volatility'] = vol_df['deal_price_std'] / vol_df['deal_price_mean']
+    
     # Filter out extreme returns (more than 5 standard deviations)
-    mean_return = vol_df['log_return'].mean()
-    std_return = vol_df['log_return'].std()
-    lower_bound = mean_return - (5 * std_return)
-    upper_bound = mean_return + (5 * std_return)
-    vol_df = vol_df[(vol_df['log_return'] > lower_bound) & (vol_df['log_return'] < upper_bound)]
+    if len(vol_df) > 5:  # Need enough data for meaningful statistics
+        mean_return = vol_df['log_return'].mean()
+        std_return = vol_df['log_return'].std()
+        if std_return > 0:  # Avoid division by zero
+            lower_bound = mean_return - (5 * std_return)
+            upper_bound = mean_return + (5 * std_return)
+            vol_df = vol_df[(vol_df['log_return'] > lower_bound) & (vol_df['log_return'] < upper_bound)]
     
-    # Calculate rolling volatility (annualized)
-    # Use a smaller window if we don't have enough data
-    actual_window = min(window, len(vol_df) // 2) if len(vol_df) < window * 2 else window
+    # Convert window_minutes to number of 5-minute intervals
+    window_size = max(2, int(window_minutes / 5))
     
-    vol_df['volatility_1h'] = vol_df['log_return'].rolling(window=1).std() * np.sqrt(24 * 365)
-    vol_df['volatility_24h'] = vol_df['log_return'].rolling(window=actual_window).std() * np.sqrt(24 * 365)
+    # Ensure window size is reasonable given available data
+    window_size = min(window_size, len(vol_df) // 3)
+    window_size = max(2, window_size)  # Ensure at least 2
+    
+    # Calculate multiple volatility measures
+    # 1. Short-term (5-min intervals rolling)
+    vol_df['volatility_short'] = vol_df['log_return'].rolling(window=3).std() * np.sqrt(12 * 24 * 365)
+    
+    # 2. Medium-term (approximately 1-hour rolling)
+    vol_df['volatility_medium'] = vol_df['log_return'].rolling(window=window_size).std() * np.sqrt(12 * 24 * 365)
+    
+    # 3. Full period volatility
+    vol_df['volatility_full'] = vol_df['log_return'].expanding().std() * np.sqrt(12 * 24 * 365)
+    
+    # 4. EWMA volatility (gives more weight to recent observations)
+    vol_df['volatility_ewma'] = vol_df['log_return'].ewm(span=window_size).std() * np.sqrt(12 * 24 * 365)
     
     # Handle missing values without using inplace=True
-    vol_df['volatility_1h'] = vol_df['volatility_1h'].bfill()
-    vol_df['volatility_24h'] = vol_df['volatility_24h'].fillna(vol_df['volatility_1h'])
+    for col in ['volatility_short', 'volatility_medium', 'volatility_full', 'volatility_ewma']:
+        vol_df[col] = vol_df[col].bfill().ffill()
+    
+    # Add timestamps in different formats for easier joining
+    vol_df['hour'] = vol_df['interval'].dt.floor('H')
     
     return vol_df
 
 def combine_spread_volatility_data(spread_df, vol_df):
-    """Combine spread and volatility data into a single dataframe"""
+    """Combine spread and volatility data with improved matching logic"""
     if spread_df is None or vol_df is None:
         return None
     
     # Ensure the indices are aligned
     spread_df = spread_df.reset_index()
+    vol_df = vol_df.reset_index()
+    
+    # Create hourly timestamps for joining
+    if 'hour' not in spread_df.columns and 'hour' in spread_df.index.names:
+        spread_df['hour'] = spread_df.index.get_level_values('hour')
+    elif 'hour' not in spread_df.columns:
+        spread_df['hour'] = pd.to_datetime(spread_df['hour'])
+    
+    # Create an hourly grouped volatility dataframe
+    hourly_vol_df = vol_df.groupby('hour').agg({
+        'volatility_short': 'mean',
+        'volatility_medium': 'mean',
+        'volatility_full': 'mean',
+        'volatility_ewma': 'mean',
+        'interval_volatility': 'mean',
+        'log_return': ['mean', 'std'],
+        'deal_price_mean': 'mean'
+    })
+    
+    # Flatten multi-index columns if needed
+    if isinstance(hourly_vol_df.columns, pd.MultiIndex):
+        hourly_vol_df.columns = ['_'.join(col).strip() for col in hourly_vol_df.columns.values]
+    
+    hourly_vol_df = hourly_vol_df.reset_index()
     
     # Merge on the hour
     merged_df = pd.merge(
         spread_df,
-        vol_df[['hour', 'volatility_1h', 'volatility_24h', 'log_return', 'deal_price_mean']], 
-        left_on='hour', 
+        hourly_vol_df,
+        left_on='hour',
         right_on='hour',
         how='inner'
     )
     
+    # If we don't have enough data points after merging, try a more flexible approach
+    if len(merged_df) < 5:
+        # Convert times to unix timestamps for proximity matching
+        spread_times = pd.to_datetime(spread_df['hour']).astype(int) // 10**9
+        vol_times = pd.to_datetime(hourly_vol_df['hour']).astype(int) // 10**9
+        
+        # Create a proximity matrix
+        proximity_pairs = []
+        for s_idx, s_time in enumerate(spread_times):
+            for v_idx, v_time in enumerate(vol_times):
+                time_diff = abs(s_time - v_time)
+                if time_diff < 3600:  # Within 1 hour
+                    proximity_pairs.append((s_idx, v_idx, time_diff))
+        
+        # Sort by time difference
+        proximity_pairs.sort(key=lambda x: x[2])
+        
+        # Create merged dataframe from closest matches
+        matched_data = []
+        used_s = set()
+        used_v = set()
+        
+        for s_idx, v_idx, _ in proximity_pairs:
+            if s_idx not in used_s and v_idx not in used_v:
+                s_row = spread_df.iloc[s_idx].to_dict()
+                v_row = hourly_vol_df.iloc[v_idx].to_dict()
+                combined_row = {**s_row, **v_row}
+                matched_data.append(combined_row)
+                used_s.add(s_idx)
+                used_v.add(v_idx)
+        
+        if matched_data:
+            merged_df = pd.DataFrame(matched_data)
+    
     return merged_df
 
 def analyze_relationship(combined_df):
-    """Analyze the relationship between spreads and volatility"""
+    """Analyze the relationship between spreads and volatility with multiple measures"""
     if combined_df is None or len(combined_df) < 10:
         return None
     
-    # Create correlation matrix
-    corr_columns = ['avg_spread', 'volatility_1h', 'volatility_24h']
+    # Create correlation matrix with all volatility measures
+    vol_cols = [col for col in combined_df.columns if 'volatility' in col]
+    corr_columns = ['avg_spread'] + vol_cols
+    
+    # Make sure all required columns exist
     available_columns = [col for col in corr_columns if col in combined_df.columns]
     
-    if len(available_columns) < 2:
+    if len(available_columns) < 3:  # Need at least spread and two vol measures
         return None
     
     # Drop rows with NaN values for correlation calculation
@@ -236,13 +371,20 @@ def analyze_relationship(combined_df):
         
     correlation = clean_df_corr.corr()
     
-    # For regression, explicitly drop rows with NaN in the required columns
-    reg_df = combined_df[['volatility_24h', 'avg_spread']].dropna()
+    # Determine which volatility measure has the strongest correlation with spread
+    spread_correlations = correlation.loc['avg_spread', vol_cols]
+    best_vol_col = spread_correlations.abs().idxmax()
+    best_corr = spread_correlations[best_vol_col]
+    
+    # For regression, use the volatility measure with the strongest correlation
+    reg_df = combined_df[['avg_spread', best_vol_col]].dropna()
     
     if len(reg_df) < 5:  # Need at least a few data points
         st.warning("Not enough valid data points for regression analysis")
         return {
             'correlation': correlation,
+            'best_volatility_measure': best_vol_col,
+            'best_volatility_correlation': best_corr,
             'regression_coefficient': None,
             'r2': None,
             'lead_lag': None,
@@ -250,7 +392,7 @@ def analyze_relationship(combined_df):
         }
     
     # Simple linear regression with cleaned data
-    X = reg_df['volatility_24h'].values.reshape(-1, 1)
+    X = reg_df[best_vol_col].values.reshape(-1, 1)
     y = reg_df['avg_spread'].values
     
     try:
@@ -266,7 +408,7 @@ def analyze_relationship(combined_df):
             if lag < 0:
                 # Spread leads volatility
                 spread_shifted = combined_df['avg_spread'].shift(-lag)
-                lag_corr = spread_shifted.corr(combined_df['volatility_24h'])
+                lag_corr = spread_shifted.corr(combined_df[best_vol_col])
                 leads_lags.append({
                     'lag': lag,
                     'correlation': lag_corr,
@@ -274,7 +416,7 @@ def analyze_relationship(combined_df):
                 })
             else:
                 # Volatility leads spread
-                vol_shifted = combined_df['volatility_24h'].shift(lag)
+                vol_shifted = combined_df[best_vol_col].shift(lag)
                 lag_corr = combined_df['avg_spread'].corr(vol_shifted)
                 leads_lags.append({
                     'lag': lag,
@@ -296,6 +438,8 @@ def analyze_relationship(combined_df):
         
         return {
             'correlation': correlation,
+            'best_volatility_measure': best_vol_col,
+            'best_volatility_correlation': best_corr,
             'regression_coefficient': model.coef_[0],
             'r2': r2,
             'lead_lag': leads_lags_df,
@@ -306,6 +450,8 @@ def analyze_relationship(combined_df):
         st.error(f"Error in regression analysis: {e}")
         return {
             'correlation': correlation,
+            'best_volatility_measure': best_vol_col,
+            'best_volatility_correlation': best_corr,
             'regression_coefficient': None,
             'r2': None,
             'lead_lag': None,
@@ -313,10 +459,31 @@ def analyze_relationship(combined_df):
         }
 
 def plot_spread_volatility(combined_df, pair_name):
-    """Plot spread vs. volatility relationship with improved visualization"""
+    """Plot spread vs. volatility relationship with multiple volatility measures"""
     if combined_df is None or len(combined_df) < 5:
         st.warning(f"Not enough data for {pair_name} to create plots")
         return
+    
+    # Identify which volatility measures are available
+    vol_cols = [col for col in combined_df.columns if 'volatility' in col]
+    if not vol_cols:
+        st.warning(f"No volatility measures available for {pair_name}")
+        return
+    
+    # Find the volatility measure with strongest correlation to spread
+    correlations = {}
+    for col in vol_cols:
+        corr = combined_df['avg_spread'].corr(combined_df[col])
+        if not pd.isna(corr):
+            correlations[col] = corr
+    
+    if not correlations:
+        st.warning(f"Cannot calculate correlations for {pair_name}")
+        return
+        
+    # Use the volatility measure with the strongest correlation
+    best_vol_col = max(correlations.items(), key=lambda x: abs(x[1]))[0]
+    best_corr = correlations[best_vol_col]
     
     # Create a copy and ensure datetime format for x-axis
     plot_df = combined_df.copy()
@@ -330,31 +497,36 @@ def plot_spread_volatility(combined_df, pair_name):
     upper_bound = q3_spread + (1.5 * iqr_spread)
     plot_df = plot_df[(plot_df['avg_spread'] >= lower_bound) & (plot_df['avg_spread'] <= upper_bound)]
     
-    q1_vol = plot_df['volatility_24h'].quantile(0.05)
-    q3_vol = plot_df['volatility_24h'].quantile(0.95)
+    # Same for volatility
+    q1_vol = plot_df[best_vol_col].quantile(0.05)
+    q3_vol = plot_df[best_vol_col].quantile(0.95)
     iqr_vol = q3_vol - q1_vol
     lower_bound = q1_vol - (1.5 * iqr_vol)
     upper_bound = q3_vol + (1.5 * iqr_vol)
-    plot_df = plot_df[(plot_df['volatility_24h'] >= lower_bound) & (plot_df['volatility_24h'] <= upper_bound)]
+    plot_df = plot_df[(plot_df[best_vol_col] >= lower_bound) & (plot_df[best_vol_col] <= upper_bound)]
     
     # Sort by time for proper time series display
     plot_df = plot_df.sort_values('hour')
     
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+    # Create figure with three subplots (time series, scatter, and multiple volatilities)
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 15))
     
     # First subplot - Time series
-    ax1.set_title(f"Spread vs. Volatility for {pair_name}", fontsize=14, fontweight='bold')
+    ax1.set_title(f"Spread vs. {best_vol_col.replace('_', ' ').title()} for {pair_name}", 
+                 fontsize=14, fontweight='bold')
     
     # Plot spread on left y-axis
-    spread_line = ax1.plot(plot_df['hour'], plot_df['avg_spread'] * 10000, 'b-', label='Spread (bps)', linewidth=2)
+    spread_line = ax1.plot(plot_df['hour'], plot_df['avg_spread'] * 10000, 'b-', 
+                          label='Spread (bps)', linewidth=2)
     ax1.set_ylabel('Spread (basis points)', fontsize=12)
     ax1.tick_params(axis='y', labelcolor='b')
     
     # Create twin axis for volatility
-    ax3 = ax1.twinx()
-    vol_line = ax3.plot(plot_df['hour'], plot_df['volatility_24h'] * 100, 'r-', label='Volatility (%)', linewidth=2)
-    ax3.set_ylabel('Annualized Volatility (%)', fontsize=12, color='r')
-    ax3.tick_params(axis='y', labelcolor='r')
+    ax1_twin = ax1.twinx()
+    vol_line = ax1_twin.plot(plot_df['hour'], plot_df[best_vol_col] * 100, 'r-', 
+                           label=f'{best_vol_col.replace("_", " ").title()} (%)', linewidth=2)
+    ax1_twin.set_ylabel('Annualized Volatility (%)', fontsize=12, color='r')
+    ax1_twin.tick_params(axis='y', labelcolor='r')
     
     # Combine legends
     lines = spread_line + vol_line
@@ -366,23 +538,24 @@ def plot_spread_volatility(combined_df, pair_name):
     plt.setp(ax1.xaxis.get_majorticklabels(), rotation=45)
     ax1.grid(True, alpha=0.3)
     
-    # For the scatter plot, filter out rows with NaN values
-    clean_df = plot_df[['volatility_24h', 'avg_spread']].dropna()
+    # Second subplot - Scatter plot with best volatility measure
+    clean_df = plot_df[['avg_spread', best_vol_col]].dropna()
     
     if len(clean_df) < 5:
         ax2.text(0.5, 0.5, "Not enough data points for regression analysis", 
                  horizontalalignment='center', verticalalignment='center',
                  transform=ax2.transAxes, fontsize=14)
     else:
-        # Second subplot - Scatter plot with cleaned data
-        ax2.scatter(clean_df['volatility_24h'] * 100, clean_df['avg_spread'] * 10000, alpha=0.6, s=50)
+        # Scatter plot with cleaned data
+        ax2.scatter(clean_df[best_vol_col] * 100, clean_df['avg_spread'] * 10000, alpha=0.6, s=50)
         ax2.set_xlabel('Annualized Volatility (%)', fontsize=12)
         ax2.set_ylabel('Spread (basis points)', fontsize=12)
-        ax2.set_title('Spread vs. Volatility Correlation', fontsize=14, fontweight='bold')
+        ax2.set_title(f'Spread vs. {best_vol_col.replace("_", " ").title()} Correlation', 
+                     fontsize=14, fontweight='bold')
         ax2.grid(True, alpha=0.3)
         
         # Add regression line using clean data
-        X = clean_df['volatility_24h'].values.reshape(-1, 1)
+        X = clean_df[best_vol_col].values.reshape(-1, 1)
         y = clean_df['avg_spread'].values
         
         try:
@@ -397,13 +570,33 @@ def plot_spread_volatility(combined_df, pair_name):
             ax2.legend(fontsize=10)
             
             # Add correlation coefficient
-            corr = clean_df['volatility_24h'].corr(clean_df['avg_spread'])
-            ax2.annotate(f"Correlation: {corr:.4f}", xy=(0.02, 0.95), xycoords='axes fraction',
+            ax2.annotate(f"Correlation: {best_corr:.4f}", xy=(0.02, 0.95), xycoords='axes fraction',
                          fontsize=12, bbox=dict(boxstyle="round,pad=0.3", fc="white", alpha=0.8))
         except Exception as e:
             ax2.text(0.5, 0.5, f"Error in regression: {str(e)}", 
                      horizontalalignment='center', verticalalignment='center',
                      transform=ax2.transAxes)
+    
+    # Third subplot - Compare all volatility measures
+    all_vol_cols = [col for col in vol_cols if col in plot_df.columns]
+    
+    if len(all_vol_cols) > 1:
+        ax3.set_title(f"Comparison of Different Volatility Measures for {pair_name}", 
+                     fontsize=14, fontweight='bold')
+        
+        for col in all_vol_cols:
+            if col in plot_df.columns and not plot_df[col].isna().all():
+                ax3.plot(plot_df['hour'], plot_df[col] * 100, 
+                        label=f"{col.replace('_', ' ').title()}", linewidth=1.5)
+        
+        ax3.set_xlabel('Time', fontsize=12)
+        ax3.set_ylabel('Annualized Volatility (%)', fontsize=12)
+        ax3.legend(loc='upper right')
+        ax3.grid(True, alpha=0.3)
+        ax3.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter('%Y-%m-%d'))
+        plt.setp(ax3.xaxis.get_majorticklabels(), rotation=45)
+    else:
+        ax3.set_visible(False)  # Hide the third subplot if only one volatility measure
     
     plt.tight_layout()
     return fig
@@ -927,7 +1120,9 @@ def consolidate_results(results_dict):
     for pair, result in results_dict.items():
         if result and 'correlation' in result:
             try:
-                spread_vol_corr = result['correlation'].loc['avg_spread', 'volatility_24h']
+                best_vol_col = result.get('best_volatility_measure', 'volatility_24h')
+                best_vol_corr = result.get('best_volatility_correlation', 
+                                       result['correlation'].loc['avg_spread', best_vol_col])
                 
                 # Handle case where best_lag might be None
                 best_lag = None
@@ -941,7 +1136,8 @@ def consolidate_results(results_dict):
                 
                 summary_data.append({
                     'pair_name': pair,
-                    'spread_volatility_correlation': spread_vol_corr,
+                    'volatility_measure': best_vol_col,
+                    'spread_volatility_correlation': best_vol_corr,
                     'best_lag_hours': best_lag,
                     'best_lag_correlation': best_lag_corr,
                     'r2_score': r2,
@@ -1216,7 +1412,6 @@ def calculate_dynamic_buffer_rate(market_spread, token_type):
         
         # Visualization of the strategy
         st.markdown("### Visualization of the Recommended Strategy")
-        
         # Create example visualization
         spreads = np.linspace(0.0001, 0.005, 100)  # 1 to 50 basis points
         
@@ -1275,6 +1470,26 @@ def main():
             default=default_selection
         )
     
+    # Add volatility timeframe settings
+    st.sidebar.header("Volatility Settings")
+    vol_window = st.sidebar.slider(
+        "Volatility Window (minutes)", 
+        min_value=5, 
+        max_value=240, 
+        value=60,
+        step=5,
+        help="Time window used for calculating rolling volatility. Shorter windows capture more recent market movements."
+    )
+    
+    # Add minimum data points threshold
+    min_data_points = st.sidebar.slider(
+        "Minimum Data Points",
+        min_value=5,
+        max_value=50,
+        value=10,
+        help="Minimum number of data points required for analysis. Increase for more reliable results, decrease for more coverage."
+    )
+    
     # Main content
     tab1, tab2, tab3 = st.tabs(["Individual Pair Analysis", "Summary Results", "Rollbit Analysis"])
     
@@ -1297,13 +1512,18 @@ def main():
                 price_df = fetch_historical_prices(pair, days=days)
                 
                 if price_df is not None and not price_df.empty:
-                    vol_df = calculate_volatility(price_df)
+                    vol_df = calculate_volatility(price_df, window_minutes=vol_window)
                 else:
                     vol_df = None
+                    st.warning(f"No price data available for {pair}. Cannot calculate volatility.")
                 
                 # Combine data
                 if spread_df is not None and vol_df is not None:
                     combined_df = combine_spread_volatility_data(spread_df, vol_df)
+                    
+                    if combined_df is None or len(combined_df) < min_data_points:
+                        st.warning(f"Not enough matched data points for {pair} (found {0 if combined_df is None else len(combined_df)}, need {min_data_points}).")
+                        continue
                     
                     # Analyze relationship
                     results = analyze_relationship(combined_df)
@@ -1315,7 +1535,7 @@ def main():
                         st.pyplot(fig)
                     
                     # Plot lead-lag relationship
-                    if results and 'lead_lag' in results:
+                    if results and 'lead_lag' in results and results['lead_lag'] is not None:
                         lead_lag_fig = plot_lead_lag(results['lead_lag'], pair)
                         if lead_lag_fig:
                             st.pyplot(lead_lag_fig)
@@ -1329,6 +1549,10 @@ def main():
                         
                         with col2:
                             st.markdown("**Regression Results**")
+                            if results.get('best_volatility_measure'):
+                                st.write(f"Best Volatility Measure: {results['best_volatility_measure'].replace('_', ' ').title()}")
+                                st.write(f"Correlation: {results['best_volatility_correlation']:.4f}")
+                            
                             if results['regression_coefficient'] is not None:
                                 st.write(f"Coefficient: {results['regression_coefficient']:.6f}")
                                 st.write(f"R² Score: {results['r2']:.4f}")
@@ -1341,7 +1565,10 @@ def main():
                             else:
                                 st.write("Lead-lag analysis not available")
                 else:
-                    st.warning(f"Not enough data available for {pair}")
+                    if spread_df is None:
+                        st.warning(f"No spread data available for {pair}")
+                    if vol_df is None and price_df is not None:
+                        st.warning(f"Could not calculate volatility for {pair}")
     
     with tab2:
         st.markdown("## Summary Results")
@@ -1355,8 +1582,24 @@ def main():
             summary_df['abs_correlation'] = summary_df['spread_volatility_correlation'].apply(lambda x: abs(x) if pd.notna(x) else 0)
             summary_df = summary_df.sort_values(by='abs_correlation', ascending=False)
             
+            # Create a nicer display dataframe
+            display_df = summary_df.copy()
+            display_df = display_df.rename(columns={
+                'pair_name': 'Pair',
+                'volatility_measure': 'Best Volatility Measure',
+                'spread_volatility_correlation': 'Correlation',
+                'best_lag_hours': 'Best Lag (hours)',
+                'best_lag_correlation': 'Lag Correlation',
+                'r2_score': 'R² Score'
+            })
+            
+            # Format the volatility measure names
+            display_df['Best Volatility Measure'] = display_df['Best Volatility Measure'].apply(
+                lambda x: x.replace('_', ' ').title() if isinstance(x, str) else 'N/A'
+            )
+            
             # Display summary table (without the abs column)
-            st.dataframe(summary_df.drop(columns=['abs_correlation']))
+            st.dataframe(display_df.drop(columns=['abs_correlation']))
             
             # Create correlation distribution plot
             fig, ax = plt.subplots(figsize=(10, 6))
@@ -1449,6 +1692,45 @@ def main():
                 using volatility as your primary metric could help you **anticipate spread changes**
                 and adjust buffer rates proactively.
                 """)
+                
+            # Add example implementation
+            st.markdown("### Example Implementation")
+            
+            if avg_abs_corr > 0.3:
+                weight_spread = 0.7
+                weight_vol = 0.3
+            else:
+                weight_spread = 0.9
+                weight_vol = 0.1
+                
+            st.code(f"""
+# Example dynamic buffer rate adjustment function using both metrics
+def calculate_dynamic_buffer_rate(market_spread, volatility, token_type):
+    # Base parameters
+    spread_multiplier = 12.0  # Based on Rollbit's average ratio
+    volatility_weight = {weight_vol:.1f}  # Weight for volatility
+    spread_weight = {weight_spread:.1f}   # Weight for spread
+    
+    # Base buffer varies by token type
+    if token_type == 'Major':
+        base_buffer = 0.02  # 2%
+    elif token_type == 'Stablecoin':
+        base_buffer = 0.01  # 1%
+    else:  # Altcoin
+        base_buffer = 0.025  # 2.5%
+    
+    # Calculate buffer rate components
+    spread_component = market_spread * spread_multiplier
+    volatility_component = volatility * 0.10  # Convert volatility to buffer contribution
+    
+    # Weighted combination
+    buffer_rate = (spread_component * spread_weight) + (volatility_component * volatility_weight) + base_buffer
+    
+    # Apply reasonable bounds
+    buffer_rate = max(0.01, min(0.10, buffer_rate))
+    
+    return buffer_rate
+            """, language="python")
         else:
             st.warning("No results available for summary. Please analyze some pairs first.")
             
