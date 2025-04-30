@@ -33,7 +33,14 @@ st.write(f"Current Singapore Time: {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
 # Fetch pairs
 @st.cache_data(ttl=600)
 def fetch_pairs():
-    query = "SELECT DISTINCT pair_name FROM public.trade_fill_fresh ORDER BY pair_name"
+    # Use a more specific query to only fetch active pairs
+    query = """
+    SELECT DISTINCT pair_name 
+    FROM public.trade_fill_fresh 
+    WHERE created_at > NOW() - INTERVAL '1 day'
+    ORDER BY pair_name
+    """
+    
     try:
         df = pd.read_sql(query, engine)
         if df.empty:
@@ -239,7 +246,7 @@ def fetch_market_spread_data(pair_name):
       FROM 
         oracle_exchange_fee
       WHERE 
-        time_group BETWEEN '{start_time_utc}' AND '{end_time_utc}'
+        time_group > NOW() - INTERVAL '1 day'
         AND pair_name = '{pair_name}'
         AND source IN ('binanceFuture', 'gateFuture', 'hyperliquidFuture')
       GROUP BY 
