@@ -279,10 +279,11 @@ def create_transposed_spread_matrix():
         'date': date_labels
     }
     
-    # Add data for each pair
+    # Add data for each pair (using the pre-fetched spread_data)
     for pair in selected_pairs:
-        pair_df = fetch_market_spread_data(pair)
-        if pair_df is not None and not pair_df.empty:
+        if pair in spread_data:
+            pair_df = spread_data[pair]
+            
             # Create a series with spread values indexed by time_label
             spread_by_time = pd.Series(
                 pair_df['avg_spread'].values,
@@ -365,13 +366,20 @@ status_text = st.empty()
 
 # Fetch data for all selected pairs
 pair_data = {}
+spread_data = {}  # Add storage for spread data too
 for i, pair in enumerate(selected_pairs):
     progress_bar.progress(i / len(selected_pairs))
     status_text.text(f"Processing {pair} ({i+1}/{len(selected_pairs)})")
     
+    # Fetch edge and volatility data
     data = calculate_edge_volatility(pair)
     if data is not None:
         pair_data[pair] = data
+    
+    # Fetch spread data
+    spread = fetch_market_spread_data(pair)
+    if spread is not None:
+        spread_data[pair] = spread
 
 progress_bar.progress(1.0)
 status_text.text(f"Processed {len(pair_data)}/{len(selected_pairs)} pairs")
@@ -607,29 +615,33 @@ if pair_data:
         st.markdown("## Market Spreads Matrix (10min timeframe, Last 24 hours, Singapore Time)")
         st.markdown("### Spreads shown in basis points (1bp = 0.01%)")
         
-        # Create market spreads matrix
-        spread_df = create_transposed_spread_matrix()
-        
-        if not spread_df.empty:
-            # Display the matrix
-            display_spread_matrix(spread_df)
+        # Check if we have spread data
+        if spread_data:
+            # Create market spreads matrix
+            spread_df = create_transposed_spread_matrix()
             
-            # Legend
-            st.markdown("""
-            **Spread Legend:**
-            <span style='background-color:rgba(0, 180, 0, 0.9);color:white;padding:2px 6px;border-radius:3px;'>Very Low (<2.5)</span>
-            <span style='background-color:rgba(150, 255, 150, 0.9);color:black;padding:2px 6px;border-radius:3px;'>Low (2.5 to 5)</span>
-            <span style='background-color:rgba(255, 255, 150, 0.9);color:black;padding:2px 6px;border-radius:3px;'>Medium (5 to 10)</span>
-            <span style='background-color:rgba(255, 150, 0, 0.9);color:black;padding:2px 6px;border-radius:3px;'>High (10 to 20)</span>
-            <span style='background-color:rgba(255, 0, 0, 0.9);color:white;padding:2px 6px;border-radius:3px;'>Very High (>20)</span>
-            """, unsafe_allow_html=True)
-            
-            st.markdown("""
-            **Notes:**
-            - Market spreads are averaged from binanceFuture, gateFuture, and hyperliquidFuture
-            - Spreads are shown in basis points (1bp = 0.01%)
-            - Empty cells indicate no data for that time slot
-            """)
+            if not spread_df.empty:
+                # Display the matrix
+                display_spread_matrix(spread_df)
+                
+                # Legend
+                st.markdown("""
+                **Spread Legend:**
+                <span style='background-color:rgba(0, 180, 0, 0.9);color:white;padding:2px 6px;border-radius:3px;'>Very Low (<2.5)</span>
+                <span style='background-color:rgba(150, 255, 150, 0.9);color:black;padding:2px 6px;border-radius:3px;'>Low (2.5 to 5)</span>
+                <span style='background-color:rgba(255, 255, 150, 0.9);color:black;padding:2px 6px;border-radius:3px;'>Medium (5 to 10)</span>
+                <span style='background-color:rgba(255, 150, 0, 0.9);color:black;padding:2px 6px;border-radius:3px;'>High (10 to 20)</span>
+                <span style='background-color:rgba(255, 0, 0, 0.9);color:white;padding:2px 6px;border-radius:3px;'>Very High (>20)</span>
+                """, unsafe_allow_html=True)
+                
+                st.markdown("""
+                **Notes:**
+                - Market spreads are averaged from binanceFuture, gateFuture, and hyperliquidFuture
+                - Spreads are shown in basis points (1bp = 0.01%)
+                - Empty cells indicate no data for that time slot
+                """)
+            else:
+                st.warning("No spread data available for selected pairs.")
         else:
             st.warning("No spread data available for selected pairs.")
 
