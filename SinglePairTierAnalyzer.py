@@ -306,8 +306,8 @@ class EnhancedDepthTierAnalyzer:
         # New: Store time highest percentages
         self.time_highest_choppiness = {point: {} for point in self.point_counts}
         
-        # New: Store winrate data (only for 5000 ticks)
-        self.winrate_data = {5000: {}}
+        # New: Store validity rate data
+        self.validity_rates = {point: {} for point in self.point_counts}
 
     def fetch_and_analyze(self, pair_name, hours=24, progress_bar=None, use_replication=True, time_intervals=12):
         """Fetch data and calculate metrics for each depth tier with time-based analysis
@@ -463,6 +463,23 @@ class EnhancedDepthTierAnalyzer:
                                 'count': len(point_df)
                             }
                         
+                        # Calculate validity rates for each depth tier
+                        tier_validity_rates = {}
+                        for column in self.depth_tier_columns:
+                            if column in point_df.columns:
+                                # Convert to numeric and count valid entries (non-zero values)
+                                numeric_values = pd.to_numeric(point_df[column], errors='coerce')
+                                valid_count = (numeric_values > 0).sum()
+                                total_count = len(numeric_values)
+                                validity_rate = (valid_count / total_count) * 100 if total_count > 0 else 0
+                                
+                                # Store the validity rate
+                                tier = self.depth_tier_values[column]
+                                tier_validity_rates[tier] = validity_rate
+                                
+                        # Store the validity rates for this point count
+                        self.validity_rates[point_count] = tier_validity_rates
+                        
                         # Only perform time-based choppiness analysis for 5000 points to improve speed
                         if point_count == 5000:
                             # New: Historical analysis by time intervals
@@ -557,16 +574,15 @@ class EnhancedDepthTierAnalyzer:
                                     tier = self.depth_tier_values[column]
                                     tier_results[tier] = metrics
                                     
+                                    # Add validity rate
+                                    if tier in self.validity_rates[point_count]:
+                                        tier_results[tier]['validity_rate'] = self.validity_rates[point_count][tier]
+                                    
                                     # Add time highest percentage only for 5000 points
                                     if point_count == 5000 and tier in self.time_highest_choppiness[point_count]:
                                         tier_results[tier]['time_highest_choppiness'] = self.time_highest_choppiness[point_count][tier]
                                     
-                                    # Calculate winrate only for 5000 ticks
-                                    if point_count == 5000:
-                                        winrate = self._calculate_winrate(df_tier, column, point_count)
-                                        if winrate is not None:
-                                            tier_results[tier]['winrate'] = winrate
-                                            self.winrate_data[5000][tier] = winrate
+                                    # We're no longer calculating winrate
 
                         # Convert to DataFrame and sort appropriately
                         if point_count == 5000:
@@ -652,48 +668,7 @@ class EnhancedDepthTierAnalyzer:
             print(f"Error calculating metrics: {e}")
             return None
             
-    def _calculate_winrate(self, df, price_col, point_count):
-        """Calculate winrate for price actions (only for 5000 ticks)"""
-        try:
-            # Convert to numeric and drop any NaN values
-            prices = pd.to_numeric(df[price_col], errors='coerce').dropna()
-            prices = prices[prices>0]
-            if len(prices) < point_count * 0.8:  # Allow some flexibility for missing data
-                return None
-
-            # Take only the needed number of points
-            prices = prices.iloc[:point_count].copy()
-            
-            # For winrate, we'll use a simple approach: 
-            # Count how many price increases vs decreases over multiple timeframes
-            
-            # Define different timeframes to check (in ticks)
-            timeframes = [10, 20, 50, 100, 200]
-            results = []
-            
-            for tf in timeframes:
-                if len(prices) <= tf:
-                    continue
-                    
-                # Calculate price changes over this timeframe
-                price_shifts = prices.shift(-tf) - prices
-                increases = (price_shifts > 0).sum()
-                decreases = (price_shifts < 0).sum()
-                total = increases + decreases
-                
-                if total > 0:
-                    win_rate = (increases / total) * 100
-                    results.append(win_rate)
-            
-            # Average winrate across different timeframes
-            if results:
-                return sum(results) / len(results)
-            
-            return 50.0  # Neutral default if no results
-            
-        except Exception as e:
-            print(f"Error calculating winrate: {e}")
-            return None
+    # The winrate calculation method has been removed
 
     def _create_results_table(self, tier_results, sort_by='choppiness'):
         """Create a results table including time highest percentages
@@ -729,9 +704,9 @@ class EnhancedDepthTierAnalyzer:
 
         return df
 
-# Enhanced table display function with time highest percentage
+# Enhanced table display function with time highest percentage and validity rate
 def create_point_count_table(analyzer, point_count):
-    """Creates a clean, readable table with time highest choppiness percentages"""
+    """Creates a clean, readable table with time highest choppiness percentages and validity rates"""
     if analyzer.results[point_count] is None:
         st.info(f"No data available for {point_count} points analysis.")
         return
@@ -761,11 +736,7 @@ def create_point_count_table(analyzer, point_count):
     display_df = df.copy()
 
     # Select only the columns we want to display
-    display_columns = ['Tier', 'time_highest_choppiness', 'choppiness', 'direction_changes', 'tick_atr_pct', 'trend_strength']
-    
-    # Add winrate only for 5000 tick display
-    if point_count == 5000 and 'winrate' in display_df.columns:
-        display_columns.append('winrate')
+    display_columns = ['Tier', 'validity_rate', 'time_highest_choppiness', 'choppiness', 'direction_changes', 'tick_atr_pct', 'trend_strength']
     
     # Filter to columns that exist in the dataframe
     available_columns = [col for col in display_columns if col in display_df.columns]
@@ -773,12 +744,12 @@ def create_point_count_table(analyzer, point_count):
 
     # Rename columns for better display
     column_renames = {
+        'validity_rate': 'Validity Rate (%)',
         'time_highest_choppiness': '% Time Highest Choppiness',
         'direction_changes': 'Direction Changes (%)',
         'choppiness': 'Choppiness',
         'tick_atr_pct': 'Tick ATR %',
-        'trend_strength': 'Trend Strength',
-        'winrate': 'Win Rate (%)'
+        'trend_strength': 'Trend Strength'
     }
     
     # Only rename columns that exist
@@ -788,7 +759,7 @@ def create_point_count_table(analyzer, point_count):
     # Format numeric columns with appropriate decimal places
     for col in display_df.columns:
         if col != 'Tier':
-            if col in ['% Time Highest Choppiness', 'Win Rate (%)']:
+            if col in ['Validity Rate (%)', '% Time Highest Choppiness']:
                 display_df[col] = display_df[col].apply(
                     lambda x: f"{x:.1f}%" if not pd.isna(x) else "0.0%"
                 )
@@ -810,16 +781,16 @@ def create_point_count_table(analyzer, point_count):
     st.markdown(f"### Recommended Depth Tier: **{top_tier}**")
     
     # Add explanatory text
+    explanation_text = '<div style="background-color: #f7f7f7; padding: 10px; border-radius: 5px; margin-bottom: 15px;">'
+    
+    # Add validity rate explanation
+    explanation_text += '<p style="margin: 5px 0;"><strong>Validity Rate (%)</strong>: Percentage of non-zero price feed values for each tier in the analyzed data</p>'
+    
     if '% Time Highest Choppiness' in display_df.columns:
-        explanation_text = '<div style="background-color: #f7f7f7; padding: 10px; border-radius: 5px; margin-bottom: 15px;">'
         explanation_text += '<p style="margin: 5px 0;"><strong>% Time Highest Choppiness</strong>: Percentage of time intervals where this tier had the highest choppiness value compared to other tiers</p>'
-        
-        # Add winrate explanation only for 5000 points
-        if point_count == 5000 and 'Win Rate (%)' in display_df.columns:
-            explanation_text += '<p style="margin: 5px 0;"><strong>Win Rate (%)</strong>: Percentage of price movements that resulted in profitable direction across multiple timeframes</p>'
             
-        explanation_text += '</div>'
-        st.markdown(explanation_text, unsafe_allow_html=True)
+    explanation_text += '</div>'
+    st.markdown(explanation_text, unsafe_allow_html=True)
 
     # Show the full table with enhanced styling
     st.dataframe(
@@ -903,12 +874,12 @@ def main():
         **Analysis Period:** Looking back 24 hours
         
         **Key Metrics:**
+        - **Validity Rate (%):** Percentage of non-zero price feed values in each tier
         - **% Time Highest Choppiness:** Percentage of time this tier had the highest choppiness
         - **Choppiness:** Oscillation intensity within price range
         - **Direction Changes (%):** Frequency of price direction reversals
         - **Tick ATR %:** Average tick-to-tick price change percentage
         - **Trend Strength:** Lower values indicate more choppy/mean-reverting behavior
-        - **Win Rate (%):** (5000 ticks only) Percentage of price movements in profitable direction
         """)
 
         # Set up tabs for results - updated to match point counts
