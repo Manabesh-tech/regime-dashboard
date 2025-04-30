@@ -190,144 +190,124 @@ def calculate_edge_volatility(pair_name):
     ORDER BY timestamp_sg DESC
     """
     
-    # Separate query for price data to calculate volatility
+    # Simple query to get all price data with 2-minute intervals for volatility calculation
+    # This will allow us to get 5 price points for each 10-minute window
     volatility_query = f"""
-    WITH time_intervals AS (
-      SELECT
+    WITH all_time_intervals AS (
+      -- Generate all 2-minute intervals for the past 24 hours
+      SELECT 
         generate_series(
           date_trunc('hour', '{start_time_utc}'::timestamp) + 
-          INTERVAL '10 min' * floor(EXTRACT(MINUTE FROM '{start_time_utc}'::timestamp) / 10),
+          INTERVAL '2 min' * floor(EXTRACT(MINUTE FROM '{start_time_utc}'::timestamp) / 2),
           '{end_time_utc}'::timestamp,
-          INTERVAL '10 minutes'
-        ) AS slot,
-        generate_series(
+          INTERVAL '2 minutes'
+        ) AS interval_start,
+        
+        -- Group these 2-minute intervals into their parent 10-minute intervals
+        date_trunc('hour', generate_series(
           date_trunc('hour', '{start_time_utc}'::timestamp) + 
-          INTERVAL '10 min' * floor(EXTRACT(MINUTE FROM '{start_time_utc}'::timestamp) / 10),
+          INTERVAL '2 min' * floor(EXTRACT(MINUTE FROM '{start_time_utc}'::timestamp) / 2),
           '{end_time_utc}'::timestamp,
-          INTERVAL '10 minutes'
-        ) + INTERVAL '10 minutes' AS next_slot
+          INTERVAL '2 minutes'
+        )) + 
+        INTERVAL '10 min' * floor(EXTRACT(MINUTE FROM generate_series(
+          date_trunc('hour', '{start_time_utc}'::timestamp) + 
+          INTERVAL '2 min' * floor(EXTRACT(MINUTE FROM '{start_time_utc}'::timestamp) / 2),
+          '{end_time_utc}'::timestamp,
+          INTERVAL '2 minutes'
+        )) / 10) AS parent_interval
     ),
     
-    price_data AS (
+    -- Get the last price (closing price) for each 2-minute interval
+    interval_prices AS (
       SELECT
-        tf.created_at,
-        tf.deal_price,
-        date_trunc('hour', tf.created_at + INTERVAL '8 hour') + 
-        INTERVAL '10 min' * FLOOR(EXTRACT(MINUTE FROM tf.created_at + INTERVAL '8 hour')::INT / 10) AS time_slot_sg
-      FROM
-        public.trade_fill_fresh tf
-      WHERE
-        tf.created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
-        AND tf.pair_name = '{pair_name}'
-      ORDER BY
-        tf.created_at
-    ),
-    
-    -- For each 10-min slot, calculate needed statistics
-    slot_stats AS (
-      SELECT
-        ti.slot AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore' AS timestamp_sg,
-        COUNT(pd.deal_price) AS price_count,
-        MAX(pd.deal_price) AS max_price,
-        MIN(pd.deal_price) AS min_price,
-        CASE 
-          WHEN COUNT(pd.deal_price) >= 2 THEN 
-            stddev(ln(pd.deal_price / lag(pd.deal_price) OVER (ORDER BY pd.created_at))) 
-          ELSE NULL 
-        END AS returns_stddev
-      FROM
-        time_intervals ti
-      LEFT JOIN
-        price_data pd ON pd.created_at >= ti.slot AND pd.created_at < ti.next_slot
-      GROUP BY
-        ti.slot
-      ORDER BY
-        ti.slot DESC
+        ati.interval_start,
+        ati.parent_interval,
+        (
+          SELECT deal_price 
+          FROM public.trade_fill_fresh 
+          WHERE created_at < ati.interval_start + INTERVAL '2 minutes'
+            AND created_at >= ati.interval_start
+            AND pair_name = '{pair_name}'
+          ORDER BY created_at DESC
+          LIMIT 1
+        ) AS closing_price
+      FROM all_time_intervals ati
     )
     
+    -- Get all prices at 2-minute intervals, grouped by 10-minute parent intervals
     SELECT
-      timestamp_sg,
-      price_count,
-      max_price,
-      min_price,
-      -- Calculate annualized volatility
-      CASE 
-        -- When we have std dev of returns (ideal case)
-        WHEN returns_stddev IS NOT NULL THEN 
-          returns_stddev * sqrt(6 * 24 * 365)
-          
-        -- When we have high/low but not enough for returns
-        WHEN max_price IS NOT NULL AND min_price IS NOT NULL AND max_price != min_price THEN
-          -- Parkinson's volatility estimator
-          sqrt(ln(max_price/min_price)^2 / (4 * ln(2))) * sqrt(6 * 24 * 365)
-          
-        -- Fallback: no volatility data
-        ELSE NULL
-      END AS volatility
+      parent_interval AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore' AS timestamp_sg,
+      array_agg(closing_price ORDER BY interval_start) FILTER (WHERE closing_price IS NOT NULL) AS price_array,
+      count(closing_price) FILTER (WHERE closing_price IS NOT NULL) AS price_count
     FROM
-      slot_stats
+      interval_prices
+    GROUP BY
+      parent_interval
     ORDER BY
-      timestamp_sg DESC
+      parent_interval DESC
     """
     
     try:
         # Get edge data
         edge_df = pd.read_sql(edge_query, engine)
         
-        # Get volatility data
-        vol_df = pd.read_sql(volatility_query, engine)
-        
-        # Format timestamps and create time_label
+        # Format timestamps and create time_label for edge data
         edge_df['timestamp_sg'] = pd.to_datetime(edge_df['timestamp_sg'])
         edge_df['time_label'] = edge_df['timestamp_sg'].dt.strftime('%H:%M')
-        
-        vol_df['timestamp_sg'] = pd.to_datetime(vol_df['timestamp_sg'])
-        vol_df['time_label'] = vol_df['time_label'] = vol_df['timestamp_sg'].dt.strftime('%H:%M')
         
         # Rename house_edge to edge for consistency
         edge_df.rename(columns={'house_edge': 'edge'}, inplace=True)
         
+        # Get volatility data (price arrays at 2-minute intervals)
+        vol_df = pd.read_sql(volatility_query, engine)
+        
+        # Format timestamps
+        vol_df['timestamp_sg'] = pd.to_datetime(vol_df['timestamp_sg'])
+        vol_df['time_label'] = vol_df['timestamp_sg'].dt.strftime('%H:%M')
+        
+        # Calculate volatility for each 10-minute window
+        def calculate_sub_period_volatility(row):
+            # Convert PostgreSQL array to Python list
+            if row['price_array'] is None:
+                return None
+                
+            # Parse the array
+            if isinstance(row['price_array'], str):
+                # Strip curly braces and split
+                prices_str = row['price_array'].strip('{}').split(',')
+                prices = [float(p) for p in prices_str if p and p != 'NULL' and p != 'None']
+            else:
+                prices = row['price_array']
+            
+            # Need at least 2 prices to calculate volatility
+            if len(prices) < 2:
+                return None
+                
+            # Calculate log returns
+            log_returns = np.diff(np.log(prices))
+            
+            # Standard deviation of returns
+            std_dev = np.std(log_returns)
+            
+            # Annualize: assuming 5 2-minute periods per 10 minutes
+            # 5 periods/10 min * 6 10-min periods/hour * 24 hours/day * 365 days/year
+            annualized_vol = std_dev * np.sqrt(5 * 6 * 24 * 365)
+            
+            return annualized_vol
+        
+        # Apply volatility calculation
+        vol_df['volatility'] = vol_df.apply(calculate_sub_period_volatility, axis=1)
+        
         # Merge edge and volatility data
         result_df = pd.merge(
             edge_df,
-            vol_df[['time_label', 'volatility', 'price_count']],
+            vol_df[['time_label', 'volatility']],
             on='time_label',
             how='left'
         )
         
-        # Apply fallbacks for missing volatility values
-        def apply_fallback_volatility(row):
-            # If we already have a valid volatility value, keep it
-            if pd.notna(row['volatility']):
-                return row['volatility']
-            
-            # Extract base asset from pair name
-            base_asset = pair_name.split('/')[0].upper()
-            
-            # Get some nearby valid volatility values to use as reference
-            valid_vols = result_df.loc[result_df['volatility'].notna(), 'volatility']
-            
-            # If we have some valid volatility values, use the average with small random variation
-            if len(valid_vols) > 0:
-                avg_vol = valid_vols.mean()
-                # Add small random variation (±20%)
-                return avg_vol * np.random.uniform(0.8, 1.2)
-            
-            # If no valid volatility values at all, use typical values for the asset class
-            if base_asset in ['BTC', 'ETH']:
-                return np.random.uniform(0.5, 0.7)  # 50-70% for majors
-            elif base_asset in ['SOL', 'BNB', 'XRP', 'ADA']:
-                return np.random.uniform(0.7, 0.9)  # 70-90% for mid-caps
-            else:
-                return np.random.uniform(0.9, 1.3)  # 90-130% for alt coins
-        
-        # Apply the fallbacks
-        result_df['volatility'] = result_df.apply(apply_fallback_volatility, axis=1)
-        
-        # Drop intermediate columns not needed for display
-        output_df = result_df.drop(['price_count'], axis=1, errors='ignore')
-        
-        return output_df
+        return result_df
     
     except Exception as e:
         st.error(f"Error processing {pair_name}: {e}")
@@ -735,6 +715,14 @@ if pair_data:
             <span style='background-color:rgba(255, 150, 0, 0.9);color:black;padding:2px 6px;border-radius:3px;'>Medium-High (100% to 150%)</span>
             <span style='background-color:rgba(255, 0, 0, 0.9);color:white;padding:2px 6px;border-radius:3px;'>High (>150%)</span>
             """, unsafe_allow_html=True)
+            
+            # Added explanation of the simple volatility calculation
+            st.markdown("""
+            **Notes on Volatility Calculation:**
+            - Uses five 2-minute intervals within each 10-minute window
+            - Calculates standard deviation of returns between these intervals
+            - Empty cells indicate insufficient price data for calculation
+            """)
         else:
             st.warning("No volatility data available for selected pairs.")
     
