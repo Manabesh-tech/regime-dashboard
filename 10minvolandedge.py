@@ -101,7 +101,7 @@ def calculate_edge_volatility(pair_name):
     start_time_utc = start_time_sg.astimezone(pytz.utc)
     end_time_utc = now_sg.astimezone(pytz.utc)
     
-    # Query with your colleague's PNL calculation method
+    # Query with improved join conditions to handle midnight transition better
     query = f"""
     WITH time_intervals AS (
       SELECT
@@ -113,10 +113,17 @@ def calculate_edge_volatility(pair_name):
         ) AS slot
     ),
     
+    sg_time_slots AS (
+      SELECT 
+        slot,
+        (slot AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') AS slot_sg
+      FROM time_intervals
+    ),
+    
     pnl_data AS (
       SELECT
         date_trunc('hour', created_at + INTERVAL '8 hour') + 
-        INTERVAL '10 min' * FLOOR(EXTRACT(MINUTE FROM created_at + INTERVAL '8 hour')::INT / 10) AS time_slot,
+        INTERVAL '10 min' * FLOOR(EXTRACT(MINUTE FROM created_at + INTERVAL '8 hour')::INT / 10) AS time_slot_sg,
         
         -- Calculate total PNL based on your colleague's formula
         SUM(CASE WHEN taker_way IN (1, 2, 3, 4) THEN taker_pnl * collateral_price ELSE 0 END) +
@@ -135,20 +142,20 @@ def calculate_edge_volatility(pair_name):
         created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
         AND pair_name = '{pair_name}'
       GROUP BY
-        time_slot
+        time_slot_sg
     )
     
     SELECT
-      t.slot AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore' AS timestamp_sg,
+      ts.slot_sg AS timestamp_sg,
       COALESCE(p.total_pnl, 0) AS total_pnl,
       COALESCE(p.total_collateral, 0) AS total_collateral,
       p.price_array
     FROM
-      time_intervals t
+      sg_time_slots ts
     LEFT JOIN
-      pnl_data p ON t.slot = p.time_slot AT TIME ZONE 'Asia/Singapore' AT TIME ZONE 'UTC'
+      pnl_data p ON ts.slot_sg = p.time_slot_sg
     ORDER BY
-      t.slot DESC  -- Order by time descending (newest first)
+      ts.slot DESC  -- Order by time descending (newest first)
     """
     
     try:
