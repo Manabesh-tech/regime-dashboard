@@ -156,18 +156,24 @@ def calculate_volatility(price_df, window=24):
     if price_df is None or len(price_df) < 2:
         return None
     
+    # Create a copy to avoid warnings
+    vol_df = price_df.copy()
+    
     # Calculate returns
-    price_df['log_return'] = np.log(price_df['deal_price_last'] / price_df['deal_price_last'].shift(1))
+    vol_df['log_return'] = np.log(vol_df['deal_price_last'] / vol_df['deal_price_last'].shift(1))
     
     # Calculate rolling volatility (annualized)
-    price_df['volatility_1h'] = price_df['log_return'].rolling(window=1).std() * np.sqrt(24 * 365)
-    price_df['volatility_24h'] = price_df['log_return'].rolling(window=window).std() * np.sqrt(24 * 365)
+    vol_df['volatility_1h'] = vol_df['log_return'].rolling(window=1).std() * np.sqrt(24 * 365)
+    vol_df['volatility_24h'] = vol_df['log_return'].rolling(window=window).std() * np.sqrt(24 * 365)
     
-    # Fill first value with a reasonable estimate
-    price_df['volatility_1h'].fillna(method='bfill', inplace=True)
-    price_df['volatility_24h'].fillna(price_df['volatility_1h'], inplace=True)
+    # Fill missing values without using inplace=True
+    # Instead of .fillna(method='bfill', inplace=True)
+    vol_df['volatility_1h'] = vol_df['volatility_1h'].bfill()
     
-    return price_df
+    # Instead of .fillna(price_df['volatility_1h'], inplace=True)
+    vol_df['volatility_24h'] = vol_df['volatility_24h'].fillna(vol_df['volatility_1h'])
+    
+    return vol_df
 
 def combine_spread_volatility_data(spread_df, vol_df):
     """Combine spread and volatility data into a single dataframe"""
@@ -200,52 +206,89 @@ def analyze_relationship(combined_df):
     if len(available_columns) < 2:
         return None
     
-    correlation = combined_df[available_columns].corr()
+    # Drop rows with NaN values for correlation calculation
+    clean_df_corr = combined_df[available_columns].dropna()
+    if len(clean_df_corr) < 5:  # Need at least a few data points
+        st.warning("Not enough valid data points for correlation analysis")
+        return None
+        
+    correlation = clean_df_corr.corr()
     
-    # Simple linear regression
-    X = combined_df['volatility_24h'].values.reshape(-1, 1)
-    y = combined_df['avg_spread'].values
+    # For regression, explicitly drop rows with NaN in the required columns
+    reg_df = combined_df[['volatility_24h', 'avg_spread']].dropna()
     
-    model = LinearRegression()
-    model.fit(X, y)
+    if len(reg_df) < 5:  # Need at least a few data points
+        st.warning("Not enough valid data points for regression analysis")
+        return {
+            'correlation': correlation,
+            'regression_coefficient': None,
+            'r2': None,
+            'lead_lag': None,
+            'best_lag': None
+        }
     
-    y_pred = model.predict(X)
-    r2 = r2_score(y, y_pred)
+    # Simple linear regression with cleaned data
+    X = reg_df['volatility_24h'].values.reshape(-1, 1)
+    y = reg_df['avg_spread'].values
     
-    # Calculate lead-lag relationship (which one leads?)
-    leads_lags = []
-    for lag in range(-12, 13, 1):  # -12 to +12 hours
-        if lag < 0:
-            # Spread leads volatility
-            spread_shifted = combined_df['avg_spread'].shift(-lag)
-            correlation = spread_shifted.corr(combined_df['volatility_24h'])
-            leads_lags.append({
-                'lag': lag,
-                'correlation': correlation,
-                'description': f"Spread leads volatility by {-lag} hours"
-            })
+    try:
+        model = LinearRegression()
+        model.fit(X, y)
+        
+        y_pred = model.predict(X)
+        r2 = r2_score(y, y_pred)
+        
+        # Calculate lead-lag relationship (which one leads?)
+        leads_lags = []
+        for lag in range(-12, 13, 1):  # -12 to +12 hours
+            if lag < 0:
+                # Spread leads volatility
+                spread_shifted = combined_df['avg_spread'].shift(-lag)
+                lag_corr = spread_shifted.corr(combined_df['volatility_24h'])
+                leads_lags.append({
+                    'lag': lag,
+                    'correlation': lag_corr,
+                    'description': f"Spread leads volatility by {-lag} hours"
+                })
+            else:
+                # Volatility leads spread
+                vol_shifted = combined_df['volatility_24h'].shift(lag)
+                lag_corr = combined_df['avg_spread'].corr(vol_shifted)
+                leads_lags.append({
+                    'lag': lag,
+                    'correlation': lag_corr,
+                    'description': f"Volatility leads spread by {lag} hours"
+                })
+        
+        leads_lags_df = pd.DataFrame(leads_lags)
+        
+        # Filter out NaN correlation values
+        leads_lags_df = leads_lags_df.dropna(subset=['correlation'])
+        
+        if leads_lags_df.empty:
+            best_lag = None
         else:
-            # Volatility leads spread
-            vol_shifted = combined_df['volatility_24h'].shift(lag)
-            correlation = combined_df['avg_spread'].corr(vol_shifted)
-            leads_lags.append({
-                'lag': lag,
-                'correlation': correlation,
-                'description': f"Volatility leads spread by {lag} hours"
-            })
+            # Find the lag with the highest correlation
+            best_lag_idx = leads_lags_df['correlation'].abs().idxmax()
+            best_lag = leads_lags_df.loc[best_lag_idx]
+        
+        return {
+            'correlation': correlation,
+            'regression_coefficient': model.coef_[0],
+            'r2': r2,
+            'lead_lag': leads_lags_df,
+            'best_lag': best_lag
+        }
     
-    leads_lags_df = pd.DataFrame(leads_lags)
-    
-    # Find the lag with the highest correlation
-    best_lag = leads_lags_df.loc[leads_lags_df['correlation'].abs().idxmax()]
-    
-    return {
-        'correlation': correlation,
-        'regression_coefficient': model.coef_[0],
-        'r2': r2,
-        'lead_lag': leads_lags_df,
-        'best_lag': best_lag
-    }
+    except Exception as e:
+        st.error(f"Error in regression analysis: {e}")
+        return {
+            'correlation': correlation,
+            'regression_coefficient': None,
+            'r2': None,
+            'lead_lag': None,
+            'best_lag': None
+        }
 
 def plot_spread_volatility(combined_df, pair_name):
     """Plot spread vs. volatility relationship"""
@@ -266,28 +309,38 @@ def plot_spread_volatility(combined_df, pair_name):
     ax3.set_ylabel('Annualized Volatility (%)')
     ax3.legend(loc='upper right')
     
-    # Second subplot - Scatter plot
-    ax2.scatter(combined_df['volatility_24h'] * 100, combined_df['avg_spread'] * 10000, alpha=0.5)
-    ax2.set_xlabel('Annualized Volatility (%)')
-    ax2.set_ylabel('Spread (basis points)')
-    ax2.set_title('Spread vs. Volatility Correlation')
+    # For the scatter plot, filter out rows with NaN values
+    clean_df = combined_df[['volatility_24h', 'avg_spread']].dropna()
     
-    # Add regression line
-    X = combined_df['volatility_24h'].values.reshape(-1, 1)
-    y = combined_df['avg_spread'].values
-    
-    try:
-        model = LinearRegression()
-        model.fit(X, y)
+    if len(clean_df) < 5:
+        ax2.text(0.5, 0.5, "Not enough data points for regression analysis", 
+                 horizontalalignment='center', verticalalignment='center',
+                 transform=ax2.transAxes)
+    else:
+        # Second subplot - Scatter plot with cleaned data
+        ax2.scatter(clean_df['volatility_24h'] * 100, clean_df['avg_spread'] * 10000, alpha=0.5)
+        ax2.set_xlabel('Annualized Volatility (%)')
+        ax2.set_ylabel('Spread (basis points)')
+        ax2.set_title('Spread vs. Volatility Correlation')
         
-        x_range = np.linspace(X.min(), X.max(), 100).reshape(-1, 1)
-        y_pred = model.predict(x_range)
+        # Add regression line using clean data
+        X = clean_df['volatility_24h'].values.reshape(-1, 1)
+        y = clean_df['avg_spread'].values
         
-        ax2.plot(x_range * 100, y_pred * 10000, 'r-', 
-                 label=f'y = {model.coef_[0]:.6f}x + {model.intercept_:.6f}')
-        ax2.legend()
-    except Exception as e:
-        st.error(f"Error creating regression line: {e}")
+        try:
+            model = LinearRegression()
+            model.fit(X, y)
+            
+            x_range = np.linspace(X.min(), X.max(), 100).reshape(-1, 1)
+            y_pred = model.predict(x_range)
+            
+            ax2.plot(x_range * 100, y_pred * 10000, 'r-', 
+                     label=f'y = {model.coef_[0]:.6f}x + {model.intercept_:.6f}')
+            ax2.legend()
+        except Exception as e:
+            ax2.text(0.5, 0.5, f"Error in regression: {str(e)}", 
+                     horizontalalignment='center', verticalalignment='center',
+                     transform=ax2.transAxes)
     
     plt.tight_layout()
     return fig
