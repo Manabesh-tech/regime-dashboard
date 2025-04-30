@@ -70,6 +70,9 @@ with col3:
 # Generate time slots in reverse order (latest first)
 def generate_time_slots():
     slots = []
+    time_labels = []
+    date_labels = []
+    
     current = now_sg
     end_time = start_time_sg
     
@@ -77,6 +80,30 @@ def generate_time_slots():
         # Round to nearest 10 minute mark
         minute = current.minute
         rounded_minute = (minute // 10) * 10
+        slot = current.replace(minute=rounded_minute, second=0, microsecond=0)
+        
+        # Add to lists
+        slots.append(slot)
+        time_labels.append(slot.strftime("%H:%M"))
+        date_labels.append(slot.strftime("%b %d"))
+        
+        current -= timedelta(minutes=10)
+    
+    return slots, time_labels, date_labels
+
+time_slots, time_labels, date_labels = generate_time_slots()
+
+# Add visual indicator for date change
+def add_date_indicators(df):
+    # Add a column to indicate date changes
+    df['date_change'] = False
+    
+    # Mark rows where date changes
+    for i in range(1, len(df)):
+        if df.loc[i, 'date'] != df.loc[i-1, 'date']:
+            df.loc[i, 'date_change'] = True
+    
+    return df (minute // 10) * 10
         slot = current.replace(minute=rounded_minute, second=0, microsecond=0)
         slots.append(slot)
         current -= timedelta(minutes=10)
@@ -297,46 +324,52 @@ def create_transposed_volatility_matrix():
     # Return reordered DataFrame
     return df[reordered_columns]
 
-# Function to display edge matrix with custom formatting and colors
+# Function to display edge matrix with custom formatting and date separators
 def display_edge_matrix(edge_df):
     # Create a DataFrame with formatted values
     formatted_df = edge_df.copy()
     
-    # Create a custom CSS for coloring cells based on value
-    cell_css = """
-    <style>
-    .very-negative { background-color: rgba(180, 0, 0, 0.9); color: white; }
-    .negative { background-color: rgba(255, 0, 0, 0.9); color: white; }
-    .slightly-negative { background-color: rgba(255, 150, 150, 0.9); color: black; }
-    .neutral { background-color: rgba(255, 255, 150, 0.9); color: black; }
-    .slightly-positive { background-color: rgba(150, 255, 150, 0.9); color: black; }
-    .positive { background-color: rgba(0, 255, 0, 0.9); color: black; }
-    .very-positive { background-color: rgba(0, 180, 0, 0.9); color: white; }
-    </style>
-    """
-    
     # Process each numeric column
     for col in formatted_df.columns:
         if col not in ['time_slot', 'date']:
-            # Format values as strings
+            # Format values as strings with appropriate coloring
             formatted_df[col] = formatted_df[col].apply(
                 lambda x: f"{x*100:.1f}%" if isinstance(x, (int, float)) and not pd.isna(x) else ""
             )
     
-    # Display using st.dataframe with custom formatting
+    # Add row numbers for better reference
+    formatted_df = formatted_df.reset_index()
+    
+    # Create date separators
+    date_changes = []
+    current_date = None
+    
+    for idx, row in formatted_df.iterrows():
+        if row['date'] != current_date:
+            date_changes.append(idx)
+            current_date = row['date']
+    
+    # Display using st.dataframe with custom configuration
     st.dataframe(
         formatted_df,
         height=600,
         use_container_width=True,
         column_config={
+            "index": st.column_config.NumberColumn("#", width="small"),
             "time_slot": st.column_config.TextColumn("Time", width="small"),
             "date": st.column_config.TextColumn("Date", width="small")
         }
     )
     
+    # Display date change indicators
+    if date_changes:
+        date_info = ", ".join([f"Row #{idx}" for idx in date_changes[1:]])
+        if date_info:
+            st.info(f"📅 Date changes at: {date_info}")
+    
     return formatted_df
 
-# Function to display volatility matrix with custom formatting and column width
+# Function to display volatility matrix with custom formatting and date separators
 def display_volatility_matrix(vol_df):
     # Create a DataFrame with formatted values
     formatted_df = vol_df.copy()
@@ -349,16 +382,35 @@ def display_volatility_matrix(vol_df):
                 lambda x: f"{x*100:.1f}%" if isinstance(x, (int, float)) and not pd.isna(x) else ""
             )
     
+    # Add row numbers for better reference
+    formatted_df = formatted_df.reset_index()
+    
+    # Create date separators
+    date_changes = []
+    current_date = None
+    
+    for idx, row in formatted_df.iterrows():
+        if row['date'] != current_date:
+            date_changes.append(idx)
+            current_date = row['date']
+    
     # Display using st.dataframe with column configuration
     st.dataframe(
         formatted_df,
         height=600,
         use_container_width=True,
         column_config={
+            "index": st.column_config.NumberColumn("#", width="small"),
             "time_slot": st.column_config.TextColumn("Time", width="small"),
             "date": st.column_config.TextColumn("Date", width="small")
         }
     )
+    
+    # Display date change indicators
+    if date_changes:
+        date_info = ", ".join([f"Row #{idx}" for idx in date_changes[1:]])
+        if date_info:
+            st.info(f"📅 Date changes at: {date_info}")
     
     return formatted_df
 
