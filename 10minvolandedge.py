@@ -206,6 +206,156 @@ def calculate_edge_volatility(pair_name):
         st.error(f"Error processing {pair_name}: {e}")
         return None
 
+# NEW FUNCTION: Fetch market spread data for pairs
+@st.cache_data(ttl=600)
+def fetch_market_spread_data(pair_name):
+    # Convert to UTC for database query
+    start_time_utc = start_time_sg.astimezone(pytz.utc)
+    end_time_utc = now_sg.astimezone(pytz.utc)
+    
+    query = f"""
+    WITH time_intervals AS (
+      SELECT
+        generate_series(
+          date_trunc('hour', '{start_time_utc}'::timestamp) + 
+          INTERVAL '10 min' * floor(EXTRACT(MINUTE FROM '{start_time_utc}'::timestamp) / 10),
+          '{end_time_utc}'::timestamp,
+          INTERVAL '10 minutes'
+        ) AS slot
+    ),
+    
+    sg_time_slots AS (
+      SELECT 
+        slot,
+        (slot AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') AS slot_sg
+      FROM time_intervals
+    ),
+    
+    spread_data AS (
+      SELECT 
+        date_trunc('hour', time_group + INTERVAL '8 hour') + 
+        INTERVAL '10 min' * FLOOR(EXTRACT(MINUTE FROM time_group + INTERVAL '8 hour')::INT / 10) AS time_slot_sg,
+        AVG(fee1) as avg_spread
+      FROM 
+        oracle_exchange_fee
+      WHERE 
+        time_group BETWEEN '{start_time_utc}' AND '{end_time_utc}'
+        AND pair_name = '{pair_name}'
+        AND source IN ('binanceFuture', 'gateFuture', 'hyperliquidFuture')
+      GROUP BY 
+        time_slot_sg
+    )
+    
+    SELECT
+      ts.slot_sg AS timestamp_sg,
+      COALESCE(s.avg_spread, NULL) AS avg_spread
+    FROM
+      sg_time_slots ts
+    LEFT JOIN
+      spread_data s ON ts.slot_sg = s.time_slot_sg
+    ORDER BY
+      ts.slot DESC  -- Order by time descending (newest first)
+    """
+    
+    try:
+        df = pd.read_sql(query, engine)
+        
+        # Format timestamp and create time_label
+        df['timestamp_sg'] = pd.to_datetime(df['timestamp_sg'])
+        df['time_label'] = df['timestamp_sg'].dt.strftime('%H:%M')
+        
+        return df
+    
+    except Exception as e:
+        st.error(f"Error fetching spreads for {pair_name}: {e}")
+        return None
+
+# Function to create spread matrix with pairs as columns and time as rows
+def create_transposed_spread_matrix():
+    # Create a DataFrame with time slots as rows and pairs as columns
+    # Initialize with a list of time labels from our time slots (latest first)
+    matrix_data = {
+        'time_slot': time_labels,
+        'date': date_labels
+    }
+    
+    # Add data for each pair
+    for pair in selected_pairs:
+        pair_df = fetch_market_spread_data(pair)
+        if pair_df is not None and not pair_df.empty:
+            # Create a series with spread values indexed by time_label
+            spread_by_time = pd.Series(
+                pair_df['avg_spread'].values,
+                index=pair_df['time_label']
+            )
+            
+            # Add this pair's data to the matrix
+            matrix_data[pair] = [spread_by_time.get(time, None) for time in time_labels]
+    
+    # Convert to DataFrame
+    df = pd.DataFrame(matrix_data)
+    
+    # Calculate data density for each pair to determine order
+    data_counts = {}
+    for pair in selected_pairs:
+        if pair in df.columns and pair not in ['time_slot', 'date']:
+            # Count non-null values for this pair
+            data_counts[pair] = df[pair].notna().sum()
+    
+    # Sort pairs by data density (highest first)
+    sorted_pairs = sorted(data_counts.keys(), key=lambda p: data_counts[p], reverse=True)
+    
+    # Reorder columns: first time_slot and date, then pairs by data density
+    reordered_columns = ['time_slot', 'date'] + sorted_pairs
+    
+    # Return reordered DataFrame where pairs exist
+    return df[reordered_columns]
+
+# Function to display spread matrix with custom formatting and date separators
+def display_spread_matrix(spread_df):
+    # Create a DataFrame with formatted values
+    formatted_df = spread_df.copy()
+    
+    # Process each numeric column
+    for col in formatted_df.columns:
+        if col not in ['time_slot', 'date']:
+            # Format values as strings with basis points representation (1bp = 0.01%)
+            formatted_df[col] = formatted_df[col].apply(
+                lambda x: f"{x*10000:.2f}" if isinstance(x, (int, float)) and not pd.isna(x) else ""
+            )
+    
+    # Add row numbers for better reference
+    formatted_df = formatted_df.reset_index()
+    
+    # Create date separators
+    date_changes = []
+    current_date = None
+    
+    for idx, row in formatted_df.iterrows():
+        if row['date'] != current_date:
+            date_changes.append(idx)
+            current_date = row['date']
+    
+    # Display using st.dataframe with custom configuration
+    st.dataframe(
+        formatted_df,
+        height=600,
+        use_container_width=True,
+        column_config={
+            "index": st.column_config.NumberColumn("#", width="small"),
+            "time_slot": st.column_config.TextColumn("Time", width="small"),
+            "date": st.column_config.TextColumn("Date", width="small")
+        }
+    )
+    
+    # Display date change indicators
+    if date_changes:
+        date_info = ", ".join([f"Row #{idx}" for idx in date_changes[1:]])
+        if date_info:
+            st.info(f"📅 Date changes at: {date_info}")
+    
+    return formatted_df
+
 # Show pairs selected
 st.write(f"Displaying data for {len(selected_pairs)} pairs")
 
@@ -399,7 +549,7 @@ def display_volatility_matrix(vol_df):
     return formatted_df
 
 # Create tabs
-tab1, tab2 = st.tabs(["Edge", "Volatility"])
+tab1, tab2, tab3 = st.tabs(["Edge", "Volatility", "Spreads"])
 
 if pair_data:
     # Tab 1: Edge Matrix
@@ -451,6 +601,37 @@ if pair_data:
             """, unsafe_allow_html=True)
         else:
             st.warning("No volatility data available for selected pairs.")
+    
+    # Tab 3: Spreads Matrix (NEW)
+    with tab3:
+        st.markdown("## Market Spreads Matrix (10min timeframe, Last 24 hours, Singapore Time)")
+        st.markdown("### Spreads shown in basis points (1bp = 0.01%)")
+        
+        # Create market spreads matrix
+        spread_df = create_transposed_spread_matrix()
+        
+        if not spread_df.empty:
+            # Display the matrix
+            display_spread_matrix(spread_df)
+            
+            # Legend
+            st.markdown("""
+            **Spread Legend:**
+            <span style='background-color:rgba(0, 180, 0, 0.9);color:white;padding:2px 6px;border-radius:3px;'>Very Low (<2.5)</span>
+            <span style='background-color:rgba(150, 255, 150, 0.9);color:black;padding:2px 6px;border-radius:3px;'>Low (2.5 to 5)</span>
+            <span style='background-color:rgba(255, 255, 150, 0.9);color:black;padding:2px 6px;border-radius:3px;'>Medium (5 to 10)</span>
+            <span style='background-color:rgba(255, 150, 0, 0.9);color:black;padding:2px 6px;border-radius:3px;'>High (10 to 20)</span>
+            <span style='background-color:rgba(255, 0, 0, 0.9);color:white;padding:2px 6px;border-radius:3px;'>Very High (>20)</span>
+            """, unsafe_allow_html=True)
+            
+            st.markdown("""
+            **Notes:**
+            - Market spreads are averaged from binanceFuture, gateFuture, and hyperliquidFuture
+            - Spreads are shown in basis points (1bp = 0.01%)
+            - Empty cells indicate no data for that time slot
+            """)
+        else:
+            st.warning("No spread data available for selected pairs.")
 
 else:
     st.warning("No data available for selected pairs. Try selecting different pairs or refreshing the data.")
