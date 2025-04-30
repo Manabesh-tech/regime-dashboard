@@ -43,6 +43,33 @@ def fetch_pairs():
         st.error(f"Error fetching pairs: {e}")
         return ["BTC/USDT", "ETH/USDT", "SOL/USDT", "DOGE/USDT", "PEPE/USDT"]
 
+# Generate time slots
+@st.cache_data(ttl=600)
+def generate_time_slots(now_time, start_time):
+    result_slots = []
+    result_labels = []
+    result_dates = []
+    
+    current_time = now_time
+    while current_time >= start_time:
+        # Round to nearest 10 minute mark
+        minute_val = current_time.minute
+        rounded_minute_val = (minute_val // 10) * 10
+        slot_time = current_time.replace(minute=rounded_minute_val, second=0, microsecond=0)
+        
+        # Add to our result lists
+        result_slots.append(slot_time)
+        result_labels.append(slot_time.strftime("%H:%M"))
+        result_dates.append(slot_time.strftime("%b %d"))
+        
+        # Move to previous time slot
+        current_time -= timedelta(minutes=10)
+    
+    return result_slots, result_labels, result_dates
+
+# Call the function and unpack the results
+time_slots, time_labels, date_labels = generate_time_slots(now_sg, start_time_sg)
+
 # UI controls
 pairs = fetch_pairs()
 col1, col2, col3 = st.columns([3, 1, 1])
@@ -66,42 +93,6 @@ with col3:
     if st.button("Refresh Data"):
         st.cache_data.clear()
         st.experimental_rerun()
-
-# Generate time slots in reverse order (latest first)
-def generate_time_slots():
-    slots = []
-    time_labels = []
-    date_labels = []
-    
-    current = now_sg
-    end_time = start_time_sg
-    
-    while current >= end_time:
-        # Round to nearest 10 minute mark
-        minute = current.minute
-        rounded_minute = (minute // 10) * 10
-        slot = current.replace(minute=rounded_minute, second=0, microsecond=0)
-        
-        # Add to lists
-        slots.append(slot)
-        time_labels.append(slot.strftime("%H:%M"))
-        date_labels.append(slot.strftime("%b %d"))
-        
-        current -= timedelta(minutes=10)
-    
-    return slots, time_labels, date_labels
-
-# Initialize time slots
-time_slots, time_labels, date_labels = generate_time_slots() (minute // 10) * 10
-        slot = current.replace(minute=rounded_minute, second=0, microsecond=0)
-        slots.append(slot)
-        current -= timedelta(minutes=10)
-    
-    return slots
-
-time_slots = generate_time_slots()
-time_labels = [slot.strftime("%H:%M") for slot in time_slots]
-date_labels = [slot.strftime("%b %d") for slot in time_slots]
 
 # Function to fetch data and calculate edge and volatility
 @st.cache_data(ttl=600)
@@ -227,9 +218,6 @@ for i, pair in enumerate(selected_pairs):
 
 progress_bar.progress(1.0)
 status_text.text(f"Processed {len(pair_data)}/{len(selected_pairs)} pairs")
-
-# Create tabs
-tab1, tab2 = st.tabs(["Edge", "Volatility"])
 
 # Function to create edge matrix with pairs as columns and time as rows
 def create_transposed_edge_matrix():
@@ -403,29 +391,8 @@ def display_volatility_matrix(vol_df):
     
     return formatted_df
 
-# Function to add date separators to DataFrame display
-def add_date_separators(df):
-    result_df = pd.DataFrame()
-    current_date = None
-    
-    # Process each row
-    for idx, row in df.iterrows():
-        date = row['date']
-        
-        # Add date separator if it's a new date
-        if date != current_date:
-            # Create a separator row
-            separator = pd.DataFrame([{col: '' for col in df.columns}])
-            separator.iloc[0, df.columns.get_indexer(['time_slot'])[0]] = f"--- {date} ---"
-            
-            # Add separator to results
-            result_df = pd.concat([result_df, separator])
-            current_date = date
-        
-        # Add the actual data row
-        result_df = pd.concat([result_df, pd.DataFrame([row])])
-    
-    return result_df
+# Create tabs
+tab1, tab2 = st.tabs(["Edge", "Volatility"])
 
 if pair_data:
     # Tab 1: Edge Matrix
