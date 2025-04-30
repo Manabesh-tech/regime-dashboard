@@ -130,12 +130,12 @@ def fetch_historical_spreads(pair_name, days=7):
 # Calculate historical volatility with improved granularity and method
 @st.cache_data(ttl=600)
 def fetch_historical_prices(pair_name, days=7):
-    """Fetch historical price data for volatility calculation with improved granularity"""
+    """Fetch historical price data with multiple fallback methods to ensure data availability"""
     # Calculate time range
     end_time = datetime.now(pytz.utc)
     start_time = end_time - timedelta(days=days)
     
-    # Use a more direct and comprehensive query to get more data points
+    # Try main query first - trade_fill_fresh
     query = f"""
     SELECT 
         created_at,
@@ -151,10 +151,26 @@ def fetch_historical_prices(pair_name, days=7):
     
     try:
         df = pd.read_sql(query, engine)
-        if df.empty:
-            st.warning(f"No price data available for {pair_name}. Trying alternative data source...")
-            
-            # Try alternative query using oracle pricing data
+        
+        # If not enough data, try with a wider time range
+        if len(df) < 100:
+            wider_start_time = end_time - timedelta(days=days*2)
+            wider_query = f"""
+            SELECT 
+                created_at,
+                deal_price
+            FROM 
+                public.trade_fill_fresh
+            WHERE 
+                created_at BETWEEN '{wider_start_time}' AND '{end_time}'
+                AND pair_name = '{pair_name}'
+            ORDER BY 
+                created_at
+            """
+            df = pd.read_sql(wider_query, engine)
+        
+        # If still not enough data, try oracle_pricing
+        if len(df) < 100:
             alt_query = f"""
             SELECT 
                 time_group as created_at,
@@ -167,42 +183,107 @@ def fetch_historical_prices(pair_name, days=7):
             ORDER BY 
                 time_group
             """
+            oracle_df = pd.read_sql(alt_query, engine)
             
-            df = pd.read_sql(alt_query, engine)
-            if df.empty:
-                return None
+            # Combine if we got data from both sources
+            if not oracle_df.empty:
+                if df.empty:
+                    df = oracle_df
+                else:
+                    df = pd.concat([df, oracle_df]).drop_duplicates(subset=['created_at'])
         
+        # If still not enough data, try one more source
+        if len(df) < 100:
+            try:
+                # Try market_tick data
+                market_query = f"""
+                SELECT 
+                    created_at,
+                    last_price as deal_price
+                FROM 
+                    market_tick
+                WHERE 
+                    created_at BETWEEN '{start_time}' AND '{end_time}'
+                    AND pair_name = '{pair_name}'
+                ORDER BY 
+                    created_at
+                """
+                market_df = pd.read_sql(market_query, engine)
+                
+                if not market_df.empty:
+                    if df.empty:
+                        df = market_df
+                    else:
+                        df = pd.concat([df, market_df]).drop_duplicates(subset=['created_at'])
+            except:
+                pass
+                
+        # Try one last source - order books
+        if len(df) < 100:
+            try:
+                # Get data from order books (average of bid/ask)
+                order_query = f"""
+                SELECT 
+                    created_at,
+                    (best_bid_price + best_ask_price) / 2 as deal_price
+                FROM 
+                    order_book_snapshot
+                WHERE 
+                    created_at BETWEEN '{start_time}' AND '{end_time}'
+                    AND pair_name = '{pair_name}'
+                ORDER BY 
+                    created_at
+                """
+                order_df = pd.read_sql(order_query, engine)
+                
+                if not order_df.empty:
+                    if df.empty:
+                        df = order_df
+                    else:
+                        df = pd.concat([df, order_df]).drop_duplicates(subset=['created_at'])
+            except:
+                pass
+                
+        if df.empty:
+            return None
+            
         # Convert created_at to datetime
         df['timestamp'] = pd.to_datetime(df['created_at'])
         
         # Detect and filter outliers (prices that are more than 3 std devs from mean)
-        mean_price = df['deal_price'].mean()
-        std_price = df['deal_price'].std()
-        if std_price > 0:  # Avoid division by zero
-            lower_bound = mean_price - (3 * std_price)
-            upper_bound = mean_price + (3 * std_price)
-            df = df[(df['deal_price'] > lower_bound) & (df['deal_price'] < upper_bound)]
+        if len(df) > 5:
+            mean_price = df['deal_price'].mean()
+            std_price = df['deal_price'].std()
+            if std_price > 0:  # Avoid division by zero
+                lower_bound = mean_price - (3 * std_price)
+                upper_bound = mean_price + (3 * std_price)
+                df = df[(df['deal_price'] > lower_bound) & (df['deal_price'] < upper_bound)]
         
-        # For more granular volatility, use 5-minute intervals instead of hourly
+        # Use 5-minute intervals for more granular analysis
         df['interval'] = df['timestamp'].dt.floor('5min')
         
-        # Ensure sufficient data points in each interval
-        interval_counts = df.groupby('interval').size()
-        valid_intervals = interval_counts[interval_counts >= 3].index
-        df = df[df['interval'].isin(valid_intervals)]
-        
-        if len(df) < 10:  # Need minimum data points
-            return None
-            
-        # Calculate prices for each interval
+        # Group by interval to get aggregated price data
         interval_df = df.groupby('interval').agg({
-            'deal_price': ['first', 'last', 'mean', 'max', 'min', 'count', 'std']
+            'deal_price': ['first', 'last', 'mean', 'max', 'min', 'count']
         })
         
         # Flatten multi-index columns
         interval_df.columns = ['_'.join(col).strip() for col in interval_df.columns.values]
         interval_df = interval_df.reset_index()
         
+        # Add a standard deviation column
+        if len(df) > 1:
+            std_dev = []
+            for interval in interval_df['interval']:
+                interval_data = df[df['interval'] == interval]['deal_price']
+                if len(interval_data) > 1:
+                    std_dev.append(interval_data.std())
+                else:
+                    std_dev.append(0)
+            interval_df['deal_price_std'] = std_dev
+        else:
+            interval_df['deal_price_std'] = 0
+            
         # Ensure we have enough intervals
         if len(interval_df) < 5:
             return None
@@ -459,7 +540,7 @@ def analyze_relationship(combined_df):
         }
 
 def plot_spread_volatility(combined_df, pair_name):
-    """Plot spread vs. volatility relationship with multiple volatility measures"""
+    """Plot spread vs. volatility relationship with more compact layout"""
     if combined_df is None or len(combined_df) < 5:
         st.warning(f"Not enough data for {pair_name} to create plots")
         return
@@ -508,34 +589,36 @@ def plot_spread_volatility(combined_df, pair_name):
     # Sort by time for proper time series display
     plot_df = plot_df.sort_values('hour')
     
-    # Create figure with three subplots (time series, scatter, and multiple volatilities)
-    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 15))
+    # Create a more compact figure - reduced height and simplified layout
+    # Using just 2 panels instead of 3, with smaller size
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 8))
     
     # First subplot - Time series
-    ax1.set_title(f"Spread vs. {best_vol_col.replace('_', ' ').title()} for {pair_name}", 
-                 fontsize=14, fontweight='bold')
+    measure_name = best_vol_col.replace('_', ' ').title()
+    ax1.set_title(f"Spread vs. {measure_name} for {pair_name}", 
+                 fontsize=12, fontweight='bold')
     
     # Plot spread on left y-axis
     spread_line = ax1.plot(plot_df['hour'], plot_df['avg_spread'] * 10000, 'b-', 
                           label='Spread (bps)', linewidth=2)
-    ax1.set_ylabel('Spread (basis points)', fontsize=12)
+    ax1.set_ylabel('Spread (basis points)', fontsize=10)
     ax1.tick_params(axis='y', labelcolor='b')
     
     # Create twin axis for volatility
     ax1_twin = ax1.twinx()
     vol_line = ax1_twin.plot(plot_df['hour'], plot_df[best_vol_col] * 100, 'r-', 
-                           label=f'{best_vol_col.replace("_", " ").title()} (%)', linewidth=2)
-    ax1_twin.set_ylabel('Annualized Volatility (%)', fontsize=12, color='r')
+                           label=f'{measure_name} (%)', linewidth=2)
+    ax1_twin.set_ylabel('Annualized Volatility (%)', fontsize=10, color='r')
     ax1_twin.tick_params(axis='y', labelcolor='r')
     
     # Combine legends
     lines = spread_line + vol_line
     labels = [l.get_label() for l in lines]
-    ax1.legend(lines, labels, loc='upper right')
+    ax1.legend(lines, labels, loc='upper right', fontsize=9)
     
     # Format x-axis to show dates nicely
     ax1.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter('%Y-%m-%d'))
-    plt.setp(ax1.xaxis.get_majorticklabels(), rotation=45)
+    plt.setp(ax1.xaxis.get_majorticklabels(), rotation=45, fontsize=8)
     ax1.grid(True, alpha=0.3)
     
     # Second subplot - Scatter plot with best volatility measure
@@ -544,15 +627,15 @@ def plot_spread_volatility(combined_df, pair_name):
     if len(clean_df) < 5:
         ax2.text(0.5, 0.5, "Not enough data points for regression analysis", 
                  horizontalalignment='center', verticalalignment='center',
-                 transform=ax2.transAxes, fontsize=14)
+                 transform=ax2.transAxes, fontsize=10)
     else:
         # Scatter plot with cleaned data
-        ax2.scatter(clean_df[best_vol_col] * 100, clean_df['avg_spread'] * 10000, alpha=0.6, s=50)
-        ax2.set_xlabel('Annualized Volatility (%)', fontsize=12)
-        ax2.set_ylabel('Spread (basis points)', fontsize=12)
-        ax2.set_title(f'Spread vs. {best_vol_col.replace("_", " ").title()} Correlation', 
-                     fontsize=14, fontweight='bold')
+        ax2.scatter(clean_df[best_vol_col] * 100, clean_df['avg_spread'] * 10000, alpha=0.6, s=30)
+        ax2.set_xlabel('Annualized Volatility (%)', fontsize=10)
+        ax2.set_ylabel('Spread (basis points)', fontsize=10)
+        ax2.set_title(f'Spread vs. Volatility Correlation', fontsize=12)
         ax2.grid(True, alpha=0.3)
+        ax2.tick_params(labelsize=8)
         
         # Add regression line using clean data
         X = clean_df[best_vol_col].values.reshape(-1, 1)
@@ -565,44 +648,23 @@ def plot_spread_volatility(combined_df, pair_name):
             x_range = np.linspace(X.min(), X.max(), 100).reshape(-1, 1)
             y_pred = model.predict(x_range)
             
-            ax2.plot(x_range * 100, y_pred * 10000, 'r-', linewidth=2,
+            ax2.plot(x_range * 100, y_pred * 10000, 'r-', linewidth=1.5,
                      label=f'y = {model.coef_[0]*100:.4f}x + {model.intercept_*10000:.4f}')
-            ax2.legend(fontsize=10)
+            ax2.legend(fontsize=8)
             
             # Add correlation coefficient
             ax2.annotate(f"Correlation: {best_corr:.4f}", xy=(0.02, 0.95), xycoords='axes fraction',
-                         fontsize=12, bbox=dict(boxstyle="round,pad=0.3", fc="white", alpha=0.8))
+                         fontsize=9, bbox=dict(boxstyle="round,pad=0.3", fc="white", alpha=0.8))
         except Exception as e:
             ax2.text(0.5, 0.5, f"Error in regression: {str(e)}", 
                      horizontalalignment='center', verticalalignment='center',
-                     transform=ax2.transAxes)
-    
-    # Third subplot - Compare all volatility measures
-    all_vol_cols = [col for col in vol_cols if col in plot_df.columns]
-    
-    if len(all_vol_cols) > 1:
-        ax3.set_title(f"Comparison of Different Volatility Measures for {pair_name}", 
-                     fontsize=14, fontweight='bold')
-        
-        for col in all_vol_cols:
-            if col in plot_df.columns and not plot_df[col].isna().all():
-                ax3.plot(plot_df['hour'], plot_df[col] * 100, 
-                        label=f"{col.replace('_', ' ').title()}", linewidth=1.5)
-        
-        ax3.set_xlabel('Time', fontsize=12)
-        ax3.set_ylabel('Annualized Volatility (%)', fontsize=12)
-        ax3.legend(loc='upper right')
-        ax3.grid(True, alpha=0.3)
-        ax3.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter('%Y-%m-%d'))
-        plt.setp(ax3.xaxis.get_majorticklabels(), rotation=45)
-    else:
-        ax3.set_visible(False)  # Hide the third subplot if only one volatility measure
+                     transform=ax2.transAxes, fontsize=8)
     
     plt.tight_layout()
     return fig
 
 def plot_lead_lag(lead_lag_df, pair_name):
-    """Plot lead-lag relationship with improved visualization"""
+    """Plot lead-lag relationship with more compact visualization"""
     if lead_lag_df is None or lead_lag_df.empty:
         return None
     
@@ -612,7 +674,7 @@ def plot_lead_lag(lead_lag_df, pair_name):
     if clean_df.empty or len(clean_df) < 3:
         return None
     
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=(7, 4))
     
     # Use a more visually appealing style
     bars = ax.bar(clean_df['lag'], clean_df['correlation'], width=0.7, 
@@ -642,12 +704,14 @@ def plot_lead_lag(lead_lag_df, pair_name):
                     xytext=(0, 20 if best_lag['correlation'] > 0 else -20),
                     textcoords='offset points',
                     arrowprops=dict(arrowstyle='->', connectionstyle='arc3', color='blue'),
-                    bbox=dict(boxstyle='round,pad=0.5', fc='yellow', alpha=0.3))
+                    bbox=dict(boxstyle='round,pad=0.5', fc='yellow', alpha=0.3),
+                    fontsize=9)
     
     # Improve axis labels and title
-    ax.set_xlabel('Lag (hours)', fontsize=12)
-    ax.set_ylabel('Correlation', fontsize=12)
-    ax.set_title(f'Lead-Lag Relationship for {pair_name}', fontsize=14, fontweight='bold')
+    ax.set_xlabel('Lag (hours)', fontsize=10)
+    ax.set_ylabel('Correlation', fontsize=10)
+    ax.set_title(f'Lead-Lag Relationship for {pair_name}', fontsize=11)
+    ax.tick_params(labelsize=8)
     
     # Add grid for better readability
     ax.grid(True, alpha=0.3)
@@ -660,122 +724,231 @@ def plot_lead_lag(lead_lag_df, pair_name):
     else:
         interpretation = "Spread and volatility changes occur nearly simultaneously"
     
-    ax.text(0.02, 0.02, interpretation, transform=ax.transAxes, fontsize=11,
+    ax.text(0.02, 0.02, interpretation, transform=ax.transAxes, fontsize=9,
            bbox=dict(boxstyle='round,pad=0.5', fc='white', alpha=0.8))
     
     plt.tight_layout()
     return fig
 
-def plot_rollbit_comparison(pair, days):
-    """Compare your buffer rates with Rollbit's over time"""
-    # Fetch Rollbit data
-    query = f"""
-    SELECT 
-        created_at,
-        pair_name,
-        bust_buffer,
-        position_multiplier
-    FROM 
-        rollbit_pair_config
-    WHERE 
-        pair_name = '{pair}'
-        AND created_at > NOW() - INTERVAL '{days} days'
-    ORDER BY 
-        created_at
-    """
+def explain_lead_lag_concept():
+    """Provide a clear explanation of what 'best lag' means"""
+    with st.expander("What is Lead-Lag Analysis?"):
+        st.markdown("""
+        ### Understanding Lead-Lag Analysis
+        
+        Lead-lag analysis helps determine **which metric changes first** - spreads or volatility:
+        
+        - **Negative Lag (e.g., -3 hours)**: Spread changes typically precede volatility changes by the specified number of hours
+        - **Positive Lag (e.g., +2 hours)**: Volatility changes typically precede spread changes by the specified number of hours
+        - **Near Zero Lag**: Changes in both metrics occur nearly simultaneously
+        
+        ### Why This Matters
+        
+        Understanding lead-lag relationships helps you:
+        
+        1. **Predict Changes**: If one metric consistently leads the other, you can anticipate changes
+        2. **Optimize Timing**: Adjust buffer rates proactively rather than reactively
+        3. **Choose Metrics**: Base your buffer strategy on the leading indicator for better results
+        
+        ### How It's Calculated
+        
+        We shift one time series relative to the other and measure correlation at each lag.
+        The lag with the strongest correlation is considered the "best lag."
+        """)
+
+def process_all_pairs(selected_pairs, days, vol_window, min_data_points):
+    """Process all selected pairs with better error handling and reporting"""
+    results_dict = {}
+    successful_pairs = []
+    failed_pairs = []
+    data_issues = []
     
-    try:
-        rollbit_df = pd.read_sql(query, engine)
+    # Create progress bar
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    for i, pair in enumerate(selected_pairs):
+        # Update progress
+        progress = (i + 1) / len(selected_pairs)
+        progress_bar.progress(progress)
+        status_text.text(f"Processing {pair} ({i+1}/{len(selected_pairs)})")
         
-        # Fetch SURF data
-        query = f"""
-        SELECT 
-            updated_at as created_at,
-            pair_name,
-            buffer_rate,
-            position_multiplier
-        FROM 
-            public.trade_pool_pairs
-        WHERE 
-            pair_name = '{pair}'
-            AND updated_at > NOW() - INTERVAL '{days} days'
-        ORDER BY 
-            created_at
-        """
-        
-        surf_df = pd.read_sql(query, engine)
-        
-        # Check if we have data
-        if rollbit_df.empty:
-            st.warning(f"No Rollbit data available for {pair}")
-            return None
+        try:
+            # Get historical spread data
+            spread_df = fetch_historical_spreads(pair, days=days)
             
-        # Create comparison plot
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10), sharex=True)
-        
-        # Plot buffer rates
-        ax1.set_title(f"Buffer Rate Comparison for {pair}")
-        
-        if not rollbit_df.empty:
-            # Convert to percent for better readability
-            ax1.plot(rollbit_df['created_at'], rollbit_df['bust_buffer'] * 100, 'r-', 
-                    label='Rollbit Buffer (%)')
-        
-        if not surf_df.empty:
-            # Make sure dates are aligned properly
-            ax1.plot(surf_df['created_at'], surf_df['buffer_rate'] * 100, 'b-', 
-                    label='SURF Buffer (%)')
-        else:
-            # If no SURF data, add a note
-            ax1.text(0.5, 0.5, "No SURF buffer rate data available", 
-                     horizontalalignment='center', verticalalignment='center',
-                     transform=ax1.transAxes, bbox=dict(facecolor='yellow', alpha=0.5))
-        
-        ax1.set_ylabel('Buffer Rate (%)')
-        ax1.grid(True, alpha=0.3)
-        ax1.legend()
-        
-        # Plot position multipliers
-        ax2.set_title(f"Position Multiplier Comparison for {pair}")
-        
-        if not rollbit_df.empty:
-            ax2.plot(rollbit_df['created_at'], rollbit_df['position_multiplier'], 'r-', 
-                    label='Rollbit Position Multiplier')
-        
-        if not surf_df.empty:
-            ax2.plot(surf_df['created_at'], surf_df['position_multiplier'], 'b-', 
-                    label='SURF Position Multiplier')
-        else:
-            # If no SURF data, add a note
-            ax2.text(0.5, 0.5, "No SURF position multiplier data available", 
-                     horizontalalignment='center', verticalalignment='center',
-                     transform=ax2.transAxes, bbox=dict(facecolor='yellow', alpha=0.5))
-        
-        ax2.set_xlabel('Date')
-        ax2.set_ylabel('Position Multiplier')
-        ax2.legend()
-        ax2.grid(True, alpha=0.3)
-        
-        # Add data information section below the plot
-        if not rollbit_df.empty:
-            rollbit_min = rollbit_df['bust_buffer'].min() * 100
-            rollbit_max = rollbit_df['bust_buffer'].max() * 100
-            rollbit_avg = rollbit_df['bust_buffer'].mean() * 100
+            # Get historical price data for volatility
+            price_df = fetch_historical_prices(pair, days=days)
             
-            st.markdown(f"""
-            ### Rollbit Buffer Rate Statistics
-            - **Min Buffer Rate:** {rollbit_min:.3f}%
-            - **Max Buffer Rate:** {rollbit_max:.3f}%
-            - **Average Buffer Rate:** {rollbit_avg:.3f}%
-            - **Number of Records:** {len(rollbit_df)}
+            spread_status = "✓" if spread_df is not None and not spread_df.empty else "✗"
+            price_status = "✓" if price_df is not None and not price_df.empty else "✗"
+            
+            if price_df is not None and not price_df.empty:
+                vol_df = calculate_volatility(price_df, window_minutes=vol_window)
+                vol_status = "✓" if vol_df is not None and not vol_df.empty else "✗"
+            else:
+                vol_df = None
+                vol_status = "✗"
+            
+            # Combine data
+            if spread_df is not None and vol_df is not None:
+                combined_df = combine_spread_volatility_data(spread_df, vol_df)
+                combined_status = "✓" if combined_df is not None and len(combined_df) >= min_data_points else "✗"
+                
+                if combined_df is not None and len(combined_df) >= min_data_points:
+                    # Analyze relationship
+                    results = analyze_relationship(combined_df)
+                    if results is not None:
+                        results_dict[pair] = results
+                        successful_pairs.append(pair)
+                    else:
+                        failed_pairs.append(pair)
+                        data_issues.append({
+                            'pair': pair,
+                            'spread_data': spread_status,
+                            'price_data': price_status,
+                            'volatility_calc': vol_status,
+                            'combined_data': combined_status,
+                            'issue': "Analysis failed"
+                        })
+                else:
+                    failed_pairs.append(pair)
+                    data_issues.append({
+                        'pair': pair,
+                        'spread_data': spread_status,
+                        'price_data': price_status,
+                        'volatility_calc': vol_status,
+                        'combined_data': combined_status,
+                        'issue': f"Not enough matched data points ({0 if combined_df is None else len(combined_df)}, need {min_data_points})"
+                    })
+            else:
+                failed_pairs.append(pair)
+                combined_status = "✗"
+                data_issues.append({
+                    'pair': pair,
+                    'spread_data': spread_status,
+                    'price_data': price_status,
+                    'volatility_calc': vol_status,
+                    'combined_data': combined_status,
+                    'issue': "Missing spread or volatility data"
+                })
+        except Exception as e:
+            failed_pairs.append(pair)
+            data_issues.append({
+                'pair': pair,
+                'spread_data': "?",
+                'price_data': "?",
+                'volatility_calc': "?",
+                'combined_data': "?",
+                'issue': f"Error: {str(e)}"
+            })
+    
+    # Clear progress display
+    progress_bar.empty()
+    status_text.empty()
+    
+    return results_dict, successful_pairs, failed_pairs, data_issues
+
+def render_individual_analysis_tab(selected_pairs, days, vol_window, min_data_points):
+    """Render the individual pair analysis tab with improved layout and all pairs"""
+    st.markdown("## Individual Pair Analysis")
+    st.markdown(f"Analyzing the relationship between market spreads and volatility over {days} days")
+    
+    # Process all pairs
+    results_dict, successful_pairs, failed_pairs, data_issues = process_all_pairs(
+        selected_pairs, days, vol_window, min_data_points
+    )
+    
+    # Display processing summary
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Total Pairs", len(selected_pairs))
+    with col2:
+        st.metric("Successful Analyses", len(successful_pairs))
+    with col3:
+        st.metric("Failed Analyses", len(failed_pairs))
+    
+    # Add lead-lag explanation
+    explain_lead_lag_concept()
+    
+    # Create tabs for successful and failed pairs
+    results_tabs = st.tabs(["Successful Pairs", "Failed Pairs"])
+    
+    with results_tabs[0]:
+        if successful_pairs:
+            # Create a selection widget for successful pairs
+            pair_to_view = st.selectbox("Select a pair to view analysis", successful_pairs)
+            
+            if pair_to_view:
+                st.markdown(f"### {pair_to_view}")
+                
+                # Fetch and process data to display results
+                with st.spinner(f"Loading analysis for {pair_to_view}..."):
+                    spread_df = fetch_historical_spreads(pair_to_view, days=days)
+                    price_df = fetch_historical_prices(pair_to_view, days=days)
+                    vol_df = calculate_volatility(price_df, window_minutes=vol_window)
+                    combined_df = combine_spread_volatility_data(spread_df, vol_df)
+                    
+                    # Display results side by side
+                    col1, col2 = st.columns([3, 2])
+                    
+                    with col1:
+                        # Plot relationship
+                        fig = plot_spread_volatility(combined_df, pair_to_view)
+                        if fig:
+                            st.pyplot(fig)
+                    
+                    with col2:
+                        # Summary stats
+                        if pair_to_view in results_dict and 'correlation' in results_dict[pair_to_view]:
+                            results = results_dict[pair_to_view]
+                            
+                            st.markdown("#### Correlation Analysis")
+                            
+                            if results.get('best_volatility_measure'):
+                                best_vol = results['best_volatility_measure'].replace('_', ' ').title()
+                                st.metric("Best Volatility Measure", best_vol)
+                                st.metric("Correlation", f"{results['best_volatility_correlation']:.4f}")
+                            
+                            # Regression results
+                            st.markdown("#### Regression Results")
+                            if results['regression_coefficient'] is not None:
+                                st.metric("Coefficient", f"{results['regression_coefficient']:.6f}")
+                                st.metric("R² Score", f"{results['r2']:.4f}")
+                            
+                            # Lead-lag results
+                            st.markdown("#### Lead-Lag Analysis")
+                            if results['best_lag'] is not None:
+                                st.markdown(f"**{results['best_lag']['description']}**")
+                                st.metric("Lag Correlation", f"{results['best_lag']['correlation']:.4f}")
+                            
+                            # Plot lead-lag relationship
+                            if results and 'lead_lag' in results and results['lead_lag'] is not None:
+                                lead_lag_fig = plot_lead_lag(results['lead_lag'], pair_to_view)
+                                if lead_lag_fig:
+                                    st.pyplot(lead_lag_fig)
+        else:
+            st.warning("No successful analyses to display.")
+    
+    with results_tabs[1]:
+        if failed_pairs:
+            st.markdown("### Pairs with Data Issues")
+            
+            # Create a table of failed pairs with reasons
+            failed_df = pd.DataFrame(data_issues)
+            st.dataframe(failed_df)
+            
+            # Show tips for fixing data issues
+            st.markdown("""
+            #### Tips for Fixing Data Issues
+            
+            1. **Increase the timeframe** to capture more historical data
+            2. **Reduce the minimum data points** threshold
+            3. **Check database connections** for the specific pair
+            4. **Verify the pair is still active** in your system
             """)
-        
-        plt.tight_layout()
-        return fig
-    
-    except Exception as e:
-        st.error(f"Error fetching comparison data: {e}")
-        return None
+        else:
+            st.success("All pairs were analyzed successfully!")
 
 def fetch_rollbit_buffer_vs_spread(days=30):
     """Analyze if Rollbit buffer rates correlate with market spreads"""
@@ -1113,39 +1286,116 @@ def display_rollbit_strategy_summary(df_changes, df_correlations):
         - Base Buffer depends on token type
         """)
 
-def consolidate_results(results_dict):
-    """Consolidate analysis results into a summary dataframe"""
-    summary_data = []
+def plot_rollbit_comparison(pair, days):
+    """Compare your buffer rates with Rollbit's over time"""
+    # Fetch Rollbit data
+    query = f"""
+    SELECT 
+        created_at,
+        pair_name,
+        bust_buffer,
+        position_multiplier
+    FROM 
+        rollbit_pair_config
+    WHERE 
+        pair_name = '{pair}'
+        AND created_at > NOW() - INTERVAL '{days} days'
+    ORDER BY 
+        created_at
+    """
     
-    for pair, result in results_dict.items():
-        if result and 'correlation' in result:
-            try:
-                best_vol_col = result.get('best_volatility_measure', 'volatility_24h')
-                best_vol_corr = result.get('best_volatility_correlation', 
-                                       result['correlation'].loc['avg_spread', best_vol_col])
-                
-                # Handle case where best_lag might be None
-                best_lag = None
-                best_lag_corr = None
-                
-                if result['best_lag'] is not None:
-                    best_lag = result['best_lag']['lag']
-                    best_lag_corr = result['best_lag']['correlation']
-                
-                r2 = result['r2']
-                
-                summary_data.append({
-                    'pair_name': pair,
-                    'volatility_measure': best_vol_col,
-                    'spread_volatility_correlation': best_vol_corr,
-                    'best_lag_hours': best_lag,
-                    'best_lag_correlation': best_lag_corr,
-                    'r2_score': r2,
-                })
-            except Exception as e:
-                st.error(f"Error consolidating results for {pair}: {e}")
+    try:
+        rollbit_df = pd.read_sql(query, engine)
+        
+        # Fetch SURF data
+        query = f"""
+        SELECT 
+            updated_at as created_at,
+            pair_name,
+            buffer_rate,
+            position_multiplier
+        FROM 
+            public.trade_pool_pairs
+        WHERE 
+            pair_name = '{pair}'
+            AND updated_at > NOW() - INTERVAL '{days} days'
+        ORDER BY 
+            created_at
+        """
+        
+        surf_df = pd.read_sql(query, engine)
+        
+        # Check if we have data
+        if rollbit_df.empty:
+            st.warning(f"No Rollbit data available for {pair}")
+            return None
+            
+        # Create comparison plot
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10), sharex=True)
+        
+        # Plot buffer rates
+        ax1.set_title(f"Buffer Rate Comparison for {pair}")
+        
+        if not rollbit_df.empty:
+            # Convert to percent for better readability
+            ax1.plot(rollbit_df['created_at'], rollbit_df['bust_buffer'] * 100, 'r-', 
+                    label='Rollbit Buffer (%)')
+        
+        if not surf_df.empty:
+            # Make sure dates are aligned properly
+            ax1.plot(surf_df['created_at'], surf_df['buffer_rate'] * 100, 'b-', 
+                    label='SURF Buffer (%)')
+        else:
+            # If no SURF data, add a note
+            ax1.text(0.5, 0.5, "No SURF buffer rate data available", 
+                     horizontalalignment='center', verticalalignment='center',
+                     transform=ax1.transAxes, bbox=dict(facecolor='yellow', alpha=0.5))
+        
+        ax1.set_ylabel('Buffer Rate (%)')
+        ax1.grid(True, alpha=0.3)
+        ax1.legend()
+        
+        # Plot position multipliers
+        ax2.set_title(f"Position Multiplier Comparison for {pair}")
+        
+        if not rollbit_df.empty:
+            ax2.plot(rollbit_df['created_at'], rollbit_df['position_multiplier'], 'r-', 
+                    label='Rollbit Position Multiplier')
+        
+        if not surf_df.empty:
+            ax2.plot(surf_df['created_at'], surf_df['position_multiplier'], 'b-', 
+                    label='SURF Position Multiplier')
+        else:
+            # If no SURF data, add a note
+            ax2.text(0.5, 0.5, "No SURF position multiplier data available", 
+                     horizontalalignment='center', verticalalignment='center',
+                     transform=ax2.transAxes, bbox=dict(facecolor='yellow', alpha=0.5))
+        
+        ax2.set_xlabel('Date')
+        ax2.set_ylabel('Position Multiplier')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        
+        # Add data information section below the plot
+        if not rollbit_df.empty:
+            rollbit_min = rollbit_df['bust_buffer'].min() * 100
+            rollbit_max = rollbit_df['bust_buffer'].max() * 100
+            rollbit_avg = rollbit_df['bust_buffer'].mean() * 100
+            
+            st.markdown(f"""
+            ### Rollbit Buffer Rate Statistics
+            - **Min Buffer Rate:** {rollbit_min:.3f}%
+            - **Max Buffer Rate:** {rollbit_max:.3f}%
+            - **Average Buffer Rate:** {rollbit_avg:.3f}%
+            - **Number of Records:** {len(rollbit_df)}
+            """)
+        
+        plt.tight_layout()
+        return fig
     
-    return pd.DataFrame(summary_data)
+    except Exception as e:
+        st.error(f"Error fetching comparison data: {e}")
+        return None
 
 def render_rollbit_tab(days):
     st.markdown("## Rollbit Buffer Strategy Analysis")
@@ -1412,6 +1662,7 @@ def calculate_dynamic_buffer_rate(market_spread, token_type):
         
         # Visualization of the strategy
         st.markdown("### Visualization of the Recommended Strategy")
+        
         # Create example visualization
         spreads = np.linspace(0.0001, 0.005, 100)  # 1 to 50 basis points
         
@@ -1430,6 +1681,40 @@ def calculate_dynamic_buffer_rate(market_spread, token_type):
         ax.legend()
         
         st.pyplot(fig)
+
+def consolidate_results(results_dict):
+    """Consolidate analysis results into a summary dataframe"""
+    summary_data = []
+    
+    for pair, result in results_dict.items():
+        if result and 'correlation' in result:
+            try:
+                best_vol_col = result.get('best_volatility_measure', 'volatility_24h')
+                best_vol_corr = result.get('best_volatility_correlation', 
+                                       result['correlation'].loc['avg_spread', best_vol_col])
+                
+                # Handle case where best_lag might be None
+                best_lag = None
+                best_lag_corr = None
+                
+                if result['best_lag'] is not None:
+                    best_lag = result['best_lag']['lag']
+                    best_lag_corr = result['best_lag']['correlation']
+                
+                r2 = result['r2']
+                
+                summary_data.append({
+                    'pair_name': pair,
+                    'volatility_measure': best_vol_col,
+                    'spread_volatility_correlation': best_vol_corr,
+                    'best_lag_hours': best_lag,
+                    'best_lag_correlation': best_lag_corr,
+                    'r2_score': r2,
+                })
+            except Exception as e:
+                st.error(f"Error consolidating results for {pair}: {e}")
+    
+    return pd.DataFrame(summary_data)
 
 # Main app
 def main():
@@ -1493,86 +1778,19 @@ def main():
     # Main content
     tab1, tab2, tab3 = st.tabs(["Individual Pair Analysis", "Summary Results", "Rollbit Analysis"])
     
+    # Individual Pair Analysis Tab
     with tab1:
-        st.markdown("## Individual Pair Analysis")
-        st.markdown(f"Analyzing the relationship between market spreads and volatility over {selected_timeframe}")
-        
-        # Process each selected pair
-        results_dict = {}
-        
-        for pair in selected_pairs:
-            st.markdown(f"### {pair}")
-            
-            # Fetch data
-            with st.spinner(f"Fetching data for {pair}..."):
-                # Get historical spread data
-                spread_df = fetch_historical_spreads(pair, days=days)
-                
-                # Get historical price data for volatility
-                price_df = fetch_historical_prices(pair, days=days)
-                
-                if price_df is not None and not price_df.empty:
-                    vol_df = calculate_volatility(price_df, window_minutes=vol_window)
-                else:
-                    vol_df = None
-                    st.warning(f"No price data available for {pair}. Cannot calculate volatility.")
-                
-                # Combine data
-                if spread_df is not None and vol_df is not None:
-                    combined_df = combine_spread_volatility_data(spread_df, vol_df)
-                    
-                    if combined_df is None or len(combined_df) < min_data_points:
-                        st.warning(f"Not enough matched data points for {pair} (found {0 if combined_df is None else len(combined_df)}, need {min_data_points}).")
-                        continue
-                    
-                    # Analyze relationship
-                    results = analyze_relationship(combined_df)
-                    results_dict[pair] = results
-                    
-                    # Plot relationship
-                    fig = plot_spread_volatility(combined_df, pair)
-                    if fig:
-                        st.pyplot(fig)
-                    
-                    # Plot lead-lag relationship
-                    if results and 'lead_lag' in results and results['lead_lag'] is not None:
-                        lead_lag_fig = plot_lead_lag(results['lead_lag'], pair)
-                        if lead_lag_fig:
-                            st.pyplot(lead_lag_fig)
-                    
-                    # Summary stats
-                    if results and 'correlation' in results:
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            st.markdown("**Correlation Matrix**")
-                            st.dataframe(results['correlation'])
-                        
-                        with col2:
-                            st.markdown("**Regression Results**")
-                            if results.get('best_volatility_measure'):
-                                st.write(f"Best Volatility Measure: {results['best_volatility_measure'].replace('_', ' ').title()}")
-                                st.write(f"Correlation: {results['best_volatility_correlation']:.4f}")
-                            
-                            if results['regression_coefficient'] is not None:
-                                st.write(f"Coefficient: {results['regression_coefficient']:.6f}")
-                                st.write(f"R² Score: {results['r2']:.4f}")
-                            else:
-                                st.write("Regression analysis not available")
-                                
-                            if results['best_lag'] is not None:
-                                st.write(f"Best lag: {results['best_lag']['description']}")
-                                st.write(f"Lead-lag correlation: {results['best_lag']['correlation']:.4f}")
-                            else:
-                                st.write("Lead-lag analysis not available")
-                else:
-                    if spread_df is None:
-                        st.warning(f"No spread data available for {pair}")
-                    if vol_df is None and price_df is not None:
-                        st.warning(f"Could not calculate volatility for {pair}")
+        render_individual_analysis_tab(selected_pairs, days, vol_window, min_data_points)
     
+    # Summary Results Tab
     with tab2:
         st.markdown("## Summary Results")
         st.markdown("Comparison of spread-volatility relationships across all analyzed pairs")
+        
+        # Process all pairs to get results
+        results_dict, successful_pairs, failed_pairs, _ = process_all_pairs(
+            selected_pairs, days, vol_window, min_data_points
+        )
         
         # Consolidate results
         summary_df = consolidate_results(results_dict)
@@ -1733,7 +1951,8 @@ def calculate_dynamic_buffer_rate(market_spread, volatility, token_type):
             """, language="python")
         else:
             st.warning("No results available for summary. Please analyze some pairs first.")
-            
+    
+    # Rollbit Analysis Tab        
     with tab3:
         render_rollbit_tab(days)
 
