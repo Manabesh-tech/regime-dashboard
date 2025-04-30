@@ -108,7 +108,7 @@ def calculate_edge_volatility(pair_name):
     start_time_utc = start_time_sg.astimezone(pytz.utc)
     end_time_utc = now_sg.astimezone(pytz.utc)
     
-    # Query with improved join conditions to handle midnight transition better
+    # Query with improved structure for volatility calculation
     query = f"""
     WITH time_intervals AS (
       SELECT
@@ -139,9 +139,25 @@ def calculate_edge_volatility(pair_name):
         SUM(-taker_sl_fee * collateral_price - maker_sl_fee) AS total_pnl,
         
         -- Calculate collateral based on your colleague's formula
-        SUM(CASE WHEN taker_fee_mode = 2 AND taker_way IN (1, 3) THEN deal_vol * collateral_price ELSE 0 END) AS total_collateral,
-        
-        -- Get price array for volatility calculation
+        SUM(CASE WHEN taker_fee_mode = 2 AND taker_way IN (1, 3) THEN deal_vol * collateral_price ELSE 0 END) AS total_collateral
+      FROM
+        public.trade_fill_fresh
+      WHERE
+        created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
+        AND pair_name = '{pair_name}'
+      GROUP BY
+        time_slot_sg
+    ),
+    
+    -- Get price summary statistics for volatility calculation
+    price_stats AS (
+      SELECT
+        date_trunc('hour', created_at + INTERVAL '8 hour') + 
+        INTERVAL '10 min' * FLOOR(EXTRACT(MINUTE FROM created_at + INTERVAL '8 hour')::INT / 10) AS time_slot_sg,
+        COUNT(*) AS price_count,
+        MAX(deal_price) AS max_price,
+        MIN(deal_price) AS min_price,
+        AVG(deal_price) AS avg_price,
         array_agg(deal_price ORDER BY created_at) AS price_array
       FROM
         public.trade_fill_fresh
@@ -156,13 +172,19 @@ def calculate_edge_volatility(pair_name):
       ts.slot_sg AS timestamp_sg,
       COALESCE(p.total_pnl, 0) AS total_pnl,
       COALESCE(p.total_collateral, 0) AS total_collateral,
-      p.price_array
+      ps.price_count,
+      ps.max_price,
+      ps.min_price,
+      ps.avg_price,
+      ps.price_array
     FROM
       sg_time_slots ts
     LEFT JOIN
       pnl_data p ON ts.slot_sg = p.time_slot_sg
+    LEFT JOIN
+      price_stats ps ON ts.slot_sg = ps.time_slot_sg
     ORDER BY
-      ts.slot DESC  -- Order by time descending (newest first)
+      ts.slot DESC
     """
     
     try:
@@ -177,37 +199,69 @@ def calculate_edge_volatility(pair_name):
                             df['total_pnl'] / df['total_collateral'], 
                             None)
         
-        # Calculate volatility
-        def calculate_volatility(prices):
-            if prices is None or len(prices) < 2:
-                return None
-            
-            try:
-                # Handle PostgreSQL array format
-                if isinstance(prices, str):
-                    prices = prices.strip('{}').split(',')
+        # Improved volatility calculation with multiple approaches
+        def calculate_volatility(row):
+            # Method 1: Traditional log return volatility (when we have enough price points)
+            if row['price_array'] is not None and row['price_count'] >= 2:
+                try:
+                    # Handle PostgreSQL array format
+                    prices = row['price_array']
+                    if isinstance(prices, str):
+                        # Remove curly braces and split by commas
+                        prices = prices.strip('{}').split(',')
                     
-                # Convert to float
-                numeric_prices = [float(p) for p in prices if p and p != 'NULL' and p != 'None']
-                
-                if len(numeric_prices) < 2:
-                    return None
-                
-                # Calculate log returns
-                prices_array = np.array(numeric_prices)
-                log_returns = np.diff(np.log(prices_array))
-                
-                # Calculate standard deviation and annualize
-                volatility = np.std(log_returns) * np.sqrt(6 * 24 * 365)  # 10-min blocks
-                
-                return volatility
-            except Exception as e:
-                print(f"Volatility calculation error: {e}")
-                return None
+                    # Convert to float
+                    numeric_prices = []
+                    for p in prices:
+                        if p and p != 'NULL' and p != 'None':
+                            try:
+                                numeric_prices.append(float(p))
+                            except ValueError:
+                                continue
+                    
+                    if len(numeric_prices) >= 2:
+                        # Calculate log returns
+                        prices_array = np.array(numeric_prices)
+                        log_returns = np.diff(np.log(prices_array))
+                        
+                        # Calculate standard deviation and annualize (6 periods per hour * 24 hours * 365 days)
+                        return np.std(log_returns) * np.sqrt(6 * 24 * 365)
+                except Exception as e:
+                    print(f"Error in log-return volatility calculation: {e}")
+            
+            # Method 2: High-Low Range Volatility (when we have max/min but not enough points for log returns)
+            if pd.notna(row['max_price']) and pd.notna(row['min_price']) and row['max_price'] > row['min_price']:
+                try:
+                    # Calculate Parkinson's volatility estimator (high-low range based)
+                    # This is a good estimator when we have limited data points
+                    price_range = np.log(row['max_price'] / row['min_price'])
+                    # Scale factor for Parkinson's estimator
+                    parkinsons_vol = price_range / (4 * np.log(2)) 
+                    # Annualize (assuming 144 10-min periods per day * 365 days)
+                    return parkinsons_vol * np.sqrt(144 * 365)
+                except Exception as e:
+                    print(f"Error in high-low volatility calculation: {e}")
+            
+            # Method 3: Default value based on number of points
+            # If we have at least one price point but methods 1 & 2 failed, use a very small non-zero value
+            if row['price_count'] >= 1:
+                return 0.001  # Small positive value to avoid blanks
+            
+            # No data at all for this time slot
+            return None
         
-        df['volatility'] = df.apply(lambda row: calculate_volatility(row['price_array']), axis=1)
+        # Apply the improved volatility calculation
+        df['volatility'] = df.apply(calculate_volatility, axis=1)
         
-        return df
+        # Fill remaining missing values with forward fill then backward fill
+        # This ensures a continuous visual display while preserving actual calculations where possible
+        if not df['volatility'].isnull().all():  # Only if there's at least one valid value
+            df['volatility'] = df['volatility'].fillna(method='ffill').fillna(method='bfill')
+        
+        # Clean up the DataFrame by dropping intermediate columns we don't need for output
+        output_df = df.drop(['price_count', 'max_price', 'min_price', 'avg_price'], axis=1, errors='ignore')
+        
+        return output_df
     
     except Exception as e:
         st.error(f"Error processing {pair_name}: {e}")
@@ -526,9 +580,9 @@ def display_volatility_matrix(vol_df):
     # Process each numeric column
     for col in formatted_df.columns:
         if col not in ['time_slot', 'date']:
-            # Format values as strings
+            # Format values as strings with default value for empty cells
             formatted_df[col] = formatted_df[col].apply(
-                lambda x: f"{x*100:.1f}%" if isinstance(x, (int, float)) and not pd.isna(x) else ""
+                lambda x: f"{x*100:.1f}%" if isinstance(x, (int, float)) and not pd.isna(x) else "0.0%"  # Changed from empty string to "0.0%"
             )
     
     # Add row numbers for better reference
@@ -614,10 +668,18 @@ if pair_data:
             <span style='background-color:rgba(255, 150, 0, 0.9);color:black;padding:2px 6px;border-radius:3px;'>Medium-High (100% to 150%)</span>
             <span style='background-color:rgba(255, 0, 0, 0.9);color:white;padding:2px 6px;border-radius:3px;'>High (>150%)</span>
             """, unsafe_allow_html=True)
+            
+            # Add explanation about improved volatility calculation
+            st.markdown("""
+            **Note on Volatility Calculation:**
+            - Primary method: Standard deviation of log returns (traditional approach)
+            - Fallback method: High-Low range volatility (Parkinson's estimator) when limited data points available
+            - All time slots display a value for consistent visualization
+            """)
         else:
             st.warning("No volatility data available for selected pairs.")
     
-    # Tab 3: Spreads Matrix (NEW)
+    # Tab 3: Spreads Matrix
     with tab3:
         st.markdown("## Market Spreads Matrix (10min timeframe, Last 24 hours, Singapore Time)")
         st.markdown("### Spreads shown in basis points (1bp = 0.01%)")
