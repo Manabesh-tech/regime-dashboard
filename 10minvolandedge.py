@@ -91,19 +91,8 @@ def generate_time_slots():
     
     return slots, time_labels, date_labels
 
-time_slots, time_labels, date_labels = generate_time_slots()
-
-# Add visual indicator for date change
-def add_date_indicators(df):
-    # Add a column to indicate date changes
-    df['date_change'] = False
-    
-    # Mark rows where date changes
-    for i in range(1, len(df)):
-        if df.loc[i, 'date'] != df.loc[i-1, 'date']:
-            df.loc[i, 'date_change'] = True
-    
-    return df (minute // 10) * 10
+# Initialize time slots
+time_slots, time_labels, date_labels = generate_time_slots() (minute // 10) * 10
         slot = current.replace(minute=rounded_minute, second=0, microsecond=0)
         slots.append(slot)
         current -= timedelta(minutes=10)
