@@ -573,6 +573,7 @@ def display_edge_matrix(edge_df):
     return formatted_df
 
 # Function to display volatility matrix with custom formatting and date separators
+# Function to display volatility matrix with custom formatting and color coding
 def display_volatility_matrix(vol_df):
     # Create a DataFrame with formatted values
     formatted_df = vol_df.copy()
@@ -580,9 +581,9 @@ def display_volatility_matrix(vol_df):
     # Process each numeric column
     for col in formatted_df.columns:
         if col not in ['time_slot', 'date']:
-            # Format values as strings with default value for empty cells
+            # Format values as strings with appropriate formatting
             formatted_df[col] = formatted_df[col].apply(
-                lambda x: f"{x*100:.1f}%" if isinstance(x, (int, float)) and not pd.isna(x) else "0.0%"  # Changed from empty string to "0.0%"
+                lambda x: f"{x*100:.1f}%" if isinstance(x, (int, float)) and not pd.isna(x) else ""
             )
     
     # Add row numbers for better reference
