@@ -10,12 +10,12 @@ from sklearn.metrics import r2_score
 
 # Page configuration
 st.set_page_config(
-    page_title="Market Spreads vs Volatility Analysis", 
+    page_title="Market Spreads vs Volatility Analysis",
     layout="wide"
 )
 
-st.title("Market Spreads vs Volatility Analysis")
-st.markdown("Analyzing the relationship between market spreads and volatility to optimize buffer rates")
+st.title("Enhanced Market Spreads vs Volatility Analysis")
+st.markdown("Advanced analysis of the relationship between market spreads and volatility with improved estimation techniques")
 
 # DB connection
 try:
@@ -27,12 +27,15 @@ try:
     engine = create_engine(db_uri)
 except Exception as e:
     st.error(f"Database connection error: {e}")
-    st.stop()
+    db_uri = None  # For local testing without DB
 
 # Fetch active pairs
 @st.cache_data(ttl=600)
 def fetch_active_pairs():
     """Fetch pairs that have been active in the last 30 days"""
+    if db_uri is None:
+        return ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "BNB/USDT"]
+    
     query = """
     SELECT DISTINCT pair_name 
     FROM public.trade_fill_fresh 
@@ -43,11 +46,11 @@ def fetch_active_pairs():
     try:
         df = pd.read_sql(query, engine)
         if df.empty:
-            return []
+            return ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "BNB/USDT"]
         return df['pair_name'].tolist()
     except Exception as e:
         st.error(f"Error fetching pairs: {e}")
-        return ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+        return ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "BNB/USDT"]
 
 # Define timeframes for analysis
 def get_timeframe_options():
@@ -63,6 +66,18 @@ def get_timeframe_options():
 @st.cache_data(ttl=600)
 def fetch_historical_spreads(pair_name, days=7):
     """Fetch historical spread data for a given pair with better filtering"""
+    if db_uri is None:
+        # Generate mock data for testing without DB
+        dates = pd.date_range(end=datetime.now(), periods=24*days, freq='H')
+        mock_data = {
+            'hour': dates,
+            'binanceFuture': np.random.uniform(0.0001, 0.001, len(dates)),
+            'gateFuture': np.random.uniform(0.0001, 0.0015, len(dates)),
+            'hyperliquidFuture': np.random.uniform(0.0001, 0.002, len(dates)),
+            'avg_spread': np.random.uniform(0.0002, 0.0012, len(dates))
+        }
+        return pd.DataFrame(mock_data).set_index('hour')
+    
     # Calculate time range
     end_time = datetime.now(pytz.utc)
     start_time = end_time - timedelta(days=days)
@@ -127,10 +142,33 @@ def fetch_historical_spreads(pair_name, days=7):
         st.error(f"Error fetching historical spreads for {pair_name}: {e}")
         return None
 
-# Calculate historical volatility with improved granularity and method
+# Fetch historical prices with robust fallback methods
 @st.cache_data(ttl=600)
 def fetch_historical_prices(pair_name, days=7):
     """Fetch historical price data with multiple fallback methods to ensure data availability"""
+    if db_uri is None:
+        # Generate mock data for testing without DB
+        dates = pd.date_range(end=datetime.now(), periods=24*days*12, freq='5min')
+        price_base = 100 if "BTC" in pair_name else (3000 if "ETH" in pair_name else 50)
+        price_volatility = 0.05 if "BTC" in pair_name else (0.07 if "ETH" in pair_name else 0.1)
+        
+        # Generate price movement with realistic patterns
+        random_walk = np.cumprod(1 + np.random.normal(0, price_volatility/np.sqrt(12*24), len(dates)))
+        prices = price_base * random_walk
+        
+        # Create mock data with first, last, high, low, etc.
+        mock_data = {
+            'interval': dates,
+            'deal_price_first': prices,
+            'deal_price_last': prices * (1 + np.random.normal(0, 0.001, len(dates))),
+            'deal_price_mean': prices * (1 + np.random.normal(0, 0.0005, len(dates))),
+            'deal_price_max': prices * (1 + np.random.uniform(0.001, 0.01, len(dates))),
+            'deal_price_min': prices * (1 - np.random.uniform(0.001, 0.01, len(dates))),
+            'deal_price_count': np.random.randint(10, 100, len(dates)),
+            'deal_price_std': prices * np.random.uniform(0.0001, 0.005, len(dates))
+        }
+        return pd.DataFrame(mock_data)
+    
     # Calculate time range
     end_time = datetime.now(pytz.utc)
     start_time = end_time - timedelta(days=days)
@@ -294,7 +332,7 @@ def fetch_historical_prices(pair_name, days=7):
         return None
 
 def calculate_volatility(price_df, window_minutes=60):
-    """Calculate rolling volatility from price data with more granular timeframes"""
+    """Calculate rolling volatility with multiple timeframes and methods for more accurate measurement"""
     if price_df is None or len(price_df) < 10:
         return None
     
@@ -310,6 +348,7 @@ def calculate_volatility(price_df, window_minutes=60):
     
     # Use log returns for better statistical properties
     vol_df['log_return'] = np.log(vol_df['deal_price_last'] / vol_df['prev_price'])
+    vol_df['pct_return'] = (vol_df['deal_price_last'] / vol_df['prev_price']) - 1
     
     # Add interval-specific volatility (using price std dev within interval)
     vol_df['interval_volatility'] = vol_df['deal_price_std'] / vol_df['deal_price_mean']
@@ -323,32 +362,87 @@ def calculate_volatility(price_df, window_minutes=60):
             upper_bound = mean_return + (5 * std_return)
             vol_df = vol_df[(vol_df['log_return'] > lower_bound) & (vol_df['log_return'] < upper_bound)]
     
-    # Convert window_minutes to number of 5-minute intervals
-    window_size = max(2, int(window_minutes / 5))
+    # Calculate multiple timeframe volatility measures
+    timeframes = [
+        # Very short-term (intraday)
+        ('volatility_vshort', 3),       # ~15 min
+        # Short-term
+        ('volatility_short', 6),        # ~30 min
+        # Medium-term
+        ('volatility_medium', 12),      # ~1 hour
+        # Standard (original implementation)
+        ('volatility_std', max(2, int(window_minutes / 5))),
+        # Long-term
+        ('volatility_long', 72),        # ~6 hours
+        # Very long-term
+        ('volatility_vlong', 144)       # ~12 hours
+    ]
     
-    # Ensure window size is reasonable given available data
-    window_size = min(window_size, len(vol_df) // 3)
-    window_size = max(2, window_size)  # Ensure at least 2
+    # Add Parkinson's volatility (uses high-low range)
+    if 'deal_price_max' in vol_df.columns and 'deal_price_min' in vol_df.columns:
+        vol_df['log_high_low'] = np.log(vol_df['deal_price_max'] / vol_df['deal_price_min'])
+        vol_df['parkinson_vol'] = np.sqrt(vol_df['log_high_low'].rolling(window=12).mean() / (4 * np.log(2))) * np.sqrt(12 * 24 * 365)
     
-    # Calculate multiple volatility measures
-    # 1. Short-term (5-min intervals rolling)
-    vol_df['volatility_short'] = vol_df['log_return'].rolling(window=3).std() * np.sqrt(12 * 24 * 365)
+    # Add Garman-Klass volatility if we have open/close/high/low
+    if 'deal_price_first' in vol_df.columns:
+        vol_df['log_close_open'] = np.log(vol_df['deal_price_last'] / vol_df['deal_price_first'])
+        if 'deal_price_max' in vol_df.columns and 'deal_price_min' in vol_df.columns:
+            vol_df['garman_klass_term1'] = 0.5 * np.power(np.log(vol_df['deal_price_max'] / vol_df['deal_price_min']), 2)
+            vol_df['garman_klass_term2'] = (2*np.log(2) - 1) * np.power(vol_df['log_close_open'], 2)
+            vol_df['garman_klass_vol'] = np.sqrt(vol_df[['garman_klass_term1', 'garman_klass_term2']].sum(axis=1).rolling(window=12).mean()) * np.sqrt(12 * 24 * 365)
     
-    # 2. Medium-term (approximately 1-hour rolling)
-    vol_df['volatility_medium'] = vol_df['log_return'].rolling(window=window_size).std() * np.sqrt(12 * 24 * 365)
+    # Calculate each volatility measure with its specific timeframe
+    for vol_name, window_size in timeframes:
+        # Ensure window size is reasonable
+        actual_window = min(window_size, max(2, len(vol_df) // 3))
+        
+        # Calculate standard deviation-based volatility (annualized)
+        vol_df[vol_name] = vol_df['log_return'].rolling(window=actual_window).std() * np.sqrt(12 * 24 * 365)
     
-    # 3. Full period volatility
-    vol_df['volatility_full'] = vol_df['log_return'].expanding().std() * np.sqrt(12 * 24 * 365)
+    # Add EWMA volatility with different decay factors
+    spans = [
+        ('volatility_ewma_fast', 6),     # Fast decay (recent points matter more)
+        ('volatility_ewma_medium', 12),  # Medium decay
+        ('volatility_ewma_slow', 24)     # Slow decay (longer history matters)
+    ]
     
-    # 4. EWMA volatility (gives more weight to recent observations)
-    vol_df['volatility_ewma'] = vol_df['log_return'].ewm(span=window_size).std() * np.sqrt(12 * 24 * 365)
+    for vol_name, span in spans:
+        vol_df[vol_name] = vol_df['log_return'].ewm(span=span).std() * np.sqrt(12 * 24 * 365)
+    
+    # Add Yang-Zhang volatility estimator if we have the required data
+    # This is considered one of the best estimators for financial volatility
+    if all(col in vol_df.columns for col in ['deal_price_first', 'deal_price_last', 'deal_price_max', 'deal_price_min']):
+        # Overnight volatility
+        vol_df['log_open_close_prev'] = np.log(vol_df['deal_price_first'] / vol_df['deal_price_last'].shift(1))
+        vol_df['overnight_vol'] = vol_df['log_open_close_prev'].rolling(window=12).var()
+        
+        # Open-to-close volatility
+        vol_df['log_open_close'] = np.log(vol_df['deal_price_last'] / vol_df['deal_price_first'])
+        vol_df['open_close_vol'] = vol_df['log_open_close'].rolling(window=12).var()
+        
+        # Rogers-Satchell volatility
+        vol_df['log_high_open'] = np.log(vol_df['deal_price_max'] / vol_df['deal_price_first'])
+        vol_df['log_high_close'] = np.log(vol_df['deal_price_max'] / vol_df['deal_price_last'])
+        vol_df['log_low_open'] = np.log(vol_df['deal_price_min'] / vol_df['deal_price_first'])
+        vol_df['log_low_close'] = np.log(vol_df['deal_price_min'] / vol_df['deal_price_last'])
+        
+        vol_df['rs_vol'] = vol_df['log_high_open'] * vol_df['log_high_close'] + vol_df['log_low_open'] * vol_df['log_low_close']
+        vol_df['rs_vol'] = vol_df['rs_vol'].rolling(window=12).mean()
+        
+        # Calculate Yang-Zhang volatility
+        k = 0.34 / (1.34 + (12 + 1) / (12 - 1))
+        vol_df['yang_zhang_vol'] = vol_df['overnight_vol'] + k * vol_df['open_close_vol'] + (1 - k) * vol_df['rs_vol']
+        vol_df['yang_zhang_vol'] = np.sqrt(vol_df['yang_zhang_vol']) * np.sqrt(12 * 24 * 365)
     
     # Handle missing values without using inplace=True
-    for col in ['volatility_short', 'volatility_medium', 'volatility_full', 'volatility_ewma']:
-        vol_df[col] = vol_df[col].bfill().ffill()
+    vol_columns = [col for col in vol_df.columns if 'volatility' in col or 'vol' in col]
+    for col in vol_columns:
+        if col in vol_df.columns:
+            vol_df[col] = vol_df[col].bfill().ffill()
     
     # Add timestamps in different formats for easier joining
     vol_df['hour'] = vol_df['interval'].dt.floor('H')
+    vol_df['minute'] = vol_df['interval'].dt.floor('min')
     
     return vol_df
 
@@ -367,16 +461,17 @@ def combine_spread_volatility_data(spread_df, vol_df):
     elif 'hour' not in spread_df.columns:
         spread_df['hour'] = pd.to_datetime(spread_df['hour'])
     
+    # Get all volatility columns
+    vol_cols = [col for col in vol_df.columns if 'volatility' in col or 'vol' in col]
+    
     # Create an hourly grouped volatility dataframe
-    hourly_vol_df = vol_df.groupby('hour').agg({
-        'volatility_short': 'mean',
-        'volatility_medium': 'mean',
-        'volatility_full': 'mean',
-        'volatility_ewma': 'mean',
-        'interval_volatility': 'mean',
+    agg_dict = {col: 'mean' for col in vol_cols}
+    agg_dict.update({
         'log_return': ['mean', 'std'],
         'deal_price_mean': 'mean'
     })
+    
+    hourly_vol_df = vol_df.groupby('hour').agg(agg_dict)
     
     # Flatten multi-index columns if needed
     if isinstance(hourly_vol_df.columns, pd.MultiIndex):
@@ -429,19 +524,54 @@ def combine_spread_volatility_data(spread_df, vol_df):
     
     return merged_df
 
+def get_vol_timeframe(vol_name):
+    """Return the approximate timeframe for a volatility measure based on its name"""
+    if 'vshort' in vol_name:
+        return "~15 min"
+    elif 'short' in vol_name:
+        return "~30 min"
+    elif 'medium' in vol_name:
+        return "~1 hour"
+    elif 'std' in vol_name:
+        return "~1 hour"
+    elif 'long' in vol_name:
+        return "~6 hours"
+    elif 'vlong' in vol_name:
+        return "~12 hours"
+    elif 'ewma_fast' in vol_name:
+        return "Recent weighted"
+    elif 'ewma_medium' in vol_name:
+        return "Medium weighted"
+    elif 'ewma_slow' in vol_name:
+        return "Long weighted"
+    elif 'parkinson' in vol_name:
+        return "Range-based"
+    elif 'garman_klass' in vol_name:
+        return "OHLC-based"
+    elif 'yang_zhang' in vol_name:
+        return "Advanced OHLC"
+    else:
+        return "Unknown"
+
 def analyze_relationship(combined_df):
-    """Analyze the relationship between spreads and volatility with multiple measures"""
+    """Analyze the relationship between spreads and volatility with more detailed diagnostics"""
     if combined_df is None or len(combined_df) < 10:
         return None
     
+    # Find all volatility measures
+    vol_cols = [col for col in combined_df.columns if 'volatility' in col or 'vol' in col]
+    
+    # Make sure we have at least one volatility column
+    if not vol_cols:
+        return None
+    
     # Create correlation matrix with all volatility measures
-    vol_cols = [col for col in combined_df.columns if 'volatility' in col]
     corr_columns = ['avg_spread'] + vol_cols
     
     # Make sure all required columns exist
     available_columns = [col for col in corr_columns if col in combined_df.columns]
     
-    if len(available_columns) < 3:  # Need at least spread and two vol measures
+    if len(available_columns) < 2:  # Need at least spread and one vol measure
         return None
     
     # Drop rows with NaN values for correlation calculation
@@ -454,8 +584,53 @@ def analyze_relationship(combined_df):
     
     # Determine which volatility measure has the strongest correlation with spread
     spread_correlations = correlation.loc['avg_spread', vol_cols]
-    best_vol_col = spread_correlations.abs().idxmax()
-    best_corr = spread_correlations[best_vol_col]
+    
+    # Get both strongest positive and negative correlations
+    positive_corr = spread_correlations[spread_correlations > 0]
+    negative_corr = spread_correlations[spread_correlations < 0]
+    
+    # Find strongest correlations in each direction
+    best_positive_col = None if positive_corr.empty else positive_corr.idxmax()
+    best_positive_corr = None if positive_corr.empty else positive_corr.max()
+    
+    best_negative_col = None if negative_corr.empty else negative_corr.idxmin()
+    best_negative_corr = None if negative_corr.empty else negative_corr.min()
+    
+    # Determine which correlation is stronger (by absolute value)
+    if best_positive_corr is None and best_negative_corr is None:
+        # No correlations at all
+        return None
+    elif best_positive_corr is None:
+        # Only negative correlations
+        best_vol_col = best_negative_col
+        best_corr = best_negative_corr
+    elif best_negative_corr is None:
+        # Only positive correlations
+        best_vol_col = best_positive_col
+        best_corr = best_positive_corr
+    else:
+        # Both exist, choose the stronger one by absolute value
+        if abs(best_positive_corr) >= abs(best_negative_corr):
+            best_vol_col = best_positive_col
+            best_corr = best_positive_corr
+        else:
+            best_vol_col = best_negative_col
+            best_corr = best_negative_corr
+    
+    # Store correlation data for all volatility measures
+    all_correlations = []
+    for col in vol_cols:
+        corr_value = correlation.loc['avg_spread', col]
+        all_correlations.append({
+            'measure': col,
+            'correlation': corr_value,
+            'abs_correlation': abs(corr_value),
+            'timeframe': get_vol_timeframe(col)
+        })
+    
+    all_correlations_df = pd.DataFrame(all_correlations)
+    if not all_correlations_df.empty:
+        all_correlations_df = all_correlations_df.sort_values('abs_correlation', ascending=False)
     
     # For regression, use the volatility measure with the strongest correlation
     reg_df = combined_df[['avg_spread', best_vol_col]].dropna()
@@ -466,6 +641,8 @@ def analyze_relationship(combined_df):
             'correlation': correlation,
             'best_volatility_measure': best_vol_col,
             'best_volatility_correlation': best_corr,
+            'all_correlations': all_correlations_df,
+            'correlation_direction': 'positive' if best_corr > 0 else 'negative',
             'regression_coefficient': None,
             'r2': None,
             'lead_lag': None,
@@ -521,6 +698,8 @@ def analyze_relationship(combined_df):
             'correlation': correlation,
             'best_volatility_measure': best_vol_col,
             'best_volatility_correlation': best_corr,
+            'all_correlations': all_correlations_df,
+            'correlation_direction': 'positive' if best_corr > 0 else 'negative',
             'regression_coefficient': model.coef_[0],
             'r2': r2,
             'lead_lag': leads_lags_df,
@@ -533,11 +712,114 @@ def analyze_relationship(combined_df):
             'correlation': correlation,
             'best_volatility_measure': best_vol_col,
             'best_volatility_correlation': best_corr,
+            'all_correlations': all_correlations_df,
+            'correlation_direction': 'positive' if best_corr > 0 else 'negative',
             'regression_coefficient': None,
             'r2': None,
             'lead_lag': None,
             'best_lag': None
         }
+
+def display_all_correlations(results, pair_name):
+    """Display detailed correlation analysis between spread and all volatility measures"""
+    if results is None or 'all_correlations' not in results or results['all_correlations'] is None:
+        st.warning("No correlation data available to display")
+        return
+        
+    all_corrs = results['all_correlations']
+    
+    st.markdown("### Correlation Analysis by Volatility Timeframe")
+    st.markdown(f"Showing all correlations between spread and volatility measures for {pair_name}")
+    
+    # Format for display
+    display_df = all_corrs.copy()
+    display_df = display_df.rename(columns={
+        'measure': 'Volatility Measure',
+        'correlation': 'Correlation', 
+        'abs_correlation': 'Abs. Correlation',
+        'timeframe': 'Timeframe'
+    })
+    
+    # Format the measure names
+    display_df['Volatility Measure'] = display_df['Volatility Measure'].apply(
+        lambda x: x.replace('_', ' ').title()
+    )
+    
+    st.dataframe(display_df)
+    
+    # Create a correlation bar chart
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    # Sort by timeframe for better visualization
+    plot_df = all_corrs.sort_values('measure')
+    
+    # Use a more visually appealing style with color coding
+    bars = ax.bar(plot_df['measure'].apply(lambda x: x.replace('volatility_', 'vol_')), 
+                 plot_df['correlation'], 
+                 color=[('g' if c >= 0 else 'r') for c in plot_df['correlation']])
+    
+    # Add a horizontal line at y=0
+    ax.axhline(y=0, color='k', linestyle='-', alpha=0.3)
+    
+    # Highlight the best correlation
+    best_idx = plot_df['abs_correlation'].idxmax()
+    if not pd.isna(best_idx):
+        best_measure = plot_df.loc[best_idx, 'measure']
+        best_index = plot_df['measure'].tolist().index(best_measure)
+        bars[best_index].set_color('blue')
+        bars[best_index].set_edgecolor('black')
+        bars[best_index].set_linewidth(1.5)
+    
+    # Format x-axis labels
+    plt.xticks(rotation=45, ha='right')
+    plt.ylim(-1, 1)
+    
+    # Add labels and title
+    ax.set_xlabel('Volatility Measure')
+    ax.set_ylabel('Correlation with Spread')
+    ax.set_title(f'Spread-Volatility Correlation by Measure for {pair_name}')
+    
+    plt.tight_layout()
+    st.pyplot(fig)
+    
+    # Add interpretation
+    st.markdown("### Interpretation")
+    
+    best_measure = all_corrs.iloc[0]['measure'].replace('_', ' ').title()
+    best_corr = all_corrs.iloc[0]['correlation']
+    best_timeframe = all_corrs.iloc[0]['timeframe']
+    
+    if abs(best_corr) > 0.7:
+        strength = "very strong"
+    elif abs(best_corr) > 0.5:
+        strength = "strong"
+    elif abs(best_corr) > 0.3:
+        strength = "moderate"
+    else:
+        strength = "weak"
+    
+    direction = "positive" if best_corr > 0 else "negative"
+    
+    st.markdown(f"""
+    - **Best Volatility Measure**: {best_measure} ({best_timeframe})
+    - **Correlation Strength**: {strength} {direction} correlation ({best_corr:.3f})
+    
+    #### What this means:
+    
+    A {direction} correlation means that as volatility increases, spreads tend to {"increase" if direction == "positive" else "decrease"}.
+    """)
+    
+    if direction == "negative":
+        st.markdown("""
+        **Negative correlation is unusual but can occur when:**
+        
+        1. **Market makers are very active**: They might tighten spreads during high volatility to capture more trading volume
+        2. **Exchange incentives**: Some exchanges offer rebates for market makers who maintain tight spreads during volatile periods
+        3. **Time lag effects**: There might be a delay between volatility changes and spread responses
+        4. **Volatility calculation method**: Different volatility measures capture different aspects of price movement
+        
+        Try examining the lead-lag relationship to see if volatility changes precede spread changes by several hours.
+        """)
 
 def plot_spread_volatility(combined_df, pair_name):
     """Plot spread vs. volatility relationship with more compact layout"""
@@ -546,7 +828,7 @@ def plot_spread_volatility(combined_df, pair_name):
         return
     
     # Identify which volatility measures are available
-    vol_cols = [col for col in combined_df.columns if 'volatility' in col]
+    vol_cols = [col for col in combined_df.columns if 'volatility' in col or 'vol' in col]
     if not vol_cols:
         st.warning(f"No volatility measures available for {pair_name}")
         return
@@ -591,7 +873,7 @@ def plot_spread_volatility(combined_df, pair_name):
     
     # Create a more compact figure - reduced height and simplified layout
     # Using just 2 panels instead of 3, with smaller size
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 8))
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 8), dpi=100)
     
     # First subplot - Time series
     measure_name = best_vol_col.replace('_', ' ').title()
@@ -674,7 +956,7 @@ def plot_lead_lag(lead_lag_df, pair_name):
     if clean_df.empty or len(clean_df) < 3:
         return None
     
-    fig, ax = plt.subplots(figsize=(7, 4))
+    fig, ax = plt.subplots(figsize=(7, 4), dpi=100)
     
     # Use a more visually appealing style
     bars = ax.bar(clean_df['lag'], clean_df['correlation'], width=0.7, 
@@ -889,6 +1171,10 @@ def render_individual_analysis_tab(selected_pairs, days, vol_window, min_data_po
                     vol_df = calculate_volatility(price_df, window_minutes=vol_window)
                     combined_df = combine_spread_volatility_data(spread_df, vol_df)
                     
+                    # Display detailed correlation analysis
+                    if pair_to_view in results_dict:
+                        display_all_correlations(results_dict[pair_to_view], pair_to_view)
+                    
                     # Display results side by side
                     col1, col2 = st.columns([3, 2])
                     
@@ -950,738 +1236,6 @@ def render_individual_analysis_tab(selected_pairs, days, vol_window, min_data_po
         else:
             st.success("All pairs were analyzed successfully!")
 
-def fetch_rollbit_buffer_vs_spread(days=30):
-    """Analyze if Rollbit buffer rates correlate with market spreads"""
-    query = f"""
-    WITH rollbit_data AS (
-        SELECT 
-            created_at,
-            pair_name,
-            bust_buffer
-        FROM 
-            rollbit_pair_config
-        WHERE 
-            created_at > NOW() - INTERVAL '{days} days'
-    ),
-    
-    daily_spreads AS (
-        SELECT 
-            date_trunc('day', time_group) as day,
-            pair_name,
-            AVG(fee1) as avg_spread
-        FROM 
-            oracle_exchange_fee
-        WHERE 
-            time_group > NOW() - INTERVAL '{days} days'
-            AND source IN ('binanceFuture', 'gateFuture', 'hyperliquidFuture')
-        GROUP BY 
-            day, pair_name
-    )
-    
-    SELECT 
-        r.created_at,
-        r.pair_name,
-        r.bust_buffer,
-        s.avg_spread
-    FROM 
-        rollbit_data r
-    JOIN 
-        daily_spreads s ON r.pair_name = s.pair_name
-        AND date_trunc('day', r.created_at) = s.day
-    ORDER BY
-        r.pair_name, r.created_at
-    """
-    
-    try:
-        df = pd.read_sql(query, engine)
-        if df.empty:
-            return None
-        
-        # Calculate correlation by pair
-        correlations = []
-        for pair, group in df.groupby('pair_name'):
-            if len(group) > 5:  # Need reasonable sample size
-                corr = group['bust_buffer'].corr(group['avg_spread'])
-                correlations.append({
-                    'pair_name': pair,
-                    'correlation': corr,
-                    'data_points': len(group),
-                    'rollbit_buffer_avg': group['bust_buffer'].mean() * 100,  # Convert to percentage
-                    'spread_avg': group['avg_spread'].mean() * 10000,  # Convert to basis points
-                    'ratio': (group['bust_buffer'].mean() / group['avg_spread'].mean()) if group['avg_spread'].mean() > 0 else None
-                })
-        
-        return pd.DataFrame(correlations)
-    
-    except Exception as e:
-        st.error(f"Error analyzing Rollbit buffer vs spread: {e}")
-        return None
-
-def analyze_rollbit_buffer_adjustment_pattern(days=30):
-    """Analyze how Rollbit adjusts buffer rates - by size, frequency, and direction"""
-    query = f"""
-    WITH rollbit_changes AS (
-        SELECT 
-            pair_name,
-            created_at,
-            bust_buffer,
-            position_multiplier,
-            LAG(bust_buffer) OVER (PARTITION BY pair_name ORDER BY created_at) AS prev_buffer,
-            LAG(position_multiplier) OVER (PARTITION BY pair_name ORDER BY created_at) AS prev_multiplier
-        FROM 
-            rollbit_pair_config
-        WHERE 
-            created_at > NOW() - INTERVAL '{days} days'
-    )
-    
-    SELECT 
-        pair_name,
-        created_at,
-        bust_buffer,
-        prev_buffer,
-        CASE 
-            WHEN prev_buffer IS NOT NULL THEN (bust_buffer - prev_buffer) / prev_buffer * 100
-            ELSE NULL
-        END AS buffer_pct_change,
-        position_multiplier,
-        prev_multiplier,
-        CASE 
-            WHEN prev_multiplier IS NOT NULL THEN (position_multiplier - prev_multiplier) / prev_multiplier * 100
-            ELSE NULL
-        END AS multiplier_pct_change
-    FROM 
-        rollbit_changes
-    WHERE 
-        prev_buffer IS NOT NULL OR prev_multiplier IS NOT NULL
-    ORDER BY 
-        pair_name, created_at
-    """
-    
-    try:
-        df = pd.read_sql(query, engine)
-        if df.empty:
-            return None
-        
-        # Analyze patterns in the adjustments
-        adjustments = []
-        for pair, group in df.groupby('pair_name'):
-            # Buffer adjustments
-            buffer_changes = group['buffer_pct_change'].dropna()
-            
-            # Skip pairs with insufficient data
-            if len(buffer_changes) < 3:
-                continue
-                
-            # Calculate statistics
-            avg_buffer_change = buffer_changes.abs().mean()
-            std_buffer_change = buffer_changes.std()
-            max_buffer_increase = buffer_changes.max()
-            max_buffer_decrease = buffer_changes.min()
-            
-            # Calculate frequency of adjustments
-            first_date = group['created_at'].min()
-            last_date = group['created_at'].max()
-            days_span = (last_date - first_date).total_seconds() / (24 * 3600)
-            
-            adjustments_count = len(buffer_changes)
-            avg_days_between = days_span / adjustments_count if adjustments_count > 0 else None
-            
-            adjustments.append({
-                'pair_name': pair,
-                'data_points': len(group),
-                'days_analyzed': days_span,
-                'buffer_adjustments_count': adjustments_count,
-                'avg_days_between_adjustments': avg_days_between,
-                'avg_buffer_change_pct': avg_buffer_change,
-                'std_buffer_change_pct': std_buffer_change,
-                'max_buffer_increase_pct': max_buffer_increase,
-                'max_buffer_decrease_pct': max_buffer_decrease,
-                'increases_count': len(buffer_changes[buffer_changes > 0]),
-                'decreases_count': len(buffer_changes[buffer_changes < 0]),
-                'buffer_current': group['bust_buffer'].iloc[-1] * 100,  # Convert to percentage
-                'buffer_min': group['bust_buffer'].min() * 100,
-                'buffer_max': group['bust_buffer'].max() * 100
-            })
-        
-        return pd.DataFrame(adjustments)
-        
-    except Exception as e:
-        st.error(f"Error analyzing Rollbit adjustment patterns: {e}")
-        return None
-
-def analyze_rollbit_by_token_type(df):
-    """Analyze Rollbit's buffer strategies by token type"""
-    if df is None or df.empty:
-        return None
-    
-    # Define token categories
-    major_tokens = ["BTC", "ETH", "SOL", "XRP", "BNB", "DOGE"]
-    stablecoins = ["USDT", "USDC", "DAI"]
-    
-    # Add token type column
-    df['token_type'] = 'Altcoin'  # Default
-    
-    for idx, row in df.iterrows():
-        pair = row['pair_name']
-        
-        # Check if any major token is in the pair
-        if any(token in pair for token in major_tokens):
-            df.at[idx, 'token_type'] = 'Major'
-            
-        # Check if any stablecoin is in the pair
-        if any(token in pair for token in stablecoins):
-            df.at[idx, 'token_type'] = 'Stablecoin'
-    
-    # Group by token type and calculate averages
-    token_analysis = df.groupby('token_type').agg({
-        'buffer_current': 'mean',
-        'avg_buffer_change_pct': 'mean',
-        'avg_days_between_adjustments': 'mean',
-        'buffer_min': 'mean',
-        'buffer_max': 'mean'
-    }).reset_index()
-    
-    return token_analysis
-
-def display_rollbit_strategy_summary(df_changes, df_correlations):
-    """Display a summary of Rollbit's buffer rate strategy"""
-    if df_changes is None or df_changes.empty:
-        st.warning("Not enough data to analyze Rollbit's strategy")
-        return
-    
-    # Create a summary card
-    st.markdown("### Rollbit Buffer Rate Strategy Summary")
-    
-    # Overall stats
-    st.markdown("#### Overall Adjustment Patterns")
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        avg_adjustment = df_changes['avg_buffer_change_pct'].mean()
-        st.metric("Avg Buffer Change", f"{avg_adjustment:.2f}%")
-        
-    with col2:
-        avg_time = df_changes['avg_days_between_adjustments'].mean()
-        st.metric("Avg Days Between Adjustments", f"{avg_time:.1f}")
-        
-    with col3:
-        increase_vs_decrease = df_changes['increases_count'].sum() / max(1, df_changes['decreases_count'].sum())
-        st.metric("Increase:Decrease Ratio", f"{increase_vs_decrease:.2f}")
-    
-    # Token type analysis
-    token_analysis = analyze_rollbit_by_token_type(df_changes)
-    
-    if token_analysis is not None and not token_analysis.empty:
-        st.markdown("#### Buffer Strategies by Token Type")
-        
-        # Create a readable dataframe for display
-        display_df = token_analysis.copy()
-        display_df = display_df.rename(columns={
-            'buffer_current': 'Current Buffer (%)',
-            'avg_buffer_change_pct': 'Avg Change (%)',
-            'avg_days_between_adjustments': 'Days Between Adjustments',
-            'buffer_min': 'Min Buffer (%)',
-            'buffer_max': 'Max Buffer (%)'
-        })
-        
-        # Format numeric columns
-        for col in display_df.columns:
-            if col != 'token_type':
-                display_df[col] = display_df[col].map(lambda x: f"{x:.2f}")
-        
-        st.dataframe(display_df)
-    
-    # Correlation with market spreads
-    if df_correlations is not None and not df_correlations.empty:
-        st.markdown("#### Correlation with Market Spreads")
-        
-        avg_corr = df_correlations['correlation'].mean()
-        abs_avg_corr = df_correlations['correlation'].abs().mean()
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.metric("Average Correlation", f"{avg_corr:.4f}")
-            
-        with col2:
-            st.metric("Average Absolute Correlation", f"{abs_avg_corr:.4f}")
-        
-        # Create ratio analysis
-        if 'ratio' in df_correlations.columns:
-            ratios = df_correlations['ratio'].dropna()
-            
-            if not ratios.empty:
-                avg_ratio = ratios.mean()
-                st.markdown(f"#### Buffer to Spread Ratio: {avg_ratio:.2f}x")
-                st.markdown("""
-                *This ratio represents how much larger Rollbit's buffer rates are compared to market spreads.
-                A higher ratio means more conservative (higher margin requirements).*
-                """)
-    
-    # Key insights
-    st.markdown("### Key Insights on Rollbit's Strategy")
-    
-    # Generate insights based on the data
-    insights = []
-    
-    if df_changes['avg_days_between_adjustments'].mean() < 7:
-        insights.append("Rollbit frequently adjusts buffer rates (less than weekly on average)")
-    else:
-        insights.append("Rollbit makes infrequent buffer rate adjustments (typically weekly or longer)")
-    
-    if df_changes['avg_buffer_change_pct'].mean() < 5:
-        insights.append("Rollbit typically makes small incremental adjustments to buffer rates")
-    else:
-        insights.append("Rollbit makes substantial adjustments to buffer rates when they change")
-    
-    if token_analysis is not None and not token_analysis.empty:
-        # Compare major vs altcoin buffers
-        major_row = token_analysis[token_analysis['token_type'] == 'Major']
-        alt_row = token_analysis[token_analysis['token_type'] == 'Altcoin']
-        
-        if not major_row.empty and not alt_row.empty:
-            major_buffer = major_row['buffer_current'].iloc[0]
-            alt_buffer = alt_row['buffer_current'].iloc[0]
-            
-            if major_buffer < alt_buffer:
-                insights.append(f"Rollbit uses lower buffer rates for major tokens compared to altcoins")
-            else:
-                insights.append(f"Rollbit uses similar or higher buffer rates for major tokens compared to altcoins")
-    
-    if df_correlations is not None and not df_correlations.empty:
-        avg_abs_corr = df_correlations['correlation'].abs().mean()
-        
-        if avg_abs_corr > 0.5:
-            insights.append("Strong correlation between Rollbit's buffer rates and market spreads")
-        elif avg_abs_corr > 0.3:
-            insights.append("Moderate correlation between Rollbit's buffer rates and market spreads")
-        else:
-            insights.append("Weak correlation between Rollbit's buffer rates and market spreads")
-    
-    # Display insights
-    for i, insight in enumerate(insights):
-        st.markdown(f"**{i+1}. {insight}**")
-    
-    # Implementation recommendation
-    st.markdown("### Strategy Implementation Recommendation")
-    st.markdown("""
-    Based on this analysis, consider implementing a buffer rate adjustment strategy that:
-    
-    1. Adjusts buffer rates in response to significant changes in market spreads
-    2. Uses different base buffer rates for major coins vs altcoins
-    3. Makes incremental adjustments rather than large changes
-    4. Implements a formula relating buffer rate to market spread with a safety multiplier
-    """)
-    
-    formula_col1, formula_col2 = st.columns([2, 1])
-    
-    with formula_col1:
-        st.latex(r"\text{Buffer Rate} = \text{Market Spread} \times \text{Safety Multiplier} + \text{Base Buffer}")
-    
-    with formula_col2:
-        st.markdown("""
-        Where:
-        - Safety Multiplier = 10-15
-        - Base Buffer depends on token type
-        """)
-
-def plot_rollbit_comparison(pair, days):
-    """Compare your buffer rates with Rollbit's over time"""
-    # Fetch Rollbit data
-    query = f"""
-    SELECT 
-        created_at,
-        pair_name,
-        bust_buffer,
-        position_multiplier
-    FROM 
-        rollbit_pair_config
-    WHERE 
-        pair_name = '{pair}'
-        AND created_at > NOW() - INTERVAL '{days} days'
-    ORDER BY 
-        created_at
-    """
-    
-    try:
-        rollbit_df = pd.read_sql(query, engine)
-        
-        # Fetch SURF data
-        query = f"""
-        SELECT 
-            updated_at as created_at,
-            pair_name,
-            buffer_rate,
-            position_multiplier
-        FROM 
-            public.trade_pool_pairs
-        WHERE 
-            pair_name = '{pair}'
-            AND updated_at > NOW() - INTERVAL '{days} days'
-        ORDER BY 
-            created_at
-        """
-        
-        surf_df = pd.read_sql(query, engine)
-        
-        # Check if we have data
-        if rollbit_df.empty:
-            st.warning(f"No Rollbit data available for {pair}")
-            return None
-            
-        # Create comparison plot
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10), sharex=True)
-        
-        # Plot buffer rates
-        ax1.set_title(f"Buffer Rate Comparison for {pair}")
-        
-        if not rollbit_df.empty:
-            # Convert to percent for better readability
-            ax1.plot(rollbit_df['created_at'], rollbit_df['bust_buffer'] * 100, 'r-', 
-                    label='Rollbit Buffer (%)')
-        
-        if not surf_df.empty:
-            # Make sure dates are aligned properly
-            ax1.plot(surf_df['created_at'], surf_df['buffer_rate'] * 100, 'b-', 
-                    label='SURF Buffer (%)')
-        else:
-            # If no SURF data, add a note
-            ax1.text(0.5, 0.5, "No SURF buffer rate data available", 
-                     horizontalalignment='center', verticalalignment='center',
-                     transform=ax1.transAxes, bbox=dict(facecolor='yellow', alpha=0.5))
-        
-        ax1.set_ylabel('Buffer Rate (%)')
-        ax1.grid(True, alpha=0.3)
-        ax1.legend()
-        
-        # Plot position multipliers
-        ax2.set_title(f"Position Multiplier Comparison for {pair}")
-        
-        if not rollbit_df.empty:
-            ax2.plot(rollbit_df['created_at'], rollbit_df['position_multiplier'], 'r-', 
-                    label='Rollbit Position Multiplier')
-        
-        if not surf_df.empty:
-            ax2.plot(surf_df['created_at'], surf_df['position_multiplier'], 'b-', 
-                    label='SURF Position Multiplier')
-        else:
-            # If no SURF data, add a note
-            ax2.text(0.5, 0.5, "No SURF position multiplier data available", 
-                     horizontalalignment='center', verticalalignment='center',
-                     transform=ax2.transAxes, bbox=dict(facecolor='yellow', alpha=0.5))
-        
-        ax2.set_xlabel('Date')
-        ax2.set_ylabel('Position Multiplier')
-        ax2.legend()
-        ax2.grid(True, alpha=0.3)
-        
-        # Add data information section below the plot
-        if not rollbit_df.empty:
-            rollbit_min = rollbit_df['bust_buffer'].min() * 100
-            rollbit_max = rollbit_df['bust_buffer'].max() * 100
-            rollbit_avg = rollbit_df['bust_buffer'].mean() * 100
-            
-            st.markdown(f"""
-            ### Rollbit Buffer Rate Statistics
-            - **Min Buffer Rate:** {rollbit_min:.3f}%
-            - **Max Buffer Rate:** {rollbit_max:.3f}%
-            - **Average Buffer Rate:** {rollbit_avg:.3f}%
-            - **Number of Records:** {len(rollbit_df)}
-            """)
-        
-        plt.tight_layout()
-        return fig
-    
-    except Exception as e:
-        st.error(f"Error fetching comparison data: {e}")
-        return None
-
-def render_rollbit_tab(days):
-    st.markdown("## Rollbit Buffer Strategy Analysis")
-    st.markdown("Analyzing Rollbit's buffer rate strategies to understand their adjustment approach")
-    
-    # Create tabs for different analysis types
-    rollbit_tabs = st.tabs([
-        "Individual Pair Analysis", 
-        "Buffer Adjustment Patterns", 
-        "Spread Correlation", 
-        "Recommendations"
-    ])
-    
-    # Tab 1: Individual Pair Analysis
-    with rollbit_tabs[0]:
-        st.markdown("### Compare Rollbit's Buffer Rate Strategies for Individual Pairs")
-        
-        # Fetch active pairs
-        active_pairs = fetch_active_pairs()
-        
-        # Select a pair for Rollbit comparison
-        rollbit_pair = st.selectbox(
-            "Select a pair for Rollbit comparison",
-            options=active_pairs,
-            index=0 if active_pairs else None
-        )
-        
-        if rollbit_pair:
-            # Show historical comparison
-            rollbit_fig = plot_rollbit_comparison(rollbit_pair, days)
-            if rollbit_fig:
-                st.pyplot(rollbit_fig)
-            else:
-                st.warning(f"No data available for {rollbit_pair}")
-                
-            # Show additional market data
-            st.markdown("### Recent Market Data for Reference")
-            
-            # Fetch market spread data
-            spread_df = fetch_historical_spreads(rollbit_pair, days=min(7, days))
-            
-            if spread_df is not None and not spread_df.empty:
-                avg_spread = spread_df['avg_spread'].mean() * 10000  # Convert to basis points
-                spread_volatility = spread_df['avg_spread'].std() * 10000
-                
-                st.markdown(f"**Average Market Spread:** {avg_spread:.2f} basis points")
-                st.markdown(f"**Spread Volatility:** {spread_volatility:.2f} basis points")
-            else:
-                st.warning("No market spread data available")
-    
-    # Tab 2: Buffer Adjustment Patterns
-    with rollbit_tabs[1]:
-        st.markdown("### Rollbit's Buffer Rate Adjustment Patterns")
-        
-        # Analyze how Rollbit adjusts buffer rates
-        adjustment_patterns = analyze_rollbit_buffer_adjustment_pattern(days)
-        
-        if adjustment_patterns is not None and not adjustment_patterns.empty:
-            # Filter to most active pairs
-            active_adjustments = adjustment_patterns[adjustment_patterns['buffer_adjustments_count'] > 1]
-            
-            if not active_adjustments.empty:
-                # Sort by number of adjustments
-                active_adjustments = active_adjustments.sort_values('buffer_adjustments_count', ascending=False)
-                
-                # Format for display
-                display_df = active_adjustments.copy()
-                display_df = display_df[['pair_name', 'buffer_adjustments_count', 'avg_days_between_adjustments', 
-                                        'avg_buffer_change_pct', 'buffer_current', 'buffer_min', 'buffer_max']]
-                
-                display_df = display_df.rename(columns={
-                    'pair_name': 'Pair',
-                    'buffer_adjustments_count': 'Adjustments',
-                    'avg_days_between_adjustments': 'Days Between',
-                    'avg_buffer_change_pct': 'Avg Change (%)',
-                    'buffer_current': 'Current (%)',
-                    'buffer_min': 'Min (%)',
-                    'buffer_max': 'Max (%)'
-                })
-                
-                st.dataframe(display_df)
-                
-                # Create token type analysis
-                token_analysis = analyze_rollbit_by_token_type(active_adjustments)
-                
-                if token_analysis is not None and not token_analysis.empty:
-                    st.markdown("### Buffer Rate Strategies by Token Type")
-                    
-                    # Format token analysis for display
-                    token_display = token_analysis.copy()
-                    token_display = token_display.rename(columns={
-                        'token_type': 'Token Type',
-                        'buffer_current': 'Current Buffer (%)',
-                        'avg_buffer_change_pct': 'Avg Change (%)',
-                        'avg_days_between_adjustments': 'Days Between',
-                        'buffer_min': 'Min Buffer (%)',
-                        'buffer_max': 'Max Buffer (%)'
-                    })
-                    
-                    st.dataframe(token_display)
-                    
-                    # Plot comparison of buffer rates by token type
-                    if len(token_analysis) > 1:
-                        fig, ax = plt.subplots(figsize=(10, 6))
-                        
-                        # Plot min, current, and max buffer rates by token type
-                        token_types = token_analysis['token_type']
-                        x = np.arange(len(token_types))
-                        width = 0.25
-                        
-                        ax.bar(x - width, token_analysis['buffer_min'], width, label='Min Buffer', color='green', alpha=0.7)
-                        ax.bar(x, token_analysis['buffer_current'], width, label='Current Buffer', color='blue', alpha=0.7)
-                        ax.bar(x + width, token_analysis['buffer_max'], width, label='Max Buffer', color='red', alpha=0.7)
-                        
-                        ax.set_xlabel('Token Type')
-                        ax.set_ylabel('Buffer Rate (%)')
-                        ax.set_title('Buffer Rates by Token Type')
-                        ax.set_xticks(x)
-                        ax.set_xticklabels(token_types)
-                        ax.legend()
-                        ax.grid(True, alpha=0.3)
-                        
-                        st.pyplot(fig)
-            else:
-                st.warning("Not enough adjustment data to analyze patterns")
-        else:
-            st.warning("No adjustment data available for analysis")
-    
-    # Tab 3: Spread Correlation
-    with rollbit_tabs[2]:
-        st.markdown("### Correlation Between Rollbit's Buffer Rates and Market Spreads")
-        
-        # Analyze if Rollbit buffer rates correlate with market spreads
-        buffer_spread_corr = fetch_rollbit_buffer_vs_spread(days)
-        
-        if buffer_spread_corr is not None and not buffer_spread_corr.empty:
-            # Create a copy for display
-            display_corr = buffer_spread_corr.copy()
-            
-            # Add absolute correlation for sorting
-            display_corr['abs_correlation'] = display_corr['correlation'].abs()
-            
-            # Sort by absolute correlation
-            display_corr = display_corr.sort_values('abs_correlation', ascending=False)
-            
-            # Format for display
-            display_corr = display_corr[['pair_name', 'correlation', 'rollbit_buffer_avg', 'spread_avg', 'ratio', 'data_points']]
-            display_corr = display_corr.rename(columns={
-                'pair_name': 'Pair',
-                'correlation': 'Correlation',
-                'rollbit_buffer_avg': 'Rollbit Buffer (%)',
-                'spread_avg': 'Market Spread (bps)',
-                'ratio': 'Buffer/Spread Ratio',
-                'data_points': 'Data Points'
-            })
-            
-            st.dataframe(display_corr)
-            
-            # Plot correlation distribution
-            fig, ax = plt.subplots(figsize=(10, 6))
-            
-            # Use a histogram instead of KDE for more stability
-            ax.hist(buffer_spread_corr['correlation'], bins=10, alpha=0.7, color='blue', edgecolor='black')
-            
-            ax.set_xlabel('Correlation: Rollbit Buffer vs Market Spread')
-            ax.set_ylabel('Count')
-            ax.set_title('Distribution of Buffer-Spread Correlations')
-            ax.axvline(x=0, color='r', linestyle='--')
-            
-            # Add mean line
-            mean_corr = buffer_spread_corr['correlation'].mean()
-            ax.axvline(x=mean_corr, color='g', linestyle='-', 
-                     label=f'Mean: {mean_corr:.3f}')
-            
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-            
-            st.pyplot(fig)
-            
-            # Add ratio analysis
-            if 'ratio' in buffer_spread_corr.columns:
-                valid_ratios = buffer_spread_corr['ratio'].dropna()
-                
-                if not valid_ratios.empty:
-                    st.markdown("### Buffer Rate to Market Spread Ratio")
-                    
-                    avg_ratio = valid_ratios.mean()
-                    median_ratio = valid_ratios.median()
-                    
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        st.metric("Average Ratio", f"{avg_ratio:.2f}x")
-                    
-                    with col2:
-                        st.metric("Median Ratio", f"{median_ratio:.2f}x")
-                    
-                    st.markdown("""
-                    **Interpretation:** This ratio represents how many times larger Rollbit's buffer rates are
-                    compared to market spreads. A higher ratio means more conservative margin requirements.
-                    """)
-                    
-                    # Plot ratio distribution
-                    fig, ax = plt.subplots(figsize=(10, 6))
-                    
-                    # Filter extreme values for better visualization
-                    plotable_ratios = valid_ratios[valid_ratios < valid_ratios.quantile(0.95)]
-                    
-                    ax.hist(plotable_ratios, bins=10, alpha=0.7, color='green', edgecolor='black')
-                    ax.set_xlabel('Buffer/Spread Ratio')
-                    ax.set_ylabel('Count')
-                    ax.set_title('Distribution of Buffer to Spread Ratios')
-                    ax.axvline(x=avg_ratio, color='r', linestyle='-', 
-                             label=f'Mean: {avg_ratio:.2f}x')
-                    ax.legend()
-                    ax.grid(True, alpha=0.3)
-                    
-                    st.pyplot(fig)
-        else:
-            st.warning("No correlation data available for analysis")
-    
-    # Tab 4: Strategy Recommendations
-    with rollbit_tabs[3]:
-        st.markdown("### Dynamic Buffer Rate Strategy Recommendations")
-        
-        # Display strategy summary and recommendations
-        adjustment_patterns = analyze_rollbit_buffer_adjustment_pattern(days)
-        buffer_spread_corr = fetch_rollbit_buffer_vs_spread(days)
-        
-        display_rollbit_strategy_summary(adjustment_patterns, buffer_spread_corr)
-                
-        # Add implementation suggestions
-        st.markdown("### Implementation Example")
-        
-        st.code("""
-# Example dynamic buffer rate adjustment function
-def calculate_dynamic_buffer_rate(market_spread, token_type):
-    # Base parameters
-    safety_multiplier = 12.0  # Based on Rollbit's average ratio
-    
-    # Base buffer varies by token type
-    if token_type == 'Major':
-        base_buffer = 0.02  # 2%
-    elif token_type == 'Stablecoin':
-        base_buffer = 0.01  # 1%
-    else:  # Altcoin
-        base_buffer = 0.025  # 2.5%
-    
-    # Calculate buffer rate based on market spread
-    buffer_rate = (market_spread * safety_multiplier) + base_buffer
-    
-    # Apply reasonable bounds
-    buffer_rate = max(0.01, min(0.10, buffer_rate))
-    
-    return buffer_rate
-        """, language="python")
-        
-        st.markdown("""
-        This implementation would run:
-        1. **Periodically** (e.g., every few hours) to check for significant spread changes
-        2. **Incrementally** making small adjustments rather than large jumps
-        3. **Differentially** across token types, with appropriate safety multipliers
-        """)
-        
-        # Visualization of the strategy
-        st.markdown("### Visualization of the Recommended Strategy")
-        
-        # Create example visualization
-        spreads = np.linspace(0.0001, 0.005, 100)  # 1 to 50 basis points
-        
-        major_buffers = [(s * 12.0) + 0.02 for s in spreads]
-        alt_buffers = [(s * 15.0) + 0.025 for s in spreads]
-        
-        fig, ax = plt.subplots(figsize=(10, 6))
-        
-        ax.plot(spreads * 10000, np.array(major_buffers) * 100, 'b-', label='Major Tokens', linewidth=2)
-        ax.plot(spreads * 10000, np.array(alt_buffers) * 100, 'r-', label='Altcoins', linewidth=2)
-        
-        ax.set_xlabel('Market Spread (basis points)')
-        ax.set_ylabel('Buffer Rate (%)')
-        ax.set_title('Recommended Dynamic Buffer Rate Strategy')
-        ax.grid(True, alpha=0.3)
-        ax.legend()
-        
-        st.pyplot(fig)
-
 def consolidate_results(results_dict):
     """Consolidate analysis results into a summary dataframe"""
     summary_data = []
@@ -1715,6 +1269,674 @@ def consolidate_results(results_dict):
                 st.error(f"Error consolidating results for {pair}: {e}")
     
     return pd.DataFrame(summary_data)
+
+def render_summary_tab(results_dict, selected_pairs, days, vol_window, min_data_points):
+    """Render the summary tab with results across all pairs"""
+    st.markdown("## Summary Results")
+    st.markdown("Comparison of spread-volatility relationships across all analyzed pairs")
+    
+    # Process all pairs if results_dict is empty
+    if not results_dict:
+        results_dict, successful_pairs, failed_pairs, _ = process_all_pairs(
+            selected_pairs, days, vol_window, min_data_points
+        )
+    
+    # Consolidate results
+    summary_df = consolidate_results(results_dict)
+    
+    if not summary_df.empty:
+        # Sort by correlation strength (avoiding abs() function)
+        summary_df['abs_correlation'] = summary_df['spread_volatility_correlation'].apply(lambda x: abs(x) if pd.notna(x) else 0)
+        summary_df = summary_df.sort_values(by='abs_correlation', ascending=False)
+        
+        # Create a nicer display dataframe
+        display_df = summary_df.copy()
+        display_df = display_df.rename(columns={
+            'pair_name': 'Pair',
+            'volatility_measure': 'Best Volatility Measure',
+            'spread_volatility_correlation': 'Correlation',
+            'best_lag_hours': 'Best Lag (hours)',
+            'best_lag_correlation': 'Lag Correlation',
+            'r2_score': 'R² Score'
+        })
+        
+        # Format the volatility measure names
+        display_df['Best Volatility Measure'] = display_df['Best Volatility Measure'].apply(
+            lambda x: x.replace('_', ' ').title() if isinstance(x, str) else 'N/A'
+        )
+        
+        # Display summary table (without the abs column)
+        st.dataframe(display_df.drop(columns=['abs_correlation']))
+        
+        # Create correlation distribution plot
+        fig, ax = plt.subplots(figsize=(10, 6), dpi=100)
+        valid_corrs = summary_df['spread_volatility_correlation'].dropna()
+        ax.hist(valid_corrs, bins=10, alpha=0.7)
+        ax.set_xlabel('Correlation: Spread vs. Volatility')
+        ax.set_ylabel('Count')
+        ax.set_title('Distribution of Spread-Volatility Correlations Across Pairs')
+        ax.axvline(x=0, color='r', linestyle='--')
+        mean_corr = valid_corrs.mean()
+        ax.axvline(x=mean_corr, color='g', linestyle='-', label=f'Mean: {mean_corr:.3f}')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        st.pyplot(fig)
+        
+        # Create lag distribution plot
+        valid_lags = summary_df['best_lag_hours'].dropna()
+        if len(valid_lags) > 0:
+            fig, ax = plt.subplots(figsize=(10, 6), dpi=100)
+            ax.hist(valid_lags, bins=10, alpha=0.7)
+            ax.set_xlabel('Best Lag (hours)')
+            ax.set_ylabel('Count')
+            ax.set_title('Distribution of Lead-Lag Relationships')
+            ax.axvline(x=0, color='r', linestyle='--')
+            mean_lag = valid_lags.mean()
+            ax.axvline(x=mean_lag, color='g', linestyle='-', label=f'Mean: {mean_lag:.1f} hours')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            st.pyplot(fig)
+        
+        # Overall findings
+        st.markdown("### Key Findings")
+        
+        # Calculate aggregate statistics
+        avg_corr = valid_corrs.mean() if len(valid_corrs) > 0 else 0
+        avg_abs_corr = valid_corrs.abs().mean() if len(valid_corrs) > 0 else 0
+        avg_lag = valid_lags.mean() if len(valid_lags) > 0 else 0
+        
+        st.write(f"**Average Correlation:** {avg_corr:.4f} (Absolute: {avg_abs_corr:.4f})")
+        
+        if len(valid_lags) > 0:
+            st.write(f"**Average Optimal Lag:** {avg_lag:.2f} hours")
+            
+            # Interpret results
+            if avg_lag < -1:
+                st.write(f"**Overall Finding:** Spread changes typically precede volatility changes by {-avg_lag:.1f} hours")
+            elif avg_lag > 1:
+                st.write(f"**Overall Finding:** Volatility changes typically precede spread changes by {avg_lag:.1f} hours")
+            else:
+                st.write("**Overall Finding:** Spread and volatility changes occur nearly simultaneously")
+        
+        if avg_abs_corr > 0.7:
+            st.write("**Correlation Strength:** Very strong correlation between spreads and volatility")
+        elif avg_abs_corr > 0.5:
+            st.write("**Correlation Strength:** Strong correlation between spreads and volatility")
+        elif avg_abs_corr > 0.3:
+            st.write("**Correlation Strength:** Moderate correlation between spreads and volatility")
+        else:
+            st.write("**Correlation Strength:** Weak correlation between spreads and volatility")
+            
+        # Recommendations based on findings
+        st.markdown("### Recommendations for Buffer Rate Strategy")
+        
+        if avg_abs_corr > 0.5:
+            st.markdown("""
+            Based on the strong correlation between spreads and volatility, you could use **either metric** 
+            as the foundation for your dynamic buffer rate adjustment system. However, since spreads
+            directly impact trading costs and liquidity, they may be a more intuitive basis for your strategy.
+            """)
+        else:
+            st.markdown("""
+            The correlation between spreads and volatility is relatively weak, suggesting you should
+            **carefully choose** which metric to base your buffer rate adjustments on:
+            
+            - **Market Spreads:** More directly tied to trading costs and market depth
+            - **Volatility:** More predictive of potential price swings and liquidation risks
+            
+            Consider using both in your formula with different weights.
+            """)
+            
+        if avg_lag < -1:
+            st.markdown(f"""
+            Since spread changes typically precede volatility changes by {-avg_lag:.1f} hours,
+            using spreads as your primary metric could provide an **early warning system**
+            for incoming volatility changes.
+            """)
+        elif avg_lag > 1:
+            st.markdown(f"""
+            Since volatility changes typically precede spread changes by {avg_lag:.1f} hours,
+            using volatility as your primary metric could help you **anticipate spread changes**
+            and adjust buffer rates proactively.
+            """)
+            
+        # Add example implementation
+        st.markdown("### Example Implementation")
+        
+        if avg_abs_corr > 0.3:
+            weight_spread = 0.7
+            weight_vol = 0.3
+        else:
+            weight_spread = 0.9
+            weight_vol = 0.1
+            
+        st.code(f"""
+# Example dynamic buffer rate adjustment function using both metrics
+def calculate_dynamic_buffer_rate(market_spread, volatility, token_type):
+    # Base parameters
+    spread_multiplier = 12.0  # Based on market analysis
+    volatility_weight = {weight_vol:.1f}  # Weight for volatility
+    spread_weight = {weight_spread:.1f}   # Weight for spread
+    
+    # Base buffer varies by token type
+    if token_type == 'Major':
+        base_buffer = 0.02  # 2%
+    elif token_type == 'Stablecoin':
+        base_buffer = 0.01  # 1%
+    else:  # Altcoin
+        base_buffer = 0.025  # 2.5%
+    
+    # Calculate buffer rate components
+    spread_component = market_spread * spread_multiplier
+    volatility_component = volatility * 0.10  # Convert volatility to buffer contribution
+    
+    # Weighted combination
+    buffer_rate = (spread_component * spread_weight) + (volatility_component * volatility_weight) + base_buffer
+    
+    # Apply reasonable bounds
+    buffer_rate = max(0.01, min(0.10, buffer_rate))
+    
+    return buffer_rate
+        """, language="python")
+    else:
+        st.warning("No results available for summary. Please analyze some pairs first.")
+
+def calculate_dynamic_buffer_rate(market_spread, volatility, token_type):
+    """Calculate dynamic buffer rate based on market spread, volatility, and token type
+    
+    Args:
+        market_spread (float): Current market spread (decimal, e.g. 0.0015 for 15 bps)
+        volatility (float): Current volatility measure (decimal, annualized)
+        token_type (str): 'Major', 'Stablecoin', or 'Altcoin'
+        
+    Returns:
+        float: Recommended buffer rate (decimal, e.g. 0.025 for 2.5%)
+    """
+    # Base parameters
+    spread_multiplier = 12.0  # Based on market analysis
+    
+    # Different volatility multipliers based on token type
+    if token_type == 'Major':
+        base_buffer = 0.02  # 2%
+        volatility_multiplier = 0.08
+        spread_weight = 0.7
+        volatility_weight = 0.3
+    elif token_type == 'Stablecoin':
+        base_buffer = 0.01  # 1%
+        volatility_multiplier = 0.05
+        spread_weight = 0.8
+        volatility_weight = 0.2
+    else:  # Altcoin
+        base_buffer = 0.025  # 2.5%
+        volatility_multiplier = 0.12
+        spread_weight = 0.6
+        volatility_weight = 0.4
+    
+    # Calculate buffer rate components
+    spread_component = market_spread * spread_multiplier
+    volatility_component = volatility * volatility_multiplier
+    
+    # Weighted combination
+    buffer_rate = (spread_component * spread_weight) + (volatility_component * volatility_weight) + base_buffer
+    
+    # Apply reasonable bounds
+    buffer_rate = max(0.01, min(0.10, buffer_rate))
+    
+    return buffer_rate
+
+def backtest_buffer_strategy(combined_df, pair_name, token_type='Altcoin'):
+    """Backtest how a dynamic buffer strategy would have performed"""
+    if combined_df is None or len(combined_df) < 10:
+        return None
+    
+    # Find best volatility measure
+    vol_cols = [col for col in combined_df.columns if 'volatility' in col or 'vol' in col]
+    correlations = {}
+    for col in vol_cols:
+        corr = combined_df['avg_spread'].corr(combined_df[col])
+        if not pd.isna(corr):
+            correlations[col] = abs(corr)
+    
+    if not correlations:
+        return None
+        
+    # Use the volatility measure with the strongest correlation
+    best_vol_col = max(correlations.items(), key=lambda x: x[1])[0]
+    
+    # Create a copy for backtesting
+    backtest_df = combined_df.copy()
+    
+    # Determine token type if not provided
+    if token_type is None:
+        if 'BTC' in pair_name or 'ETH' in pair_name:
+            token_type = 'Major'
+        elif 'USDT' in pair_name or 'USDC' in pair_name:
+            token_type = 'Stablecoin'
+        else:
+            token_type = 'Altcoin'
+    
+    # Calculate dynamic buffer rates
+    backtest_df['dynamic_buffer'] = backtest_df.apply(
+        lambda row: calculate_dynamic_buffer_rate(
+            row['avg_spread'], 
+            row[best_vol_col], 
+            token_type
+        ), 
+        axis=1
+    )
+    
+    # Calculate a naive baseline that uses only spread * multiplier
+    backtest_df['naive_buffer'] = backtest_df['avg_spread'] * 12.0 + 0.02
+    
+    # Calculate % change in spreads to simulate potential losses
+    backtest_df['spread_chg_1h'] = backtest_df['avg_spread'].pct_change(1)
+    backtest_df['spread_chg_2h'] = backtest_df['avg_spread'].pct_change(2)
+    backtest_df['spread_chg_3h'] = backtest_df['avg_spread'].pct_change(3)
+    
+    # Simulate how many times our buffer would have been insufficient
+    # by checking if spread changed by more than buffer within N hours
+    for hrs in [1, 2, 3]:
+        spread_chg_col = f'spread_chg_{hrs}h'
+        backtest_df[f'dynamic_buffer_breach_{hrs}h'] = abs(backtest_df[spread_chg_col]) > backtest_df['dynamic_buffer']
+        backtest_df[f'naive_buffer_breach_{hrs}h'] = abs(backtest_df[spread_chg_col]) > backtest_df['naive_buffer']
+    
+    # Create summary statistics
+    results = {
+        'pair': pair_name,
+        'token_type': token_type,
+        'avg_dynamic_buffer': backtest_df['dynamic_buffer'].mean(),
+        'avg_naive_buffer': backtest_df['naive_buffer'].mean(),
+        'max_dynamic_buffer': backtest_df['dynamic_buffer'].max(),
+        'min_dynamic_buffer': backtest_df['dynamic_buffer'].min(),
+        'volatility_measure': best_vol_col
+    }
+    
+    # Add breach statistics
+    for hrs in [1, 2, 3]:
+        dynamic_breach_col = f'dynamic_buffer_breach_{hrs}h'
+        naive_breach_col = f'naive_buffer_breach_{hrs}h'
+        
+        results[f'dynamic_breaches_{hrs}h'] = backtest_df[dynamic_breach_col].sum()
+        results[f'dynamic_breach_rate_{hrs}h'] = backtest_df[dynamic_breach_col].mean()
+        
+        results[f'naive_breaches_{hrs}h'] = backtest_df[naive_breach_col].sum()
+        results[f'naive_breach_rate_{hrs}h'] = backtest_df[naive_breach_col].mean()
+    
+    return results, backtest_df
+
+def display_backtest_results(backtest_results, backtest_df, pair_name):
+    """Display the results of the buffer rate strategy backtest"""
+    if backtest_results is None or backtest_df is None:
+        st.warning("Not enough data for backtesting")
+        return
+    
+    st.markdown(f"### Buffer Strategy Backtest Results for {pair_name}")
+    
+    # Display summary statistics
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric("Avg Dynamic Buffer", f"{backtest_results['avg_dynamic_buffer']*100:.2f}%")
+    with col2:
+        st.metric("Avg Naive Buffer", f"{backtest_results['avg_naive_buffer']*100:.2f}%")
+    with col3:
+        st.metric("Buffer Difference", f"{(backtest_results['avg_dynamic_buffer'] - backtest_results['avg_naive_buffer'])*100:.2f}%")
+    
+    # Show breach statistics
+    st.markdown("#### Breach Analysis (% of time buffer was insufficient)")
+    
+    breach_data = []
+    for hrs in [1, 2, 3]:
+        breach_data.append({
+            'timeframe': f"{hrs} hour{'s' if hrs > 1 else ''}",
+            'dynamic_rate': backtest_results[f'dynamic_breach_rate_{hrs}h'] * 100,
+            'naive_rate': backtest_results[f'naive_breach_rate_{hrs}h'] * 100
+        })
+    
+    breach_df = pd.DataFrame(breach_data)
+    
+    # Create a bar chart for breaches
+    fig, ax = plt.subplots(figsize=(10, 5), dpi=100)
+    x = np.arange(len(breach_df))
+    width = 0.35
+    
+    bar1 = ax.bar(x - width/2, breach_df['dynamic_rate'], width, label='Dynamic Buffer Strategy')
+    bar2 = ax.bar(x + width/2, breach_df['naive_rate'], width, label='Naive Buffer Strategy')
+    
+    ax.set_xlabel('Time Window')
+    ax.set_ylabel('Breach Rate (%)')
+    ax.set_title('Buffer Breach Rates by Strategy')
+    ax.set_xticks(x)
+    ax.set_xticklabels(breach_df['timeframe'])
+    ax.legend()
+    
+    for bars in [bar1, bar2]:
+        for bar in bars:
+            height = bar.get_height()
+            ax.annotate(f'{height:.1f}%',
+                        xy=(bar.get_x() + bar.get_width() / 2, height),
+                        xytext=(0, 3),
+                        textcoords="offset points",
+                        ha='center', va='bottom')
+    
+    st.pyplot(fig)
+    
+    # Plot the buffer rates over time
+    fig, ax = plt.subplots(figsize=(10, 6), dpi=100)
+    
+    # Plot both buffer strategies
+    ax.plot(backtest_df['hour'], backtest_df['dynamic_buffer']*100, 'b-', label='Dynamic Buffer (%)')
+    ax.plot(backtest_df['hour'], backtest_df['naive_buffer']*100, 'r--', label='Naive Buffer (%)')
+    
+    # Format x-axis to show dates nicely
+    ax.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter('%Y-%m-%d'))
+    plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, fontsize=8)
+    
+    ax.set_xlabel('Date')
+    ax.set_ylabel('Buffer Rate (%)')
+    ax.set_title(f'Buffer Rate Strategies Over Time - {pair_name}')
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    
+    plt.tight_layout()
+    st.pyplot(fig)
+    
+    # Show efficiency comparison
+    avg_dynamic = backtest_results['avg_dynamic_buffer']
+    avg_naive = backtest_results['avg_naive_buffer']
+    
+    dyn_breach_2h = backtest_results['dynamic_breach_rate_2h']
+    naive_breach_2h = backtest_results['naive_breach_rate_2h']
+    
+    if avg_dynamic < avg_naive and dyn_breach_2h <= naive_breach_2h:
+        st.success(f"""
+        **Strategy Assessment: EXCELLENT**
+        
+        The dynamic buffer strategy achieves **lower average buffer rates** ({avg_dynamic*100:.2f}% vs {avg_naive*100:.2f}%)
+        while maintaining equal or better protection against spread movements.
+        """)
+    elif avg_dynamic < avg_naive and dyn_breach_2h > naive_breach_2h:
+        st.warning(f"""
+        **Strategy Assessment: GOOD**
+        
+        The dynamic buffer strategy uses **lower average buffer rates** ({avg_dynamic*100:.2f}% vs {avg_naive*100:.2f}%)
+        but has slightly higher breach rates. This may be an acceptable tradeoff for efficiency.
+        """)
+    elif avg_dynamic > avg_naive and dyn_breach_2h < naive_breach_2h:
+        st.info(f"""
+        **Strategy Assessment: CONSERVATIVE**
+        
+        The dynamic buffer strategy uses **higher average buffer rates** ({avg_dynamic*100:.2f}% vs {avg_naive*100:.2f}%)
+        but provides better protection against spread movements.
+        """)
+    else:
+        st.error(f"""
+        **Strategy Assessment: NEEDS IMPROVEMENT**
+        
+        The dynamic buffer strategy uses **higher average buffer rates** ({avg_dynamic*100:.2f}% vs {avg_naive*100:.2f}%)
+        without providing better protection. Consider adjusting the parameters.
+        """)
+    
+    # Recommendations for improving the strategy
+    st.markdown("### Strategy Optimization Recommendations")
+    
+    vol_measure = backtest_results['volatility_measure'].replace('_', ' ').title()
+    token_type = backtest_results['token_type']
+    
+    st.markdown(f"""
+    Based on the backtest results for {pair_name} ({token_type}):
+    
+    1. **Volatility Measure**: {vol_measure} showed the strongest correlation with spread
+    2. **Buffer Allocation**: 
+        - Base buffer: {token_type}-specific base rate
+        - Spread component: Using 12.0x multiplier
+        - Volatility component: Using token-type specific weight
+        
+    **Fine-tuning suggestions:**
+    """)
+    
+    if dyn_breach_2h > 0.05:  # More than 5% breach rate
+        st.markdown("""
+        - Increase the base buffer rate slightly
+        - Consider increasing the volatility weight for better responsiveness
+        """)
+    elif avg_dynamic > 0.05:  # Average buffer over 5%
+        st.markdown("""
+        - Reduce the spread multiplier slightly
+        - Implement a cap on maximum buffer rates during extreme volatility
+        """)
+    else:
+        st.markdown("""
+        - Current parameters seem well-balanced
+        - Consider testing with different lead-lag values to be more proactive
+        """)
+
+def filter_and_display_tokens(token_types, token_results):
+    """Filter and display token-specific results"""
+    filtered_results = [r for r in token_results if r['token_type'] in token_types]
+    
+    if not filtered_results:
+        st.info(f"No results available for the selected token types")
+        return
+    
+    # Create a dataframe for comparison
+    df = pd.DataFrame(filtered_results)
+    
+    # Format for display
+    display_df = df[['pair', 'token_type', 'avg_dynamic_buffer', 'avg_naive_buffer', 
+                     'dynamic_breach_rate_2h', 'naive_breach_rate_2h']]
+    
+    # Format percentages
+    display_df['avg_dynamic_buffer'] = display_df['avg_dynamic_buffer'] * 100
+    display_df['avg_naive_buffer'] = display_df['avg_naive_buffer'] * 100
+    display_df['dynamic_breach_rate_2h'] = display_df['dynamic_breach_rate_2h'] * 100
+    display_df['naive_breach_rate_2h'] = display_df['naive_breach_rate_2h'] * 100
+    
+    # Rename columns
+    display_df = display_df.rename(columns={
+        'pair': 'Pair',
+        'token_type': 'Token Type',
+        'avg_dynamic_buffer': 'Avg Dynamic Buffer (%)',
+        'avg_naive_buffer': 'Avg Naive Buffer (%)',
+        'dynamic_breach_rate_2h': 'Dynamic Breach Rate (%)',
+        'naive_breach_rate_2h': 'Naive Breach Rate (%)'
+    })
+    
+    # Calculate efficiency metrics
+    display_df['Buffer Reduction (%)'] = display_df['Avg Naive Buffer (%)'] - display_df['Avg Dynamic Buffer (%)']
+    display_df['Breach Rate Change (%)'] = display_df['Dynamic Breach Rate (%)'] - display_df['Naive Breach Rate (%)']
+    
+    # Sort by token type and then by buffer reduction
+    display_df = display_df.sort_values(['Token Type', 'Buffer Reduction (%)'], ascending=[True, False])
+    
+    st.dataframe(display_df)
+    
+    # Display average savings by token type
+    st.markdown("### Average Efficiency Gains by Token Type")
+    
+    token_stats = df.groupby('token_type').agg({
+        'avg_dynamic_buffer': 'mean',
+        'avg_naive_buffer': 'mean',
+        'dynamic_breach_rate_2h': 'mean',
+        'naive_breach_rate_2h': 'mean'
+    })
+    
+    # Format for visualization
+    token_stats['buffer_reduction'] = token_stats['avg_naive_buffer'] - token_stats['avg_dynamic_buffer']
+    token_stats['breach_rate_change'] = token_stats['dynamic_breach_rate_2h'] - token_stats['naive_breach_rate_2h']
+    
+    # Create a comparison chart
+    fig, ax = plt.subplots(figsize=(10, 6), dpi=100)
+    
+    x = np.arange(len(token_stats.index))
+    width = 0.35
+    
+    bar1 = ax.bar(x - width/2, token_stats['avg_dynamic_buffer']*100, width, label='Dynamic Buffer')
+    bar2 = ax.bar(x + width/2, token_stats['avg_naive_buffer']*100, width, label='Naive Buffer')
+    
+    ax.set_xlabel('Token Type')
+    ax.set_ylabel('Average Buffer Rate (%)')
+    ax.set_title('Average Buffer Rates by Token Type')
+    ax.set_xticks(x)
+    ax.set_xticklabels(token_stats.index)
+    ax.legend()
+    
+    plt.tight_layout()
+    st.pyplot(fig)
+    
+    # Show breach rate comparison
+    fig, ax = plt.subplots(figsize=(10, 6), dpi=100)
+    
+    bar1 = ax.bar(x - width/2, token_stats['dynamic_breach_rate_2h']*100, width, label='Dynamic Buffer')
+    bar2 = ax.bar(x + width/2, token_stats['naive_breach_rate_2h']*100, width, label='Naive Buffer')
+    
+    ax.set_xlabel('Token Type')
+    ax.set_ylabel('Average 2h Breach Rate (%)')
+    ax.set_title('Buffer Breach Rates by Token Type')
+    ax.set_xticks(x)
+    ax.set_xticklabels(token_stats.index)
+    ax.legend()
+    
+    plt.tight_layout()
+    st.pyplot(fig)
+    
+    # Summary findings
+    st.markdown("### Key Findings by Token Type")
+    
+    for token_type in token_stats.index:
+        buffer_reduction = token_stats.loc[token_type, 'buffer_reduction'] * 100
+        breach_change = token_stats.loc[token_type, 'breach_rate_change'] * 100
+        
+        st.markdown(f"**{token_type}**:")
+        
+        if buffer_reduction > 0:
+            st.markdown(f"- **Buffer Reduction**: {buffer_reduction:.2f}% lower than naive approach")
+        else:
+            st.markdown(f"- **Buffer Increase**: {-buffer_reduction:.2f}% higher than naive approach")
+            
+        if breach_change <= 0:
+            st.markdown(f"- **Breach Protection**: {-breach_change:.2f}% fewer breaches than naive approach")
+        else:
+            st.markdown(f"- **Breach Increase**: {breach_change:.2f}% more breaches than naive approach")
+        
+        # Token-specific recommendations
+        if buffer_reduction > 0 and breach_change <= 0:
+            st.markdown("- **Recommendation**: Current parameters work well ✅")
+        elif buffer_reduction > 0 and breach_change > 0:
+            st.markdown("- **Recommendation**: Slight increase in volatility multiplier may help ⚠️")
+        elif buffer_reduction <= 0 and breach_change <= 0:
+            st.markdown("- **Recommendation**: Parameters are too conservative, can be optimized ⚠️")
+        else:
+            st.markdown("- **Recommendation**: Strategy not effective, needs significant adjustment ❌")
+
+def render_strategy_backtest_tab(selected_pairs, days, vol_window, min_data_points):
+    """Render the buffer strategy backtest tab"""
+    st.markdown("## Buffer Strategy Backtest")
+    st.markdown("Testing how our dynamic buffer rate strategy would have performed")
+    
+    # Create backtest settings
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        selected_token_types = st.multiselect(
+            "Filter by Token Type",
+            options=["Major", "Stablecoin", "Altcoin"],
+            default=["Major", "Altcoin"]
+        )
+    
+    with col2:
+        backtest_pair = st.selectbox(
+            "Select a specific pair to analyze in detail",
+            options=selected_pairs,
+            index=0 if selected_pairs else None
+        )
+    
+    # Process selected pair for detailed analysis
+    if backtest_pair:
+        with st.spinner(f"Running backtest for {backtest_pair}..."):
+            # Fetch data
+            spread_df = fetch_historical_spreads(backtest_pair, days=days)
+            price_df = fetch_historical_prices(backtest_pair, days=days)
+            
+            # Determine token type
+            token_type = None
+            if any(token in backtest_pair for token in ['BTC', 'ETH']):
+                token_type = 'Major'
+            elif any(token in backtest_pair for token in ['USDT', 'USDC']):
+                token_type = 'Stablecoin'
+            else:
+                token_type = 'Altcoin'
+            
+            # Calculate volatility
+            if price_df is not None:
+                vol_df = calculate_volatility(price_df, window_minutes=vol_window)
+                
+                # Combine data
+                if spread_df is not None and vol_df is not None:
+                    combined_df = combine_spread_volatility_data(spread_df, vol_df)
+                    
+                    # Run backtest
+                    if combined_df is not None and len(combined_df) >= min_data_points:
+                        backtest_results, backtest_df = backtest_buffer_strategy(
+                            combined_df, backtest_pair, token_type
+                        )
+                        
+                        # Display results
+                        display_backtest_results(backtest_results, backtest_df, backtest_pair)
+                    else:
+                        st.warning(f"Not enough data for {backtest_pair}")
+                else:
+                    st.warning(f"Missing spread or volatility data for {backtest_pair}")
+            else:
+                st.warning(f"No price data available for {backtest_pair}")
+    
+    # Process all pairs and display aggregate results by token type
+    if selected_token_types:
+        st.markdown("## Aggregate Results by Token Type")
+        st.markdown("Comparing the performance of our dynamic buffer strategy across different token types")
+        
+        # Process all pairs
+        with st.spinner("Running backtest across all pairs..."):
+            all_results = []
+            
+            for pair in selected_pairs:
+                # Determine token type
+                token_type = 'Altcoin'  # Default
+                if any(token in pair for token in ['BTC', 'ETH']):
+                    token_type = 'Major'
+                elif any(token in pair for token in ['USDT', 'USDC']):
+                    token_type = 'Stablecoin'
+                
+                # Skip if token type not selected
+                if token_type not in selected_token_types:
+                    continue
+                
+                # Fetch data
+                spread_df = fetch_historical_spreads(pair, days=days)
+                price_df = fetch_historical_prices(pair, days=days)
+                
+                # Calculate volatility
+                if price_df is not None:
+                    vol_df = calculate_volatility(price_df, window_minutes=vol_window)
+                    
+                    # Combine data
+                    if spread_df is not None and vol_df is not None:
+                        combined_df = combine_spread_volatility_data(spread_df, vol_df)
+                        
+                        # Run backtest
+                        if combined_df is not None and len(combined_df) >= min_data_points:
+                            backtest_result, _ = backtest_buffer_strategy(
+                                combined_df, pair, token_type
+                            )
+                            
+                            if backtest_result is not None:
+                                all_results.append(backtest_result)
+            
+            # Display token type analysis
+            if all_results:
+                filter_and_display_tokens(selected_token_types, all_results)
+            else:
+                st.warning("No backtest results available")
 
 # Main app
 def main():
@@ -1776,7 +1998,7 @@ def main():
     )
     
     # Main content
-    tab1, tab2, tab3 = st.tabs(["Individual Pair Analysis", "Summary Results", "Rollbit Analysis"])
+    tab1, tab2, tab3 = st.tabs(["Individual Pair Analysis", "Summary Results", "Strategy Backtest"])
     
     # Individual Pair Analysis Tab
     with tab1:
@@ -1784,177 +2006,11 @@ def main():
     
     # Summary Results Tab
     with tab2:
-        st.markdown("## Summary Results")
-        st.markdown("Comparison of spread-volatility relationships across all analyzed pairs")
-        
-        # Process all pairs to get results
-        results_dict, successful_pairs, failed_pairs, _ = process_all_pairs(
-            selected_pairs, days, vol_window, min_data_points
-        )
-        
-        # Consolidate results
-        summary_df = consolidate_results(results_dict)
-        
-        if not summary_df.empty:
-            # Sort by correlation strength (avoiding abs() function)
-            summary_df['abs_correlation'] = summary_df['spread_volatility_correlation'].apply(lambda x: abs(x) if pd.notna(x) else 0)
-            summary_df = summary_df.sort_values(by='abs_correlation', ascending=False)
-            
-            # Create a nicer display dataframe
-            display_df = summary_df.copy()
-            display_df = display_df.rename(columns={
-                'pair_name': 'Pair',
-                'volatility_measure': 'Best Volatility Measure',
-                'spread_volatility_correlation': 'Correlation',
-                'best_lag_hours': 'Best Lag (hours)',
-                'best_lag_correlation': 'Lag Correlation',
-                'r2_score': 'R² Score'
-            })
-            
-            # Format the volatility measure names
-            display_df['Best Volatility Measure'] = display_df['Best Volatility Measure'].apply(
-                lambda x: x.replace('_', ' ').title() if isinstance(x, str) else 'N/A'
-            )
-            
-            # Display summary table (without the abs column)
-            st.dataframe(display_df.drop(columns=['abs_correlation']))
-            
-            # Create correlation distribution plot
-            fig, ax = plt.subplots(figsize=(10, 6))
-            valid_corrs = summary_df['spread_volatility_correlation'].dropna()
-            ax.hist(valid_corrs, bins=10, alpha=0.7)
-            ax.set_xlabel('Correlation: Spread vs. Volatility')
-            ax.set_ylabel('Count')
-            ax.set_title('Distribution of Spread-Volatility Correlations Across Pairs')
-            ax.axvline(x=0, color='r', linestyle='--')
-            mean_corr = valid_corrs.mean()
-            ax.axvline(x=mean_corr, color='g', linestyle='-', label=f'Mean: {mean_corr:.3f}')
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-            st.pyplot(fig)
-            
-            # Create lag distribution plot
-            valid_lags = summary_df['best_lag_hours'].dropna()
-            if len(valid_lags) > 0:
-                fig, ax = plt.subplots(figsize=(10, 6))
-                ax.hist(valid_lags, bins=10, alpha=0.7)
-                ax.set_xlabel('Best Lag (hours)')
-                ax.set_ylabel('Count')
-                ax.set_title('Distribution of Lead-Lag Relationships')
-                ax.axvline(x=0, color='r', linestyle='--')
-                mean_lag = valid_lags.mean()
-                ax.axvline(x=mean_lag, color='g', linestyle='-', label=f'Mean: {mean_lag:.1f} hours')
-                ax.legend()
-                ax.grid(True, alpha=0.3)
-                st.pyplot(fig)
-            
-            # Overall findings
-            st.markdown("### Key Findings")
-            
-            # Calculate aggregate statistics
-            avg_corr = valid_corrs.mean() if len(valid_corrs) > 0 else 0
-            avg_abs_corr = valid_corrs.abs().mean() if len(valid_corrs) > 0 else 0
-            avg_lag = valid_lags.mean() if len(valid_lags) > 0 else 0
-            
-            st.write(f"**Average Correlation:** {avg_corr:.4f} (Absolute: {avg_abs_corr:.4f})")
-            
-            if len(valid_lags) > 0:
-                st.write(f"**Average Optimal Lag:** {avg_lag:.2f} hours")
-                
-                # Interpret results
-                if avg_lag < -1:
-                    st.write(f"**Overall Finding:** Spread changes typically precede volatility changes by {-avg_lag:.1f} hours")
-                elif avg_lag > 1:
-                    st.write(f"**Overall Finding:** Volatility changes typically precede spread changes by {avg_lag:.1f} hours")
-                else:
-                    st.write("**Overall Finding:** Spread and volatility changes occur nearly simultaneously")
-            
-            if avg_abs_corr > 0.7:
-                st.write("**Correlation Strength:** Very strong correlation between spreads and volatility")
-            elif avg_abs_corr > 0.5:
-                st.write("**Correlation Strength:** Moderate correlation between spreads and volatility")
-            elif avg_abs_corr > 0.3:
-                st.write("**Correlation Strength:** Weak correlation between spreads and volatility")
-            else:
-                st.write("**Correlation Strength:** Very weak correlation between spreads and volatility")
-                
-            # Recommendations based on findings
-            st.markdown("### Recommendations for Buffer Rate Strategy")
-            
-            if avg_abs_corr > 0.5:
-                st.markdown("""
-                Based on the strong correlation between spreads and volatility, you could use **either metric** 
-                as the foundation for your dynamic buffer rate adjustment system. However, since spreads
-                directly impact trading costs and liquidity, they may be a more intuitive basis for your strategy.
-                """)
-            else:
-                st.markdown("""
-                The correlation between spreads and volatility is relatively weak, suggesting you should
-                **carefully choose** which metric to base your buffer rate adjustments on:
-                
-                - **Market Spreads:** More directly tied to trading costs and market depth
-                - **Volatility:** More predictive of potential price swings and liquidation risks
-                
-                Consider using both in your formula with different weights.
-                """)
-                
-            if avg_lag < -1:
-                st.markdown(f"""
-                Since spread changes typically precede volatility changes by {-avg_lag:.1f} hours,
-                using spreads as your primary metric could provide an **early warning system**
-                for incoming volatility changes.
-                """)
-            elif avg_lag > 1:
-                st.markdown(f"""
-                Since volatility changes typically precede spread changes by {avg_lag:.1f} hours,
-                using volatility as your primary metric could help you **anticipate spread changes**
-                and adjust buffer rates proactively.
-                """)
-                
-            # Add example implementation
-            st.markdown("### Example Implementation")
-            
-            if avg_abs_corr > 0.3:
-                weight_spread = 0.7
-                weight_vol = 0.3
-            else:
-                weight_spread = 0.9
-                weight_vol = 0.1
-                
-            st.code(f"""
-# Example dynamic buffer rate adjustment function using both metrics
-def calculate_dynamic_buffer_rate(market_spread, volatility, token_type):
-    # Base parameters
-    spread_multiplier = 12.0  # Based on Rollbit's average ratio
-    volatility_weight = {weight_vol:.1f}  # Weight for volatility
-    spread_weight = {weight_spread:.1f}   # Weight for spread
+        render_summary_tab({}, selected_pairs, days, vol_window, min_data_points)
     
-    # Base buffer varies by token type
-    if token_type == 'Major':
-        base_buffer = 0.02  # 2%
-    elif token_type == 'Stablecoin':
-        base_buffer = 0.01  # 1%
-    else:  # Altcoin
-        base_buffer = 0.025  # 2.5%
-    
-    # Calculate buffer rate components
-    spread_component = market_spread * spread_multiplier
-    volatility_component = volatility * 0.10  # Convert volatility to buffer contribution
-    
-    # Weighted combination
-    buffer_rate = (spread_component * spread_weight) + (volatility_component * volatility_weight) + base_buffer
-    
-    # Apply reasonable bounds
-    buffer_rate = max(0.01, min(0.10, buffer_rate))
-    
-    return buffer_rate
-            """, language="python")
-        else:
-            st.warning("No results available for summary. Please analyze some pairs first.")
-    
-    # Rollbit Analysis Tab        
+    # Strategy Backtest Tab
     with tab3:
-        render_rollbit_tab(days)
+        render_strategy_backtest_tab(selected_pairs, days, vol_window, min_data_points)
 
 if __name__ == "__main__":
     main()
