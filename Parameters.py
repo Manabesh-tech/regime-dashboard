@@ -11,7 +11,6 @@ import pytz
 # Suppress warnings
 warnings.filterwarnings('ignore')
 
-
 # Set page config
 st.set_page_config(
     page_title="Crypto Exchange Analysis Dashboard",
@@ -174,8 +173,7 @@ class ExchangeAnalyzer:
         
         cursor.close()
         
-        st.write(f"Found existing tables: {existing_tables}")
-        
+
         if not existing_tables:
             st.warning(f"No partition tables found for the date range {start_date.date()} to {end_date.date()}")
         
@@ -316,6 +314,7 @@ class ExchangeAnalyzer:
                             df = pd.read_sql_query(query, conn)
                             if len(df) > 0:
                                 pair_data[pair][exchange] = df
+                                st.write(f"Found {len(df)} records for {exchange.upper()}_{pair}")
                             else:
                                 st.warning(f"No data found for {exchange.upper()}_{pair}")
                         except Exception as e:
@@ -325,10 +324,6 @@ class ExchangeAnalyzer:
             for i, pair in enumerate(pairs_to_analyze):
                 progress_bar.progress(0.67 + (i) / len(pairs_to_analyze) / 3)  # Final third for processing
                 status_text.text(f"Analyzing {pair} ({i+1}/{len(pairs_to_analyze)})")
-                
-                # Skip if we don't have data for both exchanges
-                if pair not in pair_data or len(pair_data[pair]) != 2:
-                    continue
                 
                 # Process data for both exchanges
                 coin_key = pair.replace('/', '_')
@@ -503,11 +498,11 @@ class ExchangeAnalyzer:
         for point_count in self.point_counts:
             comparison_data = []
             
-            # Get all coins that have data for both exchanges for any metric
+            # Get all coins that have data for secondary exchange
             all_coins = set()
             for metric in self.metrics:
                 for coin, exchanges in self.exchange_data[metric][point_count].items():
-                    if primary_exchange in exchanges and secondary_exchange in exchanges:
+                    if secondary_exchange in exchanges:
                         all_coins.add(coin)
             
             # For each coin, calculate relative performance for each metric
@@ -516,48 +511,58 @@ class ExchangeAnalyzer:
                 relative_scores = []
                 
                 for metric in self.metrics:
-                    # Check if we have data for both exchanges for this metric
+                    # Check if we have data for secondary exchange for this metric
                     if (coin in self.exchange_data[metric][point_count] and
-                        primary_exchange in self.exchange_data[metric][point_count][coin] and
                         secondary_exchange in self.exchange_data[metric][point_count][coin]):
                         
-                        primary_value = self.exchange_data[metric][point_count][coin][primary_exchange]
                         secondary_value = self.exchange_data[metric][point_count][coin][secondary_exchange]
                         
-                        # Calculate absolute and percentage difference
-                        abs_diff = secondary_value - primary_value
-                        pct_diff = (abs_diff / primary_value * 100) if primary_value != 0 else 0
-                        
-                        # Calculate relative performance score (100 means equal to primary, >100 means better)
-                        if metric == 'trend_strength':
-                            # For trend_strength, lower is better, so inverse the ratio
-                            if secondary_value == 0:
-                                # Edge case
-                                relative_score = 100
-                            else:
-                                relative_score = (primary_value / secondary_value) * 100
-                        else:
-                            # For all other metrics, higher is better
-                            if primary_value == 0:
-                                # Edge case
-                                relative_score = 100 if secondary_value == 0 else 200
-                            else:
-                                relative_score = (secondary_value / primary_value) * 100
-                        
-                        relative_scores.append(relative_score)
-                        
                         # Add to the row
-                        row[f'{self.metric_short_names[metric]} {primary_exchange.upper()}'] = primary_value
                         row[f'{self.metric_short_names[metric]} {secondary_exchange.upper()}'] = secondary_value
-                        row[f'{self.metric_short_names[metric]} Diff'] = abs_diff
-                        row[f'{self.metric_short_names[metric]} Diff %'] = pct_diff
-                        row[f'{self.metric_short_names[metric]} Score'] = relative_score
+                        
+                        # If we have primary exchange data, add it and calculate relative scores
+                        if primary_exchange in self.exchange_data[metric][point_count][coin]:
+                            primary_value = self.exchange_data[metric][point_count][coin][primary_exchange]
+                            
+                            # Calculate absolute and percentage difference
+                            abs_diff = secondary_value - primary_value
+                            pct_diff = (abs_diff / primary_value * 100) if primary_value != 0 else 0
+                            
+                            # Calculate relative performance score (100 means equal to primary, >100 means better)
+                            if metric == 'trend_strength':
+                                # For trend_strength, lower is better, so inverse the ratio
+                                if secondary_value == 0:
+                                    # Edge case
+                                    relative_score = 100
+                                else:
+                                    relative_score = (primary_value / secondary_value) * 100
+                            else:
+                                # For all other metrics, higher is better
+                                if primary_value == 0:
+                                    # Edge case
+                                    relative_score = 100 if secondary_value == 0 else 200
+                                else:
+                                    relative_score = (secondary_value / primary_value) * 100
+                            
+                            relative_scores.append(relative_score)
+                            
+                            # Add primary exchange data and differences
+                            row[f'{self.metric_short_names[metric]} {primary_exchange.upper()}'] = primary_value
+                            row[f'{self.metric_short_names[metric]} Diff'] = abs_diff
+                            row[f'{self.metric_short_names[metric]} Diff %'] = pct_diff
+                            row[f'{self.metric_short_names[metric]} Score'] = relative_score
+                        else:
+                            # If no primary exchange data, just show secondary exchange data
+                            row[f'{self.metric_short_names[metric]} {primary_exchange.upper()}'] = None
+                            row[f'{self.metric_short_names[metric]} Diff'] = None
+                            row[f'{self.metric_short_names[metric]} Diff %'] = None
+                            row[f'{self.metric_short_names[metric]} Score'] = None
                 
                 # Calculate overall relative score (average of individual scores)
                 if relative_scores:
                     row['Overall Score'] = sum(relative_scores) / len(relative_scores)
                 else:
-                    row['Overall Score'] = 100  # Default to "equal" if no metrics
+                    row['Overall Score'] = None
                 
                 comparison_data.append(row)
             
@@ -617,12 +622,13 @@ class ExchangeAnalyzer:
         primary_exchange = 'rollbit'
         secondary_exchange = 'surf'
         
-        # First, collect all coins that have data for any metric at any point count
+        # First, collect all coins that have data for secondary exchange
         all_coins = set()
         for metric in self.metrics:
             for point_count in self.point_counts:
                 for coin in self.exchange_data[metric][point_count].keys():
-                    all_coins.add(coin)
+                    if secondary_exchange in self.exchange_data[metric][point_count][coin]:
+                        all_coins.add(coin)
         
         # Create a huge dataframe with all metrics
         rows = []
@@ -632,19 +638,19 @@ class ExchangeAnalyzer:
             # Add metrics for each point count
             for point_count in self.point_counts:
                 for metric in self.metrics:
-                    # Check if we have primary exchange data
-                    if (coin in self.exchange_data[metric][point_count] and 
-                        primary_exchange in self.exchange_data[metric][point_count][coin]):
-                        row[f'{self.metric_short_names[metric]} {primary_exchange.upper()} ({point_count})'] = self.exchange_data[metric][point_count][coin][primary_exchange]
-                    else:
-                        row[f'{self.metric_short_names[metric]} {primary_exchange.upper()} ({point_count})'] = None
-                    
                     # Check if we have secondary exchange data
                     if (coin in self.exchange_data[metric][point_count] and 
                         secondary_exchange in self.exchange_data[metric][point_count][coin]):
                         row[f'{self.metric_short_names[metric]} {secondary_exchange.upper()} ({point_count})'] = self.exchange_data[metric][point_count][coin][secondary_exchange]
                     else:
                         row[f'{self.metric_short_names[metric]} {secondary_exchange.upper()} ({point_count})'] = None
+                    
+                    # Check if we have primary exchange data
+                    if (coin in self.exchange_data[metric][point_count] and 
+                        primary_exchange in self.exchange_data[metric][point_count][coin]):
+                        row[f'{self.metric_short_names[metric]} {primary_exchange.upper()} ({point_count})'] = self.exchange_data[metric][point_count][coin][primary_exchange]
+                    else:
+                        row[f'{self.metric_short_names[metric]} {primary_exchange.upper()} ({point_count})'] = None
             
             rows.append(row)
         
@@ -699,45 +705,66 @@ class ExchangeAnalyzer:
         
         return None
 
+# Function to fetch trading pairs from database
+@st.cache_data(ttl=600)
+def fetch_trading_pairs():
+    query = """
+    SELECT pair_name 
+    FROM trade_pool_pairs 
+    WHERE status = 1
+    ORDER BY pair_name
+    """
+    
+    try:
+        df = pd.read_sql(query, conn)
+        return df['pair_name'].tolist()
+    except Exception as e:
+        st.error(f"Error fetching trading pairs: {e}")
+        return ["BTC/USDT", "ETH/USDT"]  # Default pairs if database query fails
+
+# Get trading pairs from database
+all_pairs = fetch_trading_pairs()
 
 # Setup sidebar with simplified options
 with st.sidebar:
     st.header("Analysis Parameters")
-    all_pairs = [
-            "PEPE/USDT", "PAXG/USDT", "DOGE/USDT", "BTC/USDT", "EOS/USDT",
-            "BNB/USDT", "MERL/USDT", "FHE/USDT", "IP/USDT", "ORCA/USDT",
-            "TRUMP/USDT", "LIBRA/USDT", "AI16Z/USDT", "OM/USDT", "TRX/USDT",
-            "S/USDT", "PI/USDT", "JUP/USDT", "BABY/USDT", "PARTI/USDT",
-            "ADA/USDT", "HYPE/USDT", "VIRTUAL/USDT", "SUI/USDT", "SATS/USDT",
-            "XRP/USDT", "ORDI/USDT", "WIF/USDT", "VANA/USDT", "PENGU/USDT",
-            "VINE/USDT", "GRIFFAIN/USDT", "MEW/USDT", "POPCAT/USDT", "FARTCOIN/USDT",
-            "TON/USDT", "MELANIA/USDT", "SOL/USDT", "PNUT/USDT", "CAKE/USDT",
-            "TST/USDT", "ETH/USDT"
-        ]
     
     # Initialize session state for selections if not present
     if 'selected_pairs' not in st.session_state:
         st.session_state.selected_pairs = ["ETH/USDT", "BTC/USDT"]  # Default selection
     
-    # Create buttons OUTSIDE the form
-    col1, col2, col3 = st.columns(3)
-    
+    # Create buttons with more prominent styling
+    st.markdown("### Quick Selection")
+
+    # Main selection buttons in a single row
+    col1, col2 = st.columns(2)
+
     with col1:
-        if st.button("Select Major Coins"):
-            st.session_state.selected_pairs = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "DOGE/USDT"]
-            st.rerun()
-            
-    with col2:
-        if st.button("Select All"):
+        if st.button("Select All Pairs", type="primary", use_container_width=True):
             st.session_state.selected_pairs = all_pairs
             st.rerun()
-            
-    with col3:
-        if st.button("Clear Selection"):
+
+    with col2:
+        if st.button("Clear All", type="secondary", use_container_width=True):
             st.session_state.selected_pairs = []
             st.rerun()
+
+    # Additional options in a new row
+    col3, col4 = st.columns(2)
+
+    with col3:
+        if st.button("Major Coins", use_container_width=True):
+            st.session_state.selected_pairs = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "DOGE/USDT"]
+            st.rerun()
+
+    with col4:
+        if st.button("Default Pairs", use_container_width=True):
+            st.session_state.selected_pairs = ["ETH/USDT", "BTC/USDT"]
+            st.rerun()
+
+    st.markdown("---")  # Add a separator
     
-    # Then create the form without the buttons inside
+    # Create the form
     with st.form("exchange_comparison_form"):
         # Data retrieval window
         hours = st.number_input(
@@ -758,27 +785,29 @@ with st.sidebar:
             help="Select one or more cryptocurrency pairs to analyze"
         )
         
-        # Update session state
-        st.session_state.selected_pairs = selected_pairs
-        
-        # Set the pairs variable for the analyzer
-        pairs = selected_pairs
-        
-        # Show a warning if no pairs are selected
-        if not pairs:
-            st.warning("Please select at least one pair to analyze.")
-        
-        # Submit button - this should be indented at the same level as other elements in the form
+        # Add submit button
         submit_button = st.form_submit_button("Analyze Exchanges")
+        
+        # Update session state when form is submitted
+        if submit_button:
+            st.session_state.selected_pairs = selected_pairs
+            st.session_state.hours = hours
+            st.session_state.analyze_clicked = True
+            st.rerun()
 
-# When form is submitted
-if submit_button:
-    # Clear cache at start of analysis to ensure fresh data
+# Check if we should run the analysis
+if st.session_state.get('analyze_clicked', False):
+    # Clear cache and previous data at start of analysis to ensure fresh data
     st.cache_data.clear()
+    
+    # Clear previous results from the page
+    for tab in [tab1, tab2]:
+        with tab:
+            st.empty()  # Clear the tab content
     
     if not conn:
         st.error("Database connection not available.")
-    elif not pairs:
+    elif not st.session_state.selected_pairs:
         st.error("Please enter at least one pair to analyze.")
     else:
         # Initialize analyzer
@@ -787,12 +816,22 @@ if submit_button:
         # Run analysis
         st.header("Comparing ROLLBIT vs SURF")
         
-        with st.spinner("Fetching and analyzing data..."):
-            results = analyzer.fetch_and_analyze(
-                conn=conn,
-                pairs_to_analyze=pairs,
-                hours=hours
-            )
+        # Add a progress container
+        progress_container = st.empty()
+        with progress_container.container():
+            st.info("Starting analysis... This may take a few minutes depending on the number of pairs selected.")
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            with st.spinner("Fetching and analyzing data..."):
+                results = analyzer.fetch_and_analyze(
+                    conn=conn,
+                    pairs_to_analyze=st.session_state.selected_pairs,
+                    hours=st.session_state.hours
+                )
+            
+            # Clear the progress container after analysis is complete
+            progress_container.empty()
         
         if results:
             # Create parameter comparison table for Tab 1
@@ -832,7 +871,7 @@ if submit_button:
                     
                     for point_count in analyzer.point_counts:
                         st.write(f"#### {point_count} Points")
-                        time_df = analyzer.create_timestamp_range_table(point_count, pairs)
+                        time_df = analyzer.create_timestamp_range_table(point_count, st.session_state.selected_pairs)
                         
                         if time_df is not None:
                             st.dataframe(time_df, use_container_width=True)
@@ -848,163 +887,182 @@ if submit_button:
                 
                 if results['comparison_results']:
                     # Create subtabs for different point counts
-                    point_count_tabs = st.tabs([f"{count} Points" for count in analyzer.point_counts if count in results['comparison_results']])
+                    valid_point_counts = [count for count in analyzer.point_counts if count in results['comparison_results'] and results['comparison_results'][count] is not None]
                     
-                    for i, point_count in enumerate([pc for pc in analyzer.point_counts if pc in results['comparison_results']]):
-                        with point_count_tabs[i]:
-                            df = results['comparison_results'][point_count]
-                            
-                            if df is not None and not df.empty:
-                                # Style the DataFrame for relative scores
-                                def highlight_scores(val):
-                                    try:
-                                        if isinstance(val.name, str) and 'Score' in val.name:
-                                            if val > 130:
-                                                return 'background-color: #60b33c; color: white; font-weight: bold'
-                                            elif val > 110:
-                                                return 'background-color: #a0d995; color: black'
-                                            elif val > 90:
-                                                return 'background-color: #f1f1aa; color: black'
-                                            elif val > 70:
-                                                return 'background-color: #ffc299; color: black'
-                                            else:
-                                                return 'background-color: #ff8080; color: black; font-weight: bold'
-                                    except:
-                                        pass
-                                    return ''
+                    if valid_point_counts:
+                        point_count_tabs = st.tabs([f"{count} Points" for count in valid_point_counts])
+                        
+                        for i, point_count in enumerate(valid_point_counts):
+                            with point_count_tabs[i]:
+                                df = results['comparison_results'][point_count]
                                 
-                                # Display data collection time range
-                                st.subheader("Data Collection Time Ranges")
-                                time_df = analyzer.create_timestamp_range_table(point_count, pairs)
-                                
-                                if time_df is not None:
-                                    st.dataframe(time_df, height=300, use_container_width=True)
-                                    st.info("Note: 'Start' is the oldest data point, 'End' is the most recent data point in the analysis.")
-                                
-                                # Display the data
-                                st.subheader(f"Relative Performance: {point_count} Points")
-                                st.dataframe(
-                                    df.style.applymap(highlight_scores),
-                                    height=400,
-                                    use_container_width=True
-                                )
-                                
-                                # Create visualization
-                                st.subheader(f"Top and Bottom Performers")
-                                
-                                # Top 10 and bottom 10 coins
-                                top_10 = df.nlargest(10, 'Overall Score')
-                                bottom_10 = df.nsmallest(10, 'Overall Score')
-                                
-                                # Combined visualization
-                                fig = go.Figure()
-                                
-                                # Add top 10
-                                fig.add_trace(go.Bar(
-                                    x=top_10['Coin'],
-                                    y=top_10['Overall Score'],
-                                    name='Top Performers',
-                                    marker_color='green'
-                                ))
-                                
-                                # Add bottom 10
-                                fig.add_trace(go.Bar(
-                                    x=bottom_10['Coin'],
-                                    y=bottom_10['Overall Score'],
-                                    name='Bottom Performers',
-                                    marker_color='red'
-                                ))
-                                
-                                # Add reference line at 100
-                                fig.add_shape(
-                                    type="line",
-                                    x0=-0.5,
-                                    y0=100,
-                                    x1=len(top_10) + len(bottom_10) - 0.5,
-                                    y1=100,
-                                    line=dict(
-                                        color="black",
-                                        width=2,
-                                        dash="dash",
+                                if df is not None and not df.empty:
+                                    # Style the DataFrame for relative scores
+                                    def highlight_scores(val):
+                                        try:
+                                            if isinstance(val.name, str) and 'Score' in val.name:
+                                                if val > 130:
+                                                    return 'background-color: #60b33c; color: white; font-weight: bold'
+                                                elif val > 110:
+                                                    return 'background-color: #a0d995; color: black'
+                                                elif val > 90:
+                                                    return 'background-color: #f1f1aa; color: black'
+                                                elif val > 70:
+                                                    return 'background-color: #ffc299; color: black'
+                                                else:
+                                                    return 'background-color: #ff8080; color: black; font-weight: bold'
+                                        except:
+                                            pass
+                                        return ''
+                                    
+                                    # Display data collection time range
+                                    st.subheader("Data Collection Time Ranges")
+                                    time_df = analyzer.create_timestamp_range_table(point_count, st.session_state.selected_pairs)
+                                    
+                                    if time_df is not None:
+                                        st.dataframe(time_df, height=300, use_container_width=True)
+                                        st.info("Note: 'Start' is the oldest data point, 'End' is the most recent data point in the analysis.")
+                                    
+                                    # Display the data
+                                    st.subheader(f"Relative Performance: {point_count} Points")
+                                    st.dataframe(
+                                        df.style.applymap(highlight_scores),
+                                        height=400,
+                                        use_container_width=True
                                     )
-                                )
-                                
-                                fig.update_layout(
-                                    title=f"SURF Performance Relative to ROLLBIT (100 = Equal)",
-                                    xaxis_title="Coin",
-                                    yaxis_title="Relative Performance Score",
-                                    barmode='group',
-                                    height=500
-                                )
-                                
-                                st.plotly_chart(fig, use_container_width=True)
-                                
-                                # Add metric-by-metric analysis
-                                col1, col2 = st.columns(2)
-                                
-                                with col1:
-                                    # Individual rankings for Rollbit
-                                    st.subheader("ROLLBIT Rankings")
                                     
-                                    if point_count in results['individual_rankings']['rollbit']:
-                                        # Create subtabs for each metric
-                                        metric_tabs_primary = st.tabs([analyzer.metric_display_names[m] for m in analyzer.metrics 
-                                                              if m in results['individual_rankings']['rollbit'][point_count]])
-                                        
-                                        for j, metric in enumerate([m for m in analyzer.metrics if m in results['individual_rankings']['rollbit'][point_count]]):
-                                            with metric_tabs_primary[j]:
-                                                metric_df = results['individual_rankings']['rollbit'][point_count][metric]
-                                                if not metric_df.empty:
-                                                    st.dataframe(metric_df, height=300, use_container_width=True)
-                                                    
-                                                    # Bar chart of top 10
-                                                    top_10_metric = metric_df.head(10)
-                                                    fig = px.bar(
-                                                        top_10_metric, 
-                                                        x='Coin', 
-                                                        y='Value',
-                                                        title=f"Top 10 by {analyzer.metric_display_names[metric]}",
-                                                        color='Rank',
-                                                        color_continuous_scale='Viridis_r'
-                                                    )
-                                                    st.plotly_chart(fig, use_container_width=True)
-                                    else:
-                                        st.warning(f"No ranking data available for ROLLBIT at {point_count} points")
-                                
-                                with col2:
-                                    # Individual rankings for Surf
-                                    st.subheader("SURF Rankings")
+                                    # Create visualization
+                                    st.subheader(f"Top and Bottom Performers")
                                     
-                                    if point_count in results['individual_rankings']['surf']:
-                                        # Create subtabs for each metric
-                                        metric_tabs_secondary = st.tabs([analyzer.metric_display_names[m] for m in analyzer.metrics 
-                                                              if m in results['individual_rankings']['surf'][point_count]])
+                                    # Convert Overall Score to numeric, replacing None with 0
+                                    df['Overall Score'] = pd.to_numeric(df['Overall Score'], errors='coerce').fillna(0)
+                                    
+                                    # Top 10 and bottom 10 coins
+                                    top_10 = df.nlargest(10, 'Overall Score')
+                                    bottom_10 = df.nsmallest(10, 'Overall Score')
+                                    
+                                    # Combined visualization
+                                    fig = go.Figure()
+                                    
+                                    # Add top 10
+                                    fig.add_trace(go.Bar(
+                                        x=top_10['Coin'],
+                                        y=top_10['Overall Score'],
+                                        name='Top Performers',
+                                        marker_color='green'
+                                    ))
+                                    
+                                    # Add bottom 10
+                                    fig.add_trace(go.Bar(
+                                        x=bottom_10['Coin'],
+                                        y=bottom_10['Overall Score'],
+                                        name='Bottom Performers',
+                                        marker_color='red'
+                                    ))
+                                    
+                                    # Add reference line at 100
+                                    fig.add_shape(
+                                        type="line",
+                                        x0=-0.5,
+                                        y0=100,
+                                        x1=len(top_10) + len(bottom_10) - 0.5,
+                                        y1=100,
+                                        line=dict(
+                                            color="black",
+                                            width=2,
+                                            dash="dash",
+                                        )
+                                    )
+                                    
+                                    fig.update_layout(
+                                        title=f"SURF Performance Relative to ROLLBIT (100 = Equal)",
+                                        xaxis_title="Coin",
+                                        yaxis_title="Relative Performance Score",
+                                        barmode='group',
+                                        height=500
+                                    )
+                                    
+                                    st.plotly_chart(fig, use_container_width=True, key=f"performance_{point_count}_chart")
+                                    
+                                    # Add metric-by-metric analysis
+                                    col1, col2 = st.columns(2)
+                                    
+                                    with col1:
+                                        # Individual rankings for Rollbit
+                                        st.subheader("ROLLBIT Rankings")
                                         
-                                        for j, metric in enumerate([m for m in analyzer.metrics if m in results['individual_rankings']['surf'][point_count]]):
-                                            with metric_tabs_secondary[j]:
-                                                metric_df = results['individual_rankings']['surf'][point_count][metric]
-                                                if not metric_df.empty:
-                                                    st.dataframe(metric_df, height=300, use_container_width=True)
-                                                    
-                                                    # Bar chart of top 10
-                                                    top_10_metric = metric_df.head(10)
-                                                    fig = px.bar(
-                                                        top_10_metric, 
-                                                        x='Coin', 
-                                                        y='Value',
-                                                        title=f"Top 10 by {analyzer.metric_display_names[metric]}",
-                                                        color='Rank',
-                                                        color_continuous_scale='Viridis_r'
-                                                    )
-                                                    st.plotly_chart(fig, use_container_width=True)
-                                    else:
-                                        st.warning(f"No ranking data available for SURF at {point_count} points")
-                            else:
-                                st.warning(f"No data available for {point_count} points")
+                                        if point_count in results['individual_rankings']['rollbit']:
+                                            # Create subtabs for each metric
+                                            valid_metrics_primary = [m for m in analyzer.metrics 
+                                                                   if m in results['individual_rankings']['rollbit'][point_count] 
+                                                                   and results['individual_rankings']['rollbit'][point_count][m] is not None]
+                                            
+                                            if valid_metrics_primary:
+                                                metric_tabs_primary = st.tabs([analyzer.metric_display_names[m] for m in valid_metrics_primary])
+                                                
+                                                for j, metric in enumerate(valid_metrics_primary):
+                                                    with metric_tabs_primary[j]:
+                                                        metric_df = results['individual_rankings']['rollbit'][point_count][metric]
+                                                        if not metric_df.empty:
+                                                            st.dataframe(metric_df, height=300, use_container_width=True)
+                                                            
+                                                            # Bar chart of top 10
+                                                            top_10_metric = metric_df.head(10)
+                                                            fig = px.bar(
+                                                                top_10_metric, 
+                                                                x='Coin', 
+                                                                y='Value',
+                                                                title=f"Top 10 by {analyzer.metric_display_names[metric]}",
+                                                                color='Rank',
+                                                                color_continuous_scale='Viridis_r'
+                                                            )
+                                                            st.plotly_chart(fig, use_container_width=True, key=f"rollbit_{point_count}_{metric}_chart")
+                                        else:
+                                            st.warning(f"No ranking data available for ROLLBIT at {point_count} points")
+                                    
+                                    with col2:
+                                        # Individual rankings for Surf
+                                        st.subheader("SURF Rankings")
+                                        
+                                        if point_count in results['individual_rankings']['surf']:
+                                            # Create subtabs for each metric
+                                            valid_metrics_secondary = [m for m in analyzer.metrics 
+                                                                     if m in results['individual_rankings']['surf'][point_count] 
+                                                                     and results['individual_rankings']['surf'][point_count][m] is not None]
+                                            
+                                            if valid_metrics_secondary:
+                                                metric_tabs_secondary = st.tabs([analyzer.metric_display_names[m] for m in valid_metrics_secondary])
+                                                
+                                                for j, metric in enumerate(valid_metrics_secondary):
+                                                    with metric_tabs_secondary[j]:
+                                                        metric_df = results['individual_rankings']['surf'][point_count][metric]
+                                                        if not metric_df.empty:
+                                                            st.dataframe(metric_df, height=300, use_container_width=True)
+                                                            
+                                                            # Bar chart of top 10
+                                                            top_10_metric = metric_df.head(10)
+                                                            fig = px.bar(
+                                                                top_10_metric, 
+                                                                x='Coin', 
+                                                                y='Value',
+                                                                title=f"Top 10 by {analyzer.metric_display_names[metric]}",
+                                                                color='Rank',
+                                                                color_continuous_scale='Viridis_r'
+                                                            )
+                                                            st.plotly_chart(fig, use_container_width=True, key=f"surf_{point_count}_{metric}_chart")
+                                        else:
+                                            st.warning(f"No ranking data available for SURF at {point_count} points")
+                                else:
+                                    st.warning(f"No data available for {point_count} points")
+                    else:
+                        st.warning("No valid data available for any point count.")
                 else:
                     st.warning("No comparison results available.")
         else:
             st.error("Failed to analyze data. Please try again with different parameters.")
+        
+        # Reset the analyze_clicked flag
+        st.session_state.analyze_clicked = False
 
 # Add explanation in the sidebar
 st.sidebar.markdown("---")
