@@ -1126,7 +1126,9 @@ def create_fee_comparison_table(pair_name):
     else:
         rate_multiplier = st.session_state.pair_data[pair_name]['rate_multiplier']
         rate_exponent = st.session_state.pair_data[pair_name]['rate_exponent']
-    
+        
+    # Get pnl_base_rate parameter
+    pnl_base_rate = st.session_state.pair_data[pair_name]['pnl_base_rate']
     # Calculate fees with current parameters
     current_fees = []
     current_fee_pcts = []
@@ -1134,7 +1136,7 @@ def create_fee_comparison_table(pair_name):
     for move in move_sizes:
         fee_amount, fee_pct = calculate_fee_for_move(
             move, 
-            current_buffer, 
+            pnl_base_rate, 
             current_multiplier,
             rate_multiplier,
             rate_exponent
