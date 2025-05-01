@@ -1294,7 +1294,7 @@ if __name__ == "__main__":
             enable_simulated_data_mode()
     
     # Run the main application
-    main()def main():
+    def main():
     # Initialize all session state variables to prevent duplicates
     init_session_state()
     
