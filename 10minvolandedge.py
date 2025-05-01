@@ -266,57 +266,75 @@ def calculate_edge_volatility(pair_name):
         vol_df['timestamp_sg'] = pd.to_datetime(vol_df['timestamp_sg'])
         vol_df['time_label'] = vol_df['timestamp_sg'].dt.strftime('%H:%M')
         
-        # Calculate volatility for each 10-minute window
-        # Updated volatility calculation function to handle decimal.Decimal values
-def calculate_sub_period_volatility(row):
-    # Convert PostgreSQL array to Python list
-    if row['price_array'] is None:
-        return None
+        # Calculate volatility for each 10-minute window - FIXED for decimal.Decimal issue
+        def calculate_sub_period_volatility(row):
+            # Convert PostgreSQL array to Python list
+            if row['price_array'] is None:
+                return None
+                
+            # Parse the array
+            if isinstance(row['price_array'], str):
+                # Strip curly braces and split
+                prices_str = row['price_array'].strip('{}').split(',')
+                
+                # Explicitly convert all prices to float
+                prices = []
+                for p in prices_str:
+                    if p and p != 'NULL' and p != 'None':
+                        try:
+                            # Force conversion to float to handle decimal.Decimal
+                            prices.append(float(p))
+                        except (ValueError, TypeError):
+                            pass  # Skip any values that can't be converted
+            else:
+                # Handle list/array directly - still need to ensure all values are float
+                prices = []
+                for p in row['price_array']:
+                    if p is not None:
+                        try:
+                            prices.append(float(p))
+                        except (ValueError, TypeError):
+                            pass
+            
+            # Need at least 2 prices to calculate volatility
+            if len(prices) < 2:
+                return None
+                
+            # Calculate log returns
+            try:
+                # Ensure we're working with numpy array of floats
+                prices_array = np.array(prices, dtype=float)
+                log_returns = np.diff(np.log(prices_array))
+                
+                # Standard deviation of returns
+                std_dev = np.std(log_returns)
+                
+                # Annualize: assuming 5 2-minute periods per 10 minutes
+                # 5 periods/10 min * 6 10-min periods/hour * 24 hours/day * 365 days/year
+                annualized_vol = std_dev * np.sqrt(5 * 6 * 24 * 365)
+                
+                return annualized_vol
+            except Exception as e:
+                print(f"Error in volatility calculation for {pair_name}: {e}")
+                print(f"Sample prices: {prices[:5]}...")
+                return None
         
-    # Parse the array
-    if isinstance(row['price_array'], str):
-        # Strip curly braces and split
-        prices_str = row['price_array'].strip('{}').split(',')
+        # Apply volatility calculation
+        vol_df['volatility'] = vol_df.apply(calculate_sub_period_volatility, axis=1)
         
-        # Explicitly convert all prices to float
-        prices = []
-        for p in prices_str:
-            if p and p != 'NULL' and p != 'None':
-                try:
-                    # Force conversion to float to handle decimal.Decimal
-                    prices.append(float(p))
-                except (ValueError, TypeError):
-                    pass  # Skip any values that can't be converted
-    else:
-        # Handle list/array directly - still need to ensure all values are float
-        prices = []
-        for p in row['price_array']:
-            if p is not None:
-                try:
-                    prices.append(float(p))
-                except (ValueError, TypeError):
-                    pass
+        # Merge edge and volatility data
+        result_df = pd.merge(
+            edge_df,
+            vol_df[['time_label', 'volatility']],
+            on='time_label',
+            how='left'
+        )
+        
+        return result_df
     
-    # Need at least 2 prices to calculate volatility
-    if len(prices) < 2:
-        return None
-        
-    # Calculate log returns
-    try:
-        # Ensure we're working with numpy array of floats
-        prices_array = np.array(prices, dtype=float)
-        log_returns = np.diff(np.log(prices_array))
-        
-        # Standard deviation of returns
-        std_dev = np.std(log_returns)
-        
-        # Annualize: assuming 5 2-minute periods per 10 minutes
-        # 5 periods/10 min * 6 10-min periods/hour * 24 hours/day * 365 days/year
-        annualized_vol = std_dev * np.sqrt(5 * 6 * 24 * 365)
-        
-        return annualized_vol
     except Exception as e:
-        print(f"Error in volatility calculation: {e}, prices: {prices[:5]}...")
+        st.error(f"Error processing {pair_name}: {e}")
+        print(f"Detailed error for {pair_name}: {str(e)}")
         return None
 
 # NEW FUNCTION: Fetch market spread data for pairs
