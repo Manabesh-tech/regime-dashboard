@@ -1474,7 +1474,7 @@ def main():
     
     # Batch update button
     if st.sidebar.button(
-        "Update All Pairs Now", 
+        "Update Selected Pairs Now", 
         help="Immediately fetch new edge data for all monitored pairs",
         key="batch_update_button",
         disabled=len(st.session_state.monitored_pairs) == 0
