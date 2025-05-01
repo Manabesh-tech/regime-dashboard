@@ -476,9 +476,10 @@ def init_session_state():
 # Function to get current time in Singapore timezone
 def get_sg_time():
     """Get current time in Singapore timezone."""
-    utc_now = datetime.now(timezone.utc)
-    singapore_tz = timezone(timedelta(hours=8))
-    return utc_now.astimezone(singapore_tz)
+    singapore_tz = pytz.timezone('Asia/Singapore')
+    now_utc = datetime.now(pytz.UTC)
+    now_sg = now_utc.astimezone(singapore_tz)
+    return now_sg
 
 # Function to format time display consistently
 def format_time_display(dt):
