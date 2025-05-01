@@ -1438,7 +1438,7 @@ def main():
         time.sleep(1)  # Small delay to ensure the message is seen
         st.rerun()
     
-    # Display update status in the container
+    # Display update status in the container with debug info
     with update_metrics_container:
         col1, col2, col3 = st.columns(3)
         
@@ -1470,14 +1470,32 @@ def main():
                 
                 # Rerun to refresh
                 st.rerun()
+                
+        # Add debug info about auto-update status
+        st.info("""
+        **Auto-Update Status:** The dashboard will automatically update at the interval 
+        selected in the sidebar (1, 5, or 10 minutes). The next update will happen at the 
+        time shown above without any manual action needed.
+        """)
+        
+        # Debug section to verify edge data
+        if st.session_state.monitored_pairs:
+            with st.expander("Edge Data Debug Info (Click to expand)"):
+                for pair in st.session_state.monitored_pairs[:3]:  # Show first 3 pairs only
+                    edge_history = st.session_state.pair_data[pair].get('edge_history', [])
+                    if edge_history:
+                        st.write(f"**{pair}** edge history:")
+                        history_df = pd.DataFrame(edge_history, columns=['Timestamp', 'Edge'])
+                        history_df['Edge'] = history_df['Edge'].apply(lambda x: f"{x:.6f}")
+                        st.dataframe(history_df, hide_index=True)
     
     # Initialize button and Add All Pairs button in a row
     init_col1, init_col2 = st.sidebar.columns(2)
     
     with init_col1:
         initialize_button = st.button(
-            "Initialize Pair", 
-            help=f"Initialize the selected pair {selected_pair} and begin monitoring",
+            "Add Pair", 
+            help=f"Add the selected pair {selected_pair} to monitoring",
             type="primary",
             key="init_button"
         )
