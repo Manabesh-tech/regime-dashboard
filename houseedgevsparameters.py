@@ -8,12 +8,6 @@ import math
 import pytz
 from sqlalchemy import create_engine, text
 from streamlit_autorefresh import st_autorefresh  # Import the auto-refresh component
-# Add this near the top of your script, after imports
-if 'next_update_time' in st.session_state:
-    del st.session_state.next_update_time
-
-if 'last_update_time' in st.session_state:
-    del st.session_state.last_update_time
 
 # Page configuration
 st.set_page_config(
@@ -22,23 +16,37 @@ st.set_page_config(
     layout="wide"
 )
 
-# Initialize auto-refresh based on lookback minutes
-# Set up this configuration at the very beginning before any other code executes
-def get_refresh_rate():
-    """Get refresh rate in milliseconds based on lookback minutes"""
-    lookback_mins = st.session_state.get('lookback_minutes', 5)  # Default to 5 minutes
-    # Convert minutes to milliseconds with a small buffer (90% of the interval)
-    # This ensures we refresh slightly before the next scheduled update
-    return int(lookback_mins * 60 * 1000 * 0.9)
+# Generate a unique refresh key based on the current time
+refresh_key = f"autorefresh_{int(time.time())}"
 
-# Set up auto-refresh if enabled
-if st.session_state.get('auto_update', True):
-    refresh_rate = get_refresh_rate()
-    st_autorefresh(interval=refresh_rate, key="autorefresh")
-    # Log refresh setup
-    print(f"Auto-refresh enabled with {refresh_rate}ms interval")
-else:
-    print("Auto-refresh disabled")
+# Initialize auto-refresh based on lookback minutes
+def setup_auto_refresh():
+    """Set up auto-refresh with the current settings"""
+    if st.session_state.get('auto_update', True):
+        # Get current value directly from the radio button
+        selected_interval = st.session_state.get('interval_radio', "5 minutes")
+        interval_mapping = {"1 minute": 1, "5 minutes": 5, "10 minutes": 10}
+        lookback_mins = interval_mapping.get(selected_interval, 5)
+        
+        # Update the session state
+        st.session_state.lookback_minutes = lookback_mins
+        
+        # Calculate refresh rate in milliseconds (slightly shorter than full interval)
+        refresh_rate = int(lookback_mins * 60 * 1000 * 0.9)
+        
+        # Setup the auto-refresh with a unique key to force refreshing
+        st_autorefresh(interval=refresh_rate, key=refresh_key)
+        
+        # Reset timers
+        current_time = datetime.now(pytz.utc)
+        st.session_state.last_update_time = current_time
+        st.session_state.next_update_time = current_time + timedelta(minutes=lookback_mins)
+        
+        print(f"Auto-refresh enabled with {refresh_rate}ms interval, next update in {lookback_mins} minutes")
+        return True
+    else:
+        print("Auto-refresh disabled")
+        return False
 
 # Apply CSS styles
 st.markdown("""
@@ -145,7 +153,7 @@ def init_connection():
         return None
 
 # Fetch available trading pairs from database
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=60)  # Reduced from 600 to 60 seconds to refresh pairs more often
 def fetch_pairs():
     """
     Fetch all active trading pairs from the database.
@@ -172,7 +180,7 @@ def fetch_pairs():
         return ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
 
 # Fetch current parameters for a specific pair
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=60)  # Reduced from 300 to 60 seconds to refresh parameters more often
 def fetch_current_parameters(pair_name):
     """
     Fetch current buffer_rate and position_multiplier for a specific pair.
@@ -232,7 +240,9 @@ def calculate_edge(pair_name, lookback_minutes=10):
     """
     engine = init_connection()
     if not engine:
-        return None
+        # For testing - generate random edge values when no connection
+        import random
+        return 0.001 + random.uniform(-0.0005, 0.0010)
     
     try:
         # Get current time in Singapore timezone
@@ -304,27 +314,29 @@ def calculate_edge(pair_name, lookback_minutes=10):
         df = pd.read_sql(edge_query, engine)
         
         if df.empty or pd.isna(df['house_edge'].iloc[0]):
-            # Set a small default positive edge if calculation returns 0 or null
-            return 0.001
+            # For testing - generate random edge values when no data
+            import random
+            return 0.001 + random.uniform(-0.0005, 0.0010)
         
         edge_value = float(df['house_edge'].iloc[0])
         
         # If the edge is exactly 0, set a small positive value
         # This avoids issues with initial reference being zero
         if edge_value == 0:
-            return 0.001
+            edge_value = 0.001
             
-        # For testing - uncomment this to add variation for testing
-        # import random
-        # edge_value += random.uniform(-0.002, 0.002)
+        # For testing - add variation for testing
+        import random
+        edge_value += random.uniform(-0.0005, 0.0010)
         
         print(f"Edge value for {pair_name}: {edge_value}")
         return edge_value
     
     except Exception as e:
         st.error(f"Error calculating edge for {pair_name}: {e}")
-        # Return a default small positive edge in case of error
-        return 0.001
+        # Return a random edge value for testing
+        import random
+        return 0.001 + random.uniform(-0.0005, 0.0010)
 
 # Function to calculate fee for a percentage price move based on the Profit Share Model
 def calculate_fee_for_move(move_pct, buffer_rate, position_multiplier, rate_multiplier=0.5, 
@@ -495,7 +507,7 @@ def init_session_state():
         st.session_state.current_pair = None
     
     if 'lookback_minutes' not in st.session_state:
-        st.session_state.lookback_minutes = 5  # Default to 5 minutes for better testing
+        st.session_state.lookback_minutes = 1  # Default to 1 minute for faster updates
     
     if 'buffer_alpha_up' not in st.session_state:
         st.session_state.buffer_alpha_up = 0.1
@@ -520,7 +532,7 @@ def init_session_state():
     
     # Ensure next_update_time and last_update_time are aware of timezone
     if 'next_update_time' not in st.session_state:
-        st.session_state.next_update_time = datetime.now(pytz.utc) + timedelta(minutes=5)
+        st.session_state.next_update_time = datetime.now(pytz.utc) + timedelta(minutes=1)
     elif st.session_state.next_update_time.tzinfo is None:
         st.session_state.next_update_time = st.session_state.next_update_time.replace(tzinfo=pytz.utc)
     
@@ -1155,6 +1167,148 @@ def render_pair_detail(pair_name):
     with col4:
         st.markdown(f"**Position Multiplier:** {st.session_state.pair_data[pair_name]['position_multiplier']:.1f}")
     
+    # Show edge plot
+    edge_plot = create_edge_plot(pair_name)
+    if edge_plot is not None:
+        st.pyplot(edge_plot)
+    else:
+        st.info("Not enough data points yet for edge visualization.")
+    
+    # Add a row of action buttons
+    hist_col1, hist_col2, hist_col3 = st.columns(3)
+    
+    with hist_col1:
+        if st.button("View Edge History", key=f"view_edge_history_{pair_name}"):
+            if len(st.session_state.pair_data[pair_name]['edge_history']) > 0:
+                edge_df = pd.DataFrame({
+                    'Timestamp': [t for t, _ in st.session_state.pair_data[pair_name]['edge_history']],
+                    'Edge Value': [f"{e:.6f}" for _, e in st.session_state.pair_data[pair_name]['edge_history']]
+                })
+                st.dataframe(edge_df, hide_index=True, use_container_width=True)
+            else:
+                st.info("No edge history data yet.")
+                
+    with hist_col2:
+        if st.button("View Buffer Rate History", key=f"view_buffer_history_{pair_name}"):
+            if len(st.session_state.pair_data[pair_name]['buffer_history']) > 0:
+                buffer_df = pd.DataFrame({
+                    'Timestamp': [t for t, _ in st.session_state.pair_data[pair_name]['buffer_history']],
+                    'Buffer Rate': [f"{r:.6f}" for _, r in st.session_state.pair_data[pair_name]['buffer_history']]
+                })
+                st.dataframe(buffer_df, hide_index=True, use_container_width=True)
+            else:
+                st.info("No buffer rate history data yet.")
+                
+    with hist_col3:
+        if st.button("View Multiplier History", key=f"view_multiplier_history_{pair_name}"):
+            if len(st.session_state.pair_data[pair_name]['multiplier_history']) > 0:
+                multiplier_df = pd.DataFrame({
+                    'Timestamp': [t for t, _ in st.session_state.pair_data[pair_name]['multiplier_history']],
+                    'Position Multiplier': [f"{m:.1f}" for _, m in st.session_state.pair_data[pair_name]['multiplier_history']]
+                })
+                st.dataframe(multiplier_df, hide_index=True, use_container_width=True)
+            else:
+                st.info("No position multiplier history data yet.")
+    
+    # Show parameter update notification
+    if st.session_state.pair_data[pair_name].get('params_changed', False):
+        st.markdown('<div class="warning">Parameter updates available. Review proposed changes below.</div>', unsafe_allow_html=True)
+        
+        # Parameter change details
+        if st.session_state.pair_data[pair_name]['proposed_buffer_rate'] is not None and st.session_state.pair_data[pair_name]['proposed_position_multiplier'] is not None:
+            delta_buffer = st.session_state.pair_data[pair_name]['proposed_buffer_rate'] - st.session_state.pair_data[pair_name]['buffer_rate']
+            delta_multiplier = st.session_state.pair_data[pair_name]['proposed_position_multiplier'] - st.session_state.pair_data[pair_name]['position_multiplier']
+            
+            # Calculate current and new fees - ensure proper calculation
+            current_fee = calculate_fee_for_move(0.1, st.session_state.pair_data[pair_name]['buffer_rate'], st.session_state.pair_data[pair_name]['position_multiplier'])
+            new_fee = calculate_fee_for_move(0.1, st.session_state.pair_data[pair_name]['proposed_buffer_rate'], st.session_state.pair_data[pair_name]['proposed_position_multiplier'])
+            delta_fee = new_fee - current_fee
+            
+            # Calculate percentage change safely
+            if abs(current_fee) > 1e-10:
+                pct_fee_change = (delta_fee / abs(current_fee)) * 100
+            else:
+                pct_fee_change = 0 if abs(delta_fee) < 1e-10 else float('inf')
+            
+            # Show proposed changes
+            st.markdown("### Proposed Parameter Changes")
+            
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.markdown("**Buffer Rate**")
+                st.markdown(f"Current: {st.session_state.pair_data[pair_name]['buffer_rate']:.6f}")
+                st.markdown(f"Proposed: {st.session_state.pair_data[pair_name]['proposed_buffer_rate']:.6f}")
+                
+                # Show change with color
+                pct_change = delta_buffer/st.session_state.pair_data[pair_name]['buffer_rate']*100
+                change_color = "up" if delta_buffer > 0 else "down"
+                st.markdown(f"Change: {delta_buffer:.6f} (<span class='{change_color}'>{pct_change:+.2f}%</span>)", unsafe_allow_html=True)
+            
+            with col2:
+                st.markdown("**Position Multiplier**")
+                st.markdown(f"Current: {st.session_state.pair_data[pair_name]['position_multiplier']:.1f}")
+                st.markdown(f"Proposed: {st.session_state.pair_data[pair_name]['proposed_position_multiplier']:.1f}")
+                
+                # Show change with color
+                pct_change = delta_multiplier/st.session_state.pair_data[pair_name]['position_multiplier']*100
+                change_color = "up" if delta_multiplier > 0 else "down"
+                st.markdown(f"Change: {delta_multiplier:.1f} (<span class='{change_color}'>{pct_change:+.2f}%</span>)", unsafe_allow_html=True)
+            
+            with col3:
+                st.markdown("**Fee for 0.1% Move**")
+                st.markdown(f"Current: {current_fee:.8f}")
+                st.markdown(f"Proposed: {new_fee:.8f}")
+                
+                # Show change with proper color and format
+                change_color = "up" if delta_fee > 0 else "down"
+                if abs(pct_fee_change) != float('inf'):
+                    st.markdown(f"Change: {delta_fee:.8f} (<span class='{change_color}'>{pct_fee_change:+.2f}%</span>)", unsafe_allow_html=True)
+                else:
+                    st.markdown(f"Change: {delta_fee:.8f}", unsafe_allow_html=True)
+            
+            # Add a view of fee changes for different move sizes
+            with st.expander("View Fee Comparison for Different Move Sizes"):
+                fee_df = create_fee_comparison_table(pair_name)
+                st.dataframe(fee_df, use_container_width=True)
+        
+        # Update display parameters button
+        st.markdown('<div class="button-row">', unsafe_allow_html=True)
+        update_button = st.button("Update Parameters", type="primary", key=f"update_params_{pair_name}")
+        st.markdown('</div>', unsafe_allow_html=True)
+        
+        if update_button:
+            # Apply the updates to display (not database)
+            success, old_buffer, new_buffer, old_multiplier, new_multiplier = update_display_parameters(pair_name)
+            
+            if success:
+                st.markdown('<div class="success">Display parameters updated successfully!</div>', unsafe_allow_html=True)
+                st.rerun()
+    else:
+        # Manual update button
+        st.markdown('<div class="button-row">', unsafe_allow_html=True)
+        if st.button("Fetch New Data", key=f"fetch_data_{pair_name}"):
+            process_edge_data(pair_name)
+            st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    # Reset to reference parameters button
+    st.markdown('<div class="button-row">', unsafe_allow_html=True)
+    if st.button("Reset to Reference Parameters", type="secondary", key=f"reset_params_{pair_name}"):
+        success, old_buffer, new_buffer, old_multiplier, new_multiplier = reset_to_reference_parameters(pair_name)
+        if success:
+            st.success("Parameters reset to reference values")
+            st.rerun()
+        else:
+            st.error("No reference parameters available")
+    st.markdown('</div>', unsafe_allow_html=True)
+    
+    # Button to return to overview
+    if st.button("Return to Pairs Overview", type="secondary", key=f"return_from_monitor_{pair_name}"):
+        st.session_state.view_mode = "Pairs Overview"
+        st.session_state.current_pair = None
+        st.rerun()_data[pair_name]['position_multiplier']:.1f}")
+    
     # Create tabbed view for detailed analytics
     detail_tabs = st.tabs(["Edge History", "Parameter History", "Fee Analysis"])
     
@@ -1304,658 +1458,4 @@ def render_pair_monitor(pair_name):
     
     # Show current position multiplier
     with col4:
-        st.markdown(f"**Position Multiplier:** {st.session_state.pair_data[pair_name]['position_multiplier']:.1f}")
-    
-    # Show edge plot
-    edge_plot = create_edge_plot(pair_name)
-    if edge_plot is not None:
-        st.pyplot(edge_plot)
-    else:
-        st.info("Not enough data points yet for edge visualization.")
-    
-    # Add a row of action buttons
-    hist_col1, hist_col2, hist_col3 = st.columns(3)
-    
-    with hist_col1:
-        if st.button("View Edge History", key=f"view_edge_history_{pair_name}"):
-            if len(st.session_state.pair_data[pair_name]['edge_history']) > 0:
-                edge_df = pd.DataFrame({
-                    'Timestamp': [t for t, _ in st.session_state.pair_data[pair_name]['edge_history']],
-                    'Edge Value': [f"{e:.6f}" for _, e in st.session_state.pair_data[pair_name]['edge_history']]
-                })
-                st.dataframe(edge_df, hide_index=True, use_container_width=True)
-            else:
-                st.info("No edge history data yet.")
-                
-    with hist_col2:
-        if st.button("View Buffer Rate History", key=f"view_buffer_history_{pair_name}"):
-            if len(st.session_state.pair_data[pair_name]['buffer_history']) > 0:
-                buffer_df = pd.DataFrame({
-                    'Timestamp': [t for t, _ in st.session_state.pair_data[pair_name]['buffer_history']],
-                    'Buffer Rate': [f"{r:.6f}" for _, r in st.session_state.pair_data[pair_name]['buffer_history']]
-                })
-                st.dataframe(buffer_df, hide_index=True, use_container_width=True)
-            else:
-                st.info("No buffer rate history data yet.")
-                
-    with hist_col3:
-        if st.button("View Multiplier History", key=f"view_multiplier_history_{pair_name}"):
-            if len(st.session_state.pair_data[pair_name]['multiplier_history']) > 0:
-                multiplier_df = pd.DataFrame({
-                    'Timestamp': [t for t, _ in st.session_state.pair_data[pair_name]['multiplier_history']],
-                    'Position Multiplier': [f"{m:.1f}" for _, m in st.session_state.pair_data[pair_name]['multiplier_history']]
-                })
-                st.dataframe(multiplier_df, hide_index=True, use_container_width=True)
-            else:
-                st.info("No position multiplier history data yet.")
-    
-    # Show parameter update notification
-    if st.session_state.pair_data[pair_name].get('params_changed', False):
-        st.markdown('<div class="warning">Parameter updates available. Review proposed changes below.</div>', unsafe_allow_html=True)
-        
-        # Parameter change details
-        if st.session_state.pair_data[pair_name]['proposed_buffer_rate'] is not None and st.session_state.pair_data[pair_name]['proposed_position_multiplier'] is not None:
-            delta_buffer = st.session_state.pair_data[pair_name]['proposed_buffer_rate'] - st.session_state.pair_data[pair_name]['buffer_rate']
-            delta_multiplier = st.session_state.pair_data[pair_name]['proposed_position_multiplier'] - st.session_state.pair_data[pair_name]['position_multiplier']
-            
-            # Calculate current and new fees - ensure proper calculation
-            current_fee = calculate_fee_for_move(0.1, st.session_state.pair_data[pair_name]['buffer_rate'], st.session_state.pair_data[pair_name]['position_multiplier'])
-            new_fee = calculate_fee_for_move(0.1, st.session_state.pair_data[pair_name]['proposed_buffer_rate'], st.session_state.pair_data[pair_name]['proposed_position_multiplier'])
-            delta_fee = new_fee - current_fee
-            
-            # Calculate percentage change safely
-            if abs(current_fee) > 1e-10:
-                pct_fee_change = (delta_fee / abs(current_fee)) * 100
-            else:
-                pct_fee_change = 0 if abs(delta_fee) < 1e-10 else float('inf')
-            
-            # Show proposed changes
-            st.markdown("### Proposed Parameter Changes")
-            
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                st.markdown("**Buffer Rate**")
-                st.markdown(f"Current: {st.session_state.pair_data[pair_name]['buffer_rate']:.6f}")
-                st.markdown(f"Proposed: {st.session_state.pair_data[pair_name]['proposed_buffer_rate']:.6f}")
-                
-                # Show change with color
-                pct_change = delta_buffer/st.session_state.pair_data[pair_name]['buffer_rate']*100
-                change_color = "up" if delta_buffer > 0 else "down"
-                st.markdown(f"Change: {delta_buffer:.6f} (<span class='{change_color}'>{pct_change:+.2f}%</span>)", unsafe_allow_html=True)
-            
-            with col2:
-                st.markdown("**Position Multiplier**")
-                st.markdown(f"Current: {st.session_state.pair_data[pair_name]['position_multiplier']:.1f}")
-                st.markdown(f"Proposed: {st.session_state.pair_data[pair_name]['proposed_position_multiplier']:.1f}")
-                
-                # Show change with color
-                pct_change = delta_multiplier/st.session_state.pair_data[pair_name]['position_multiplier']*100
-                change_color = "up" if delta_multiplier > 0 else "down"
-                st.markdown(f"Change: {delta_multiplier:.1f} (<span class='{change_color}'>{pct_change:+.2f}%</span>)", unsafe_allow_html=True)
-            
-            with col3:
-                st.markdown("**Fee for 0.1% Move**")
-                st.markdown(f"Current: {current_fee:.8f}")
-                st.markdown(f"Proposed: {new_fee:.8f}")
-                
-                # Show change with proper color and format
-                change_color = "up" if delta_fee > 0 else "down"
-                if abs(pct_fee_change) != float('inf'):
-                    st.markdown(f"Change: {delta_fee:.8f} (<span class='{change_color}'>{pct_fee_change:+.2f}%</span>)", unsafe_allow_html=True)
-                else:
-                    st.markdown(f"Change: {delta_fee:.8f}", unsafe_allow_html=True)
-            
-            # Add a view of fee changes for different move sizes
-            with st.expander("View Fee Comparison for Different Move Sizes"):
-                fee_df = create_fee_comparison_table(pair_name)
-                st.dataframe(fee_df, use_container_width=True)
-        
-        # Update display parameters button
-        st.markdown('<div class="button-row">', unsafe_allow_html=True)
-        update_button = st.button("Update Parameters", type="primary", key=f"update_params_{pair_name}")
-        st.markdown('</div>', unsafe_allow_html=True)
-        
-        if update_button:
-            # Apply the updates to display (not database)
-            success, old_buffer, new_buffer, old_multiplier, new_multiplier = update_display_parameters(pair_name)
-            
-            if success:
-                st.markdown('<div class="success">Display parameters updated successfully!</div>', unsafe_allow_html=True)
-                st.rerun()
-    else:
-        # Manual update button
-        st.markdown('<div class="button-row">', unsafe_allow_html=True)
-        if st.button("Fetch New Data", key=f"fetch_data_{pair_name}"):
-            process_edge_data(pair_name)
-            st.rerun()
-        st.markdown('</div>', unsafe_allow_html=True)
-    
-    # Reset to reference parameters button
-    st.markdown('<div class="button-row">', unsafe_allow_html=True)
-    if st.button("Reset to Reference Parameters", type="secondary", key=f"reset_params_{pair_name}"):
-        success, old_buffer, new_buffer, old_multiplier, new_multiplier = reset_to_reference_parameters(pair_name)
-        if success:
-            st.success("Parameters reset to reference values")
-            st.rerun()
-        else:
-            st.error("No reference parameters available")
-    st.markdown('</div>', unsafe_allow_html=True)
-    
-    # Button to return to overview
-    if st.button("Return to Pairs Overview", type="secondary", key=f"return_from_monitor_{pair_name}"):
-        st.session_state.view_mode = "Pairs Overview"
-        st.session_state.current_pair = None
-        st.rerun()
-
-# Function to update all monitored pairs on each page load
-def update_pairs_on_load():
-    """
-    Updates all monitored pairs on each page load when needed.
-    This ensures edge data is always fresh.
-    """
-    # Only update if we have monitored pairs
-    if not st.session_state.get('monitored_pairs', []):
-        return False
-    
-    # Get current time in UTC
-    current_time = datetime.now(pytz.utc)
-    
-    # Initialize or fix last_update_time if needed
-    if 'last_update_time' not in st.session_state:
-        st.session_state.last_update_time = current_time
-    elif st.session_state.last_update_time.tzinfo is None:
-        st.session_state.last_update_time = st.session_state.last_update_time.replace(tzinfo=pytz.utc)
-    
-    # Calculate time since last update in minutes
-    minutes_since_last_update = (current_time - st.session_state.last_update_time).total_seconds() / 60
-    
-    # Check if enough time has passed since last update
-    if minutes_since_last_update >= st.session_state.get('lookback_minutes', 5):
-        print(f"Updating pairs on page load. Last update was {minutes_since_last_update:.2f} minutes ago.")
-        
-        # Update all pairs
-        pairs_updated = batch_update_all_pairs()
-        
-        # Update timing information
-        st.session_state.last_update_time = current_time
-        st.session_state.next_update_time = current_time + timedelta(minutes=st.session_state.get('lookback_minutes', 5))
-        
-        # Update successful
-        return True
-    
-    return False
-
-def main():
-    # Initialize all session state variables to prevent duplicates
-    init_session_state()
-    
-    # If auto-update is enabled, update pairs on page load when needed
-    if st.session_state.get('auto_update', True):
-        update_pairs_on_load()
-    
-    # Title and description
-    st.markdown('<div class="header-style">House Edge Parameter Adjustment Dashboard</div>', unsafe_allow_html=True)
-    st.markdown("""
-    This dashboard monitors house edge and dynamically adjusts buffer rate and position multiplier parameters 
-    to maintain exchange profitability.
-    
-    Parameters respond asymmetrically: buffer rate increases quickly when edge declines and decreases slowly when edge improves, 
-    while position multiplier does the opposite.
-    """)
-    
-    # Singapore time display
-    singapore_tz = pytz.timezone('Asia/Singapore')
-    now_utc = datetime.now(pytz.utc)
-    now_sg = now_utc.astimezone(singapore_tz)
-    st.markdown(f"**Current Singapore Time:** {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
-    
-    # Create a container that will be shown on every run at the top
-    update_metrics_container = st.container()
-    
-    # Get current time for consistent use throughout
-    current_time = datetime.now(pytz.utc)
-    current_time_sg = current_time.astimezone(singapore_tz)
-    
-    # Ensure next_update_time is timezone-aware for comparison
-    if 'next_update_time' not in st.session_state:
-        next_update_time = current_time + timedelta(minutes=st.session_state.get('lookback_minutes', 5))
-        st.session_state.next_update_time = next_update_time
-    elif st.session_state.next_update_time.tzinfo is None:
-        st.session_state.next_update_time = st.session_state.next_update_time.replace(tzinfo=pytz.utc)
-    
-    next_update_time = st.session_state.next_update_time
-    next_update_time_sg = next_update_time.astimezone(singapore_tz)
-    
-    # Ensure last_update_time is timezone-aware for display
-    if 'last_update_time' not in st.session_state:
-        st.session_state.last_update_time = current_time
-    elif st.session_state.last_update_time.tzinfo is None:
-        st.session_state.last_update_time = st.session_state.last_update_time.replace(tzinfo=pytz.utc)
-        
-    last_update_time = st.session_state.last_update_time
-    last_update_time_sg = last_update_time.astimezone(singapore_tz)
-    
-    # Display update status in the container with debug info
-    with update_metrics_container:
-        # Create a clean and clear status display
-        st.markdown("### Update Status")
-        
-        status_col1, status_col2 = st.columns(2)
-        
-        with status_col1:
-            st.markdown(f"**Last Update:** {last_update_time_sg.strftime('%H:%M:%S')} (SG)")
-            st.markdown(f"**Next Update:** {next_update_time_sg.strftime('%H:%M:%S')} (SG)")
-            
-            # Show auto-update status
-            auto_status = "Enabled" if st.session_state.get('auto_update', True) else "Disabled"
-            st.markdown(f"**Auto Update:** {auto_status}")
-            
-            # Show monitored pairs count
-            pair_count = len(st.session_state.get('monitored_pairs', []))
-            st.markdown(f"**Monitored Pairs:** {pair_count}")
-        
-        with status_col2:
-            # Calculate time to next update
-            time_to_next = max(0, (next_update_time - current_time).total_seconds())
-            minutes_to_next = int(time_to_next // 60)
-            seconds_to_next = int(time_to_next % 60)
-            
-            # Show countdown
-            st.markdown(f"**Time to Next Update:** {minutes_to_next}m {seconds_to_next}s")
-            
-            # Manual update button
-            if st.button("Update Now", key="force_update"):
-                # Force an immediate update
-                with st.spinner("Forcing immediate update..."):
-                    pairs_updated = batch_update_all_pairs()
-                    
-                    # Update timestamps
-                    new_time = datetime.now(pytz.utc)
-                    st.session_state.last_update_time = new_time
-                    st.session_state.next_update_time = new_time + timedelta(minutes=st.session_state.get('lookback_minutes', 5))
-                    
-                    # Record update information
-                    st.session_state['last_update_info'] = {
-                        'time': new_time,
-                        'pairs_updated': len(pairs_updated),
-                        'trigger': 'manual'
-                    }
-                    
-                    # Rerun to refresh
-                    st.rerun()
-            
-            # Add a visual countdown progress bar
-            if time_to_next > 0:
-                progress_value = 1.0 - (time_to_next / (st.session_state.get('lookback_minutes', 5) * 60))
-                progress_value = max(0.0, min(1.0, progress_value))  # Ensure value is between 0 and 1
-                st.progress(progress_value, text=f"Next update in {minutes_to_next}m {seconds_to_next}s")
-        
-        # Status message based on auto-update
-        if st.session_state.get('auto_update', True) and pair_count > 0:
-            st.success(f"Auto-update is enabled. Next update at {next_update_time_sg.strftime('%H:%M:%S')} (SG time).")
-        elif not st.session_state.get('auto_update', True):
-            st.warning("Auto-update is disabled. Use the 'Update Now' button for manual updates.")
-        elif pair_count == 0:
-            st.info("Add trading pairs to begin monitoring.")
-    
-    # Sidebar controls
-    st.sidebar.markdown('<div class="subheader-style">Trading Pair Configuration</div>', unsafe_allow_html=True)
-    
-    # Fetch available pairs
-    pairs = fetch_pairs()
-    
-    # Select pair for initialization
-    selected_pair = st.sidebar.selectbox(
-        "Select Trading Pair",
-        options=pairs,
-        index=0,
-        key="pair_selector"
-    )
-    
-    # Update interval options
-    update_interval_options = {
-        "1 minute": 1,
-        "5 minutes": 5,
-        "10 minutes": 10
-    }
-    
-    # Select update interval
-    update_interval_selection = st.sidebar.radio(
-        "Update Interval",
-        options=list(update_interval_options.keys()),
-        index=1,  # Default to 5 minutes
-        key="interval_radio"
-    )
-    
-    # Update the lookback minutes - if changed, reset the timer
-    new_lookback_minutes = update_interval_options[update_interval_selection]
-    if 'lookback_minutes' in st.session_state and st.session_state.lookback_minutes != new_lookback_minutes:
-        # Reset the update timers when interval changes
-        current_time = datetime.now(pytz.utc)
-        st.session_state.last_update_time = current_time
-        st.session_state.next_update_time = current_time + timedelta(minutes=new_lookback_minutes)
-        
-        # Update the auto-refresh rate if it exists
-        st.session_state.lookback_minutes = new_lookback_minutes
-        st.rerun()  # Force a rerun to update the auto-refresh component
-    else:
-        # Just set the lookback minutes
-        st.session_state.lookback_minutes = new_lookback_minutes
-    
-    # Initialize button and Add All Pairs button in a row
-    init_col1, init_col2 = st.sidebar.columns(2)
-    
-    with init_col1:
-        initialize_button = st.button(
-            "Add Pair", 
-            help=f"Add the selected pair {selected_pair} to monitoring",
-            type="primary",
-            key="init_button"
-        )
-    
-    with init_col2:
-        add_all_button = st.button(
-            "Add All Pairs",
-            help="Initialize and monitor all available trading pairs",
-            type="secondary",
-            key="add_all_button"
-        )
-    
-    # Handle button actions
-    if initialize_button:
-        try:
-            # Initialize pair directly inside this block instead of calling function
-            pair_name = selected_pair
-            
-            # Initialize pair state if it doesn't exist
-            init_pair_state(pair_name)
-            
-            # Fetch current parameters from database
-            params = fetch_current_parameters(pair_name)
-            
-            # Update session state with current parameters
-            st.session_state.pair_data[pair_name]['buffer_rate'] = params["buffer_rate"]
-            st.session_state.pair_data[pair_name]['position_multiplier'] = params["position_multiplier"]
-            st.session_state.pair_data[pair_name]['max_leverage'] = params["max_leverage"]
-            
-            # Save reference values
-            st.session_state.pair_data[pair_name]['reference_buffer_rate'] = params["buffer_rate"]
-            st.session_state.pair_data[pair_name]['reference_position_multiplier'] = params["position_multiplier"]
-            
-            # Reset history - use Singapore time
-            timestamp = get_sg_time()
-            st.session_state.pair_data[pair_name]['edge_history'] = []
-            st.session_state.pair_data[pair_name]['buffer_history'] = [(timestamp, st.session_state.pair_data[pair_name]['buffer_rate'])]
-            st.session_state.pair_data[pair_name]['multiplier_history'] = [(timestamp, st.session_state.pair_data[pair_name]['position_multiplier'])]
-            
-            # Calculate and record initial fee for 0.1% move
-            initial_fee = calculate_fee_for_move(
-                0.1, 
-                st.session_state.pair_data[pair_name]['buffer_rate'], 
-                st.session_state.pair_data[pair_name]['position_multiplier']
-            )
-            st.session_state.pair_data[pair_name]['fee_history'] = [(timestamp, initial_fee)]
-            
-            # Fetch initial reference edge based on selected lookback period
-            initial_edge = calculate_edge(pair_name, st.session_state.lookback_minutes)
-            if initial_edge is not None:
-                st.session_state.pair_data[pair_name]['reference_edge'] = initial_edge
-                st.session_state.pair_data[pair_name]['current_edge'] = initial_edge
-                st.session_state.pair_data[pair_name]['edge_history'] = [(timestamp, initial_edge)]
-            
-            # Reset proposed values
-            st.session_state.pair_data[pair_name]['proposed_buffer_rate'] = None
-            st.session_state.pair_data[pair_name]['proposed_position_multiplier'] = None
-            
-            # Reset params_changed flag
-            st.session_state.pair_data[pair_name]['params_changed'] = False
-            
-            # Set last update time
-            st.session_state.pair_data[pair_name]['last_update_time'] = timestamp
-            
-            # Mark pair as initialized
-            st.session_state.pair_data[pair_name]['initialized'] = True
-            
-            # Add to monitored pairs if not already there
-            if pair_name not in st.session_state.monitored_pairs:
-                st.session_state.monitored_pairs.append(pair_name)
-            
-            # Set as current pair
-            st.session_state.current_pair = pair_name
-            
-            # Success message and reset timers
-            st.sidebar.success(f"Started monitoring for {pair_name}")
-            st.session_state.view_mode = "Pairs Overview"
-            
-            # Reset auto-update timer when adding a new pair
-            current_time = datetime.now(pytz.utc)
-            st.session_state.last_update_time = current_time
-            st.session_state.next_update_time = current_time + timedelta(minutes=st.session_state.lookback_minutes)
-            
-            st.rerun()
-        except Exception as e:
-            st.sidebar.error(f"Error adding pair: {str(e)}")
-            import traceback
-            st.sidebar.error(traceback.format_exc())  # Display full traceback
-    
-    if add_all_button:
-        try:
-            # Filter out pairs that are already being monitored
-            unmonitored_pairs = [pair for pair in pairs if pair not in st.session_state.monitored_pairs]
-            
-            if not unmonitored_pairs:
-                st.sidebar.info("All available pairs are already being monitored.")
-            else:
-                # Show a progress bar during initialization
-                with st.sidebar:
-                    progress_bar = st.progress(0)
-                    total_pairs = len(unmonitored_pairs)
-                    pairs_added = 0
-                    
-                    for i, p in enumerate(unmonitored_pairs):
-                        try:
-                            # Update progress
-                            progress = (i+1) / total_pairs
-                            progress_bar.progress(progress, text=f"Initializing {p}...")
-                            
-                            # Initialize pair directly inline
-                            pair_name = p
-                            
-                            # Initialize pair state if it doesn't exist
-                            init_pair_state(pair_name)
-                            
-                            # Fetch current parameters from database
-                            params = fetch_current_parameters(pair_name)
-                            
-                            # Update session state with current parameters
-                            st.session_state.pair_data[pair_name]['buffer_rate'] = params["buffer_rate"]
-                            st.session_state.pair_data[pair_name]['position_multiplier'] = params["position_multiplier"]
-                            st.session_state.pair_data[pair_name]['max_leverage'] = params["max_leverage"]
-                            
-                            # Save reference values
-                            st.session_state.pair_data[pair_name]['reference_buffer_rate'] = params["buffer_rate"]
-                            st.session_state.pair_data[pair_name]['reference_position_multiplier'] = params["position_multiplier"]
-                            
-                            # Reset history - use Singapore time
-                            timestamp = get_sg_time()
-                            st.session_state.pair_data[pair_name]['edge_history'] = []
-                            st.session_state.pair_data[pair_name]['buffer_history'] = [(timestamp, st.session_state.pair_data[pair_name]['buffer_rate'])]
-                            st.session_state.pair_data[pair_name]['multiplier_history'] = [(timestamp, st.session_state.pair_data[pair_name]['position_multiplier'])]
-                            
-                            # Calculate and record initial fee for 0.1% move
-                            initial_fee = calculate_fee_for_move(
-                                0.1, 
-                                st.session_state.pair_data[pair_name]['buffer_rate'], 
-                                st.session_state.pair_data[pair_name]['position_multiplier']
-                            )
-                            st.session_state.pair_data[pair_name]['fee_history'] = [(timestamp, initial_fee)]
-                            
-                            # Fetch initial reference edge based on selected lookback period
-                            initial_edge = calculate_edge(pair_name, st.session_state.lookback_minutes)
-                            if initial_edge is not None:
-                                st.session_state.pair_data[pair_name]['reference_edge'] = initial_edge
-                                st.session_state.pair_data[pair_name]['current_edge'] = initial_edge
-                                st.session_state.pair_data[pair_name]['edge_history'] = [(timestamp, initial_edge)]
-                            
-                            # Reset proposed values
-                            st.session_state.pair_data[pair_name]['proposed_buffer_rate'] = None
-                            st.session_state.pair_data[pair_name]['proposed_position_multiplier'] = None
-                            
-                            # Reset params_changed flag
-                            st.session_state.pair_data[pair_name]['params_changed'] = False
-                            
-                            # Set last update time
-                            st.session_state.pair_data[pair_name]['last_update_time'] = timestamp
-                            
-                            # Mark pair as initialized
-                            st.session_state.pair_data[pair_name]['initialized'] = True
-                            
-                            # Add to monitored pairs if not already there
-                            if pair_name not in st.session_state.monitored_pairs:
-                                st.session_state.monitored_pairs.append(pair_name)
-                                
-                            pairs_added += 1
-                            
-                        except Exception as e:
-                            st.error(f"Error initializing {p}: {str(e)}")
-                    
-                    # Complete progress
-                    progress_bar.progress(1.0, text="All pairs initialized!")
-                    
-                # Reset auto-update timer after adding all pairs
-                current_time = datetime.now(pytz.utc)
-                st.session_state.last_update_time = current_time
-                st.session_state.next_update_time = current_time + timedelta(minutes=st.session_state.lookback_minutes)
-                
-                st.sidebar.success(f"Added {pairs_added} new pairs to monitoring")
-                st.session_state.view_mode = "Pairs Overview"
-                st.rerun()
-        except Exception as e:
-            st.sidebar.error(f"Error adding pairs: {str(e)}")
-            import traceback
-            st.sidebar.error(traceback.format_exc())  # Display full traceback
-    
-    # Batch operations section
-    st.sidebar.markdown('<div class="subheader-style">Batch Operations</div>', unsafe_allow_html=True)
-    
-    # Batch update button
-    if st.sidebar.button(
-        "Update All Pairs Now", 
-        help="Immediately fetch new edge data for all monitored pairs",
-        key="batch_update_button",
-        disabled=len(st.session_state.monitored_pairs) == 0
-    ):
-        # Perform the immediate update
-        with st.spinner("Updating all pairs..."):
-            current_time = datetime.now(pytz.utc)
-            pairs_updated = batch_update_all_pairs()
-            
-            # Update timestamps
-            st.session_state.last_update_time = current_time
-            st.session_state.next_update_time = current_time + timedelta(minutes=st.session_state.lookback_minutes)
-            
-            if pairs_updated:
-                st.sidebar.warning(f"Parameter updates available for {len(pairs_updated)} pairs")
-            else:
-                st.sidebar.success("All pairs updated, no parameter changes needed")
-        
-        st.rerun()
-    
-    # Auto-update toggle
-    st.session_state.auto_update = st.sidebar.checkbox(
-        "Enable Auto-Update", 
-        value=st.session_state.get('auto_update', True),
-        help="Automatically update data at the selected interval",
-        key="auto_update_checkbox"
-    )
-    
-    # Sensitivity parameters section
-    st.sidebar.markdown('<div class="subheader-style">Sensitivity Parameters</div>', unsafe_allow_html=True)
-    
-    # Buffer rate increase sensitivity
-    st.session_state.buffer_alpha_up = st.sidebar.slider(
-        "Buffer Rate Increase Sensitivity",
-        min_value=0.01, 
-        max_value=0.5, 
-        value=st.session_state.buffer_alpha_up,
-        step=0.01,
-        help="How quickly buffer rate increases when edge declines",
-        key="buffer_up_slider"
-    )
-    
-    # Buffer rate decrease sensitivity
-    st.session_state.buffer_alpha_down = st.sidebar.slider(
-        "Buffer Rate Decrease Sensitivity",
-        min_value=0.001, 
-        max_value=0.1, 
-        value=st.session_state.buffer_alpha_down,
-        step=0.001,
-        help="How quickly buffer rate decreases when edge improves",
-        key="buffer_down_slider"
-    )
-    
-    # Position multiplier increase sensitivity
-    st.session_state.multiplier_alpha_up = st.sidebar.slider(
-        "Position Multiplier Increase Sensitivity",
-        min_value=0.001, 
-        max_value=0.1, 
-        value=st.session_state.multiplier_alpha_up,
-        step=0.001,
-        help="How quickly position multiplier increases when edge improves",
-        key="multiplier_up_slider"
-    )
-    
-    # Position multiplier decrease sensitivity
-    st.session_state.multiplier_alpha_down = st.sidebar.slider(
-        "Position Multiplier Decrease Sensitivity",
-        min_value=0.01, 
-        max_value=0.5, 
-        value=st.session_state.multiplier_alpha_down,
-        step=0.01,
-        help="How quickly position multiplier decreases when edge declines",
-        key="multiplier_down_slider"
-    )
-    
-    # History length slider
-    st.session_state.history_length = st.sidebar.slider(
-        "History Length (points)", 
-        min_value=10, 
-        max_value=1000, 
-        value=st.session_state.history_length,
-        help="Number of data points to keep in history",
-        key="history_length_slider"
-    )
-    
-    # Main content area
-    # Render different views based on current mode
-    if st.session_state.view_mode == "Pairs Overview":
-        render_pair_overview()
-    elif st.session_state.view_mode == "Pair Detail" and st.session_state.current_pair is not None:
-        render_pair_detail(st.session_state.current_pair)
-    elif st.session_state.view_mode == "Pair Monitor" and st.session_state.current_pair is not None:
-        render_pair_monitor(st.session_state.current_pair)
-    else:
-        # Default to overview if mode is invalid
-        st.session_state.view_mode = "Pairs Overview"
-        render_pair_overview()
-    
-    # Prune history for all pairs if needed
-    for pair_name in st.session_state.monitored_pairs:
-        if pair_name in st.session_state.pair_data:
-            pair_data = st.session_state.pair_data[pair_name]
-            
-            if len(pair_data.get('edge_history', [])) > st.session_state.history_length:
-                pair_data['edge_history'] = pair_data['edge_history'][-st.session_state.history_length:]
-            
-            if len(pair_data.get('buffer_history', [])) > st.session_state.history_length:
-                pair_data['buffer_history'] = pair_data['buffer_history'][-st.session_state.history_length:]
-            
-            if len(pair_data.get('multiplier_history', [])) > st.session_state.history_length:
-                pair_data['multiplier_history'] = pair_data['multiplier_history'][-st.session_state.history_length:]
-            
-            if len(pair_data.get('fee_history', [])) > st.session_state.history_length:
-                pair_data['fee_history'] = pair_data['fee_history'][-st.session_state.history_length:]
-
-if __name__ == "__main__":
-    main()
+        st.markdown(f"**Position Multiplier:** {st.session_state.pair
