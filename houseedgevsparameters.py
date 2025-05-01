@@ -7,6 +7,7 @@ import time
 import math
 import pytz
 from sqlalchemy import create_engine, text
+from streamlit_autorefresh import st_autorefresh  # Import the auto-refresh component
 
 # Page configuration
 st.set_page_config(
@@ -14,6 +15,24 @@ st.set_page_config(
     page_icon="📊",
     layout="wide"
 )
+
+# Initialize auto-refresh based on lookback minutes
+# Set up this configuration at the very beginning before any other code executes
+def get_refresh_rate():
+    """Get refresh rate in milliseconds based on lookback minutes"""
+    lookback_mins = st.session_state.get('lookback_minutes', 5)  # Default to 5 minutes
+    # Convert minutes to milliseconds with a small buffer (90% of the interval)
+    # This ensures we refresh slightly before the next scheduled update
+    return int(lookback_mins * 60 * 1000 * 0.9)
+
+# Set up auto-refresh if enabled
+if st.session_state.get('auto_update', True):
+    refresh_rate = get_refresh_rate()
+    st_autorefresh(interval=refresh_rate, key="autorefresh")
+    # Log refresh setup
+    print(f"Auto-refresh enabled with {refresh_rate}ms interval")
+else:
+    print("Auto-refresh disabled")
 
 # Apply CSS styles
 st.markdown("""
@@ -199,10 +218,10 @@ def fetch_current_parameters(pair_name):
         }
 
 # Calculate edge for a specific pair
-# Removing the cache to ensure fresh data every time
+# Remove the cache to ensure fresh data every time
 def calculate_edge(pair_name, lookback_minutes=10):
     """
-    Calculate house edge for a specific pair using the SQL query from the first file.
+    Calculate house edge for a specific pair using the SQL query.
     Returns edge value or None if calculation fails.
     """
     engine = init_connection()
@@ -1423,24 +1442,18 @@ def render_pair_monitor(pair_name):
         st.session_state.current_pair = None
         st.rerun()
 
-# Completely redesigned auto-update mechanism with forced polling
-def check_and_trigger_updates():
+# Function to update all monitored pairs on each page load
+def update_pairs_on_load():
     """
-    Simplified auto-update mechanism that checks time on every page load
-    and triggers updates as needed.
+    Updates all monitored pairs on each page load when needed.
+    This ensures edge data is always fresh.
     """
-    # Only proceed if auto-update is enabled and we have pairs to monitor
-    if not st.session_state.get('auto_update', True) or not st.session_state.get('monitored_pairs', []):
+    # Only update if we have monitored pairs
+    if not st.session_state.get('monitored_pairs', []):
         return False
     
     # Get current time in UTC
     current_time = datetime.now(pytz.utc)
-    
-    # Initialize or fix next_update_time if needed
-    if 'next_update_time' not in st.session_state:
-        st.session_state.next_update_time = current_time + timedelta(minutes=st.session_state.get('lookback_minutes', 5))
-    elif st.session_state.next_update_time.tzinfo is None:
-        st.session_state.next_update_time = st.session_state.next_update_time.replace(tzinfo=pytz.utc)
     
     # Initialize or fix last_update_time if needed
     if 'last_update_time' not in st.session_state:
@@ -1448,66 +1461,32 @@ def check_and_trigger_updates():
     elif st.session_state.last_update_time.tzinfo is None:
         st.session_state.last_update_time = st.session_state.last_update_time.replace(tzinfo=pytz.utc)
     
-    # Two conditions that trigger an update:
-    # 1. Current time is past or equal to the next scheduled update time
-    # 2. It's been more than the update interval since the last update
+    # Calculate time since last update in minutes
     minutes_since_last_update = (current_time - st.session_state.last_update_time).total_seconds() / 60
-    update_needed = (
-        current_time >= st.session_state.next_update_time or 
-        minutes_since_last_update >= st.session_state.get('lookback_minutes', 5)
-    )
     
-    # Log diagnostic information
-    print(f"Auto-update check at {current_time.strftime('%H:%M:%S')} (UTC)")
-    print(f"Last update: {st.session_state.last_update_time.strftime('%H:%M:%S')} ({minutes_since_last_update:.2f} minutes ago)")
-    print(f"Next scheduled update: {st.session_state.next_update_time.strftime('%H:%M:%S')}")
-    print(f"Update needed: {update_needed}")
-    
-    # Perform the update if needed
-    if update_needed:
-        print(f"TRIGGERING UPDATE at {current_time.strftime('%H:%M:%S')} (UTC)")
+    # Check if enough time has passed since last update
+    if minutes_since_last_update >= st.session_state.get('lookback_minutes', 5):
+        print(f"Updating pairs on page load. Last update was {minutes_since_last_update:.2f} minutes ago.")
         
         # Update all pairs
         pairs_updated = batch_update_all_pairs()
         
-        # Update all timing information
+        # Update timing information
         st.session_state.last_update_time = current_time
         st.session_state.next_update_time = current_time + timedelta(minutes=st.session_state.get('lookback_minutes', 5))
-        if 'last_auto_refresh' in st.session_state:
-            st.session_state.last_auto_refresh = current_time
         
-        # Record update information
-        st.session_state['last_update_info'] = {
-            'time': current_time,
-            'pairs_updated': len(pairs_updated),
-            'trigger': 'auto'
-        }
-        
-        return True  # Indicate an update was performed
-        
-    return False  # No update needed yet
-
-# Add a heartbeat function to prevent browser sleep
-def heartbeat():
-    """Add a hidden heartbeat to prevent browser sleep."""
-    current_time = datetime.now(pytz.utc)
+        # Update successful
+        return True
     
-    # Create a hidden element that changes every second
-    st.markdown(f"""
-    <div style="display: none;">
-        Heartbeat: {current_time.timestamp()}
-    </div>
-    """, unsafe_allow_html=True)
+    return False
 
 def main():
     # Initialize all session state variables to prevent duplicates
     init_session_state()
     
-    # Check for updates at the beginning of every page load
-    update_occurred = check_and_trigger_updates()
-    if update_occurred:
-        # If an update just happened, rerun the app to refresh with new data
-        st.rerun()
+    # If auto-update is enabled, update pairs on page load when needed
+    if st.session_state.get('auto_update', True):
+        update_pairs_on_load()
     
     # Title and description
     st.markdown('<div class="header-style">House Edge Parameter Adjustment Dashboard</div>', unsafe_allow_html=True)
@@ -1589,8 +1568,6 @@ def main():
                     new_time = datetime.now(pytz.utc)
                     st.session_state.last_update_time = new_time
                     st.session_state.next_update_time = new_time + timedelta(minutes=st.session_state.get('lookback_minutes', 5))
-                    if 'last_auto_refresh' in st.session_state:
-                        st.session_state.last_auto_refresh = new_time
                     
                     # Record update information
                     st.session_state['last_update_info'] = {
@@ -1652,11 +1629,13 @@ def main():
         current_time = datetime.now(pytz.utc)
         st.session_state.last_update_time = current_time
         st.session_state.next_update_time = current_time + timedelta(minutes=new_lookback_minutes)
-        if 'last_auto_refresh' in st.session_state:
-            st.session_state.last_auto_refresh = current_time
-    
-    # Set the lookback minutes
-    st.session_state.lookback_minutes = new_lookback_minutes
+        
+        # Update the auto-refresh rate if it exists
+        st.session_state.lookback_minutes = new_lookback_minutes
+        st.rerun()  # Force a rerun to update the auto-refresh component
+    else:
+        # Just set the lookback minutes
+        st.session_state.lookback_minutes = new_lookback_minutes
     
     # Initialize button and Add All Pairs button in a row
     init_col1, init_col2 = st.sidebar.columns(2)
@@ -1747,8 +1726,6 @@ def main():
             current_time = datetime.now(pytz.utc)
             st.session_state.last_update_time = current_time
             st.session_state.next_update_time = current_time + timedelta(minutes=st.session_state.lookback_minutes)
-            if 'last_auto_refresh' in st.session_state:
-                st.session_state.last_auto_refresh = current_time
             
             st.rerun()
         except Exception as e:
@@ -1844,8 +1821,6 @@ def main():
                 current_time = datetime.now(pytz.utc)
                 st.session_state.last_update_time = current_time
                 st.session_state.next_update_time = current_time + timedelta(minutes=st.session_state.lookback_minutes)
-                if 'last_auto_refresh' in st.session_state:
-                    st.session_state.last_auto_refresh = current_time
                 
                 st.sidebar.success(f"Added {pairs_added} new pairs to monitoring")
                 st.session_state.view_mode = "Pairs Overview"
@@ -1873,8 +1848,6 @@ def main():
             # Update timestamps
             st.session_state.last_update_time = current_time
             st.session_state.next_update_time = current_time + timedelta(minutes=st.session_state.lookback_minutes)
-            if 'last_auto_refresh' in st.session_state:
-                st.session_state.last_auto_refresh = current_time
             
             if pairs_updated:
                 st.sidebar.warning(f"Parameter updates available for {len(pairs_updated)} pairs")
@@ -1977,9 +1950,6 @@ def main():
             
             if len(pair_data.get('fee_history', [])) > st.session_state.history_length:
                 pair_data['fee_history'] = pair_data['fee_history'][-st.session_state.history_length:]
-    
-    # Add heartbeat to prevent browser sleep
-    heartbeat()
 
 if __name__ == "__main__":
     main()
