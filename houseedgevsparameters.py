@@ -526,6 +526,22 @@ def initialize_system(pair_name, lookback_minutes):
     # Set as current pair
     st.session_state.current_pair = pair_name
 
+# Function to initialize multiple pairs at once
+def initialize_all_pairs(pairs_list, lookback_minutes):
+    """Initialize multiple trading pairs at once."""
+    initialized_count = 0
+    
+    for pair_name in pairs_list:
+        # Skip pairs that are already being monitored
+        if pair_name in st.session_state.monitored_pairs:
+            continue
+            
+        # Initialize this pair
+        initialize_system(pair_name, lookback_minutes)
+        initialized_count += 1
+    
+    return initialized_count
+
 # Function to process edge data and calculate parameter updates for a specific pair
 def process_edge_data(pair_name, timestamp=None):
     """
@@ -1455,26 +1471,65 @@ def main():
                 # Rerun to refresh
                 st.rerun()
     
-    # Initialize button
-    initialize_button = st.sidebar.button(
-        "Initialize Pair and Start Monitoring", 
-        help=f"Initialize the selected pair {selected_pair} and begin monitoring",
-        type="primary",
-        key="init_button"
-    )
+    # Initialize button and Add All Pairs button in a row
+    init_col1, init_col2 = st.sidebar.columns(2)
     
+    with init_col1:
+        initialize_button = st.button(
+            "Initialize Pair", 
+            help=f"Initialize the selected pair {selected_pair} and begin monitoring",
+            type="primary",
+            key="init_button"
+        )
+    
+    with init_col2:
+        add_all_button = st.button(
+            "Add All Pairs",
+            help="Initialize and monitor all available trading pairs",
+            type="secondary",
+            key="add_all_button"
+        )
+    
+    # Handle button actions
     if initialize_button:
         initialize_system(selected_pair, lookback_minutes)
         st.sidebar.success(f"Started monitoring for {selected_pair}")
         st.session_state.view_mode = "Pairs Overview"
         st.rerun()
     
+    if add_all_button:
+        # Filter out pairs that are already being monitored
+        unmonitored_pairs = [pair for pair in pairs if pair not in st.session_state.monitored_pairs]
+        
+        if not unmonitored_pairs:
+            st.sidebar.info("All available pairs are already being monitored.")
+        else:
+            # Show a progress bar during initialization
+            with st.sidebar:
+                progress_bar = st.progress(0)
+                total_pairs = len(unmonitored_pairs)
+                
+                for i, pair in enumerate(unmonitored_pairs):
+                    # Update progress
+                    progress = (i+1) / total_pairs
+                    progress_bar.progress(progress, text=f"Initializing {pair}...")
+                    
+                    # Initialize this pair
+                    initialize_system(pair, lookback_minutes)
+                    
+                # Complete progress
+                progress_bar.progress(1.0, text="All pairs initialized!")
+            
+            st.sidebar.success(f"Added {len(unmonitored_pairs)} new pairs to monitoring")
+            st.session_state.view_mode = "Pairs Overview"
+            st.rerun()
+    
     # Batch operations section
     st.sidebar.markdown('<div class="subheader-style">Batch Operations</div>', unsafe_allow_html=True)
     
     # Batch update button
     if st.sidebar.button(
-        "Update Selected Pairs Now", 
+        "Update All Pairs Now", 
         help="Immediately fetch new edge data for all monitored pairs",
         key="batch_update_button",
         disabled=len(st.session_state.monitored_pairs) == 0
