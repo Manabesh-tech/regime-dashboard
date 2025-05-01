@@ -2,9 +2,6 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import plotly.graph_objects as go
-import plotly.express as px
-from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 import time
 import math
@@ -231,13 +228,22 @@ def calculate_edge(pair_name, lookback_minutes=10):
         df = pd.read_sql(edge_query, engine)
         
         if df.empty or pd.isna(df['house_edge'].iloc[0]):
-            return 0.0
+            # Set a small default positive edge if calculation returns 0 or null
+            return 0.001
         
-        return float(df['house_edge'].iloc[0])
+        edge_value = float(df['house_edge'].iloc[0])
+        
+        # If the edge is exactly 0, set a small positive value
+        # This avoids issues with initial reference being zero
+        if edge_value == 0:
+            return 0.001
+        
+        return edge_value
     
     except Exception as e:
         st.error(f"Error calculating edge for {pair_name}: {e}")
-        return None
+        # Return a default small positive edge in case of error
+        return 0.001
 
 # Initialize session state variables
 if 'initialized' not in st.session_state:
@@ -267,9 +273,6 @@ if 'multiplier_history' not in st.session_state:
 if 'fee_history' not in st.session_state:
     st.session_state.fee_history = []  # List of (timestamp, fee_for_01pct_move) tuples
 
-if 'edge_ewma' not in st.session_state:
-    st.session_state.edge_ewma = None
-
 if 'last_update_time' not in st.session_state:
     st.session_state.last_update_time = None
 
@@ -296,6 +299,9 @@ if 'reference_buffer_rate' not in st.session_state:
 
 if 'reference_position_multiplier' not in st.session_state:
     st.session_state.reference_position_multiplier = None
+
+if 'lookback_minutes' not in st.session_state:
+    st.session_state.lookback_minutes = 10
 
 # Function to calculate fee for a percentage price move
 def calculate_fee_for_move(move_pct, buffer_rate, position_multiplier, rate_multiplier=0.5, 
@@ -348,7 +354,7 @@ def update_buffer_rate(current_buffer, edge, edge_ref, max_leverage, alpha_up=0.
     """
     delta = edge - edge_ref
     upper_bound = 0.7 / max_leverage
-    lower_bound = 0.0
+    lower_bound = 0.0001
     
     # Asymmetric adjustment: fast up, slow down
     adjustment = alpha_up * abs(delta) if delta < 0 else -alpha_down * delta
@@ -372,7 +378,7 @@ def update_position_multiplier(current_multiplier, edge, edge_ref, alpha_up=0.02
     return max(lower_bound, min(upper_bound, current_multiplier + adjustment))
 
 # Function to process edge data and calculate parameter updates
-def process_edge_data(edge, timestamp=None, min_data_points=6, ewma_alpha=0.2):
+def process_edge_data(edge, timestamp=None):
     """
     Process a new edge data point and calculate parameter updates if needed.
     Returns: Tuple of (parameters_changed, updated_buffer, updated_multiplier)
@@ -383,56 +389,43 @@ def process_edge_data(edge, timestamp=None, min_data_points=6, ewma_alpha=0.2):
     # Add to edge history
     st.session_state.edge_history.append((timestamp, edge))
     
-    # Update EWMA if we have enough data points
-    if len(st.session_state.edge_history) >= min_data_points:
-        if st.session_state.edge_ewma is None:
-            # Initialize EWMA with mean of first min_data_points
-            initial_edges = [e for _, e in st.session_state.edge_history[-min_data_points:]]
-            st.session_state.edge_ewma = sum(initial_edges) / len(initial_edges)
-        else:
-            # Update EWMA with new edge value
-            st.session_state.edge_ewma = (1 - ewma_alpha) * st.session_state.edge_ewma + ewma_alpha * edge
-        
-        # Calculate reference edge (current EWMA)
-        edge_ref = st.session_state.edge_ewma
-        
-        # Get current parameters
-        current_buffer = st.session_state.buffer_rate
-        current_multiplier = st.session_state.position_multiplier
-        
-        # Get adjustment parameters from sidebar
-        max_leverage = st.session_state.max_leverage
-        buffer_alpha_up = st.session_state.buffer_alpha_up
-        buffer_alpha_down = st.session_state.buffer_alpha_down
-        multiplier_alpha_up = st.session_state.multiplier_alpha_up
-        multiplier_alpha_down = st.session_state.multiplier_alpha_down
-        
-        # Calculate updated parameters
-        new_buffer_rate = update_buffer_rate(
-            current_buffer, edge, edge_ref, max_leverage, 
-            buffer_alpha_up, buffer_alpha_down
-        )
-        
-        new_position_multiplier = update_position_multiplier(
-            current_multiplier, edge, edge_ref,
-            multiplier_alpha_up, multiplier_alpha_down
-        )
-        
-        # Check if parameters changed
-        parameters_changed = (abs(new_buffer_rate - current_buffer) > 1e-6 or 
-                             abs(new_position_multiplier - current_multiplier) > 1e-6)
-        
-        # Store the current edge and reference
-        st.session_state.current_edge = edge
-        st.session_state.reference_edge = edge_ref
-        
-        # Store the proposed parameters
-        st.session_state.proposed_buffer_rate = new_buffer_rate
-        st.session_state.proposed_position_multiplier = new_position_multiplier
-        
-        return parameters_changed, new_buffer_rate, new_position_multiplier
-    else:
-        return False, None, None
+    # Use reference edge value for comparison
+    edge_ref = st.session_state.reference_edge
+    
+    # Get current parameters
+    current_buffer = st.session_state.buffer_rate
+    current_multiplier = st.session_state.position_multiplier
+    
+    # Get adjustment parameters from sidebar
+    max_leverage = st.session_state.max_leverage
+    buffer_alpha_up = st.session_state.buffer_alpha_up
+    buffer_alpha_down = st.session_state.buffer_alpha_down
+    multiplier_alpha_up = st.session_state.multiplier_alpha_up
+    multiplier_alpha_down = st.session_state.multiplier_alpha_down
+    
+    # Calculate updated parameters
+    new_buffer_rate = update_buffer_rate(
+        current_buffer, edge, edge_ref, max_leverage, 
+        buffer_alpha_up, buffer_alpha_down
+    )
+    
+    new_position_multiplier = update_position_multiplier(
+        current_multiplier, edge, edge_ref,
+        multiplier_alpha_up, multiplier_alpha_down
+    )
+    
+    # Check if parameters changed
+    parameters_changed = (abs(new_buffer_rate - current_buffer) > 1e-6 or 
+                         abs(new_position_multiplier - current_multiplier) > 1e-6)
+    
+    # Store the current edge
+    st.session_state.current_edge = edge
+    
+    # Store the proposed parameters
+    st.session_state.proposed_buffer_rate = new_buffer_rate
+    st.session_state.proposed_position_multiplier = new_position_multiplier
+    
+    return parameters_changed, new_buffer_rate, new_position_multiplier
 
 # Function to update display parameters (not actual database)
 def update_display_parameters():
@@ -507,7 +500,7 @@ def reset_to_reference_parameters():
     return False, None, None, None, None
 
 # Function to initialize or reset the system for a new pair
-def initialize_system(pair_name):
+def initialize_system(pair_name, lookback_minutes):
     """Initialize or reset the system for a new pair."""
     # Fetch current parameters from database
     params = fetch_current_parameters(pair_name)
@@ -531,10 +524,12 @@ def initialize_system(pair_name):
     initial_fee = calculate_fee_for_move(0.1, st.session_state.buffer_rate, st.session_state.position_multiplier)
     st.session_state.fee_history = [(timestamp, initial_fee)]
     
-    # Reset EWMA
-    st.session_state.edge_ewma = None
-    st.session_state.current_edge = None
-    st.session_state.reference_edge = None
+    # Fetch initial reference edge based on selected lookback period
+    initial_edge = calculate_edge(pair_name, lookback_minutes)
+    if initial_edge is not None:
+        st.session_state.reference_edge = initial_edge
+        st.session_state.current_edge = initial_edge
+        st.session_state.edge_history.append((timestamp, initial_edge))
     
     # Reset proposed values
     st.session_state.proposed_buffer_rate = None
@@ -545,149 +540,141 @@ def initialize_system(pair_name):
     st.session_state.last_update_time = timestamp
     st.session_state.params_changed = False
 
-# Function to create real-time edge plot
+# Function to create edge plot using matplotlib
 def create_edge_plot():
-    """Create a real-time plot of house edge with reference line."""
-    if len(st.session_state.edge_history) < 2:
+    """Create a plot of house edge with reference line using matplotlib."""
+    if len(st.session_state.edge_history) < 1:
         return None
     
     # Extract data for plotting
     timestamps = [t for t, _ in st.session_state.edge_history]
     edges = [e for _, e in st.session_state.edge_history]
     
-    # Create plotly figure
-    fig = go.Figure()
+    # Create figure and axis
+    fig, ax = plt.subplots(figsize=(10, 6))
     
-    # Add edge line
-    fig.add_trace(go.Scatter(
-        x=timestamps,
-        y=edges,
-        mode='lines',
-        name='House Edge',
-        line=dict(color='blue', width=2)
-    ))
+    # Plot edge line
+    ax.plot(timestamps, edges, 'b-', label='House Edge')
     
     # Add reference line if available
-    if st.session_state.edge_ewma is not None:
-        # Add a horizontal reference line
-        fig.add_trace(go.Scatter(
-            x=[timestamps[0], timestamps[-1]],
-            y=[st.session_state.edge_ewma, st.session_state.edge_ewma],
-            mode='lines',
-            name='Reference (EWMA)',
-            line=dict(color='red', width=2, dash='dash')
-        ))
+    if st.session_state.reference_edge is not None:
+        ax.axhline(y=st.session_state.reference_edge, color='r', linestyle='--', label='Reference Edge')
     
-    # Update layout
-    fig.update_layout(
-        title=f'House Edge Real-Time Monitoring - {st.session_state.selected_pair}',
-        xaxis_title='Time',
-        yaxis_title='Edge',
-        height=400,
-        margin=dict(l=40, r=40, t=40, b=40),
-        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
-        hovermode='x unified'
-    )
-    
-    # Add a vertical line at current time
-    fig.add_vline(x=timestamps[-1], line_width=1, line_dash="dash", line_color="gray")
+    # Set title and labels
+    ax.set_title(f'House Edge Monitoring - {st.session_state.selected_pair}')
+    ax.set_xlabel('Time')
+    ax.set_ylabel('Edge')
     
     # Format y-axis as percentage
-    fig.update_yaxes(tickformat='.2%')
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: '{:.2%}'.format(x)))
+    
+    # Add legend
+    ax.legend()
+    
+    # Add grid
+    ax.grid(True, alpha=0.3)
+    
+    # Format dates on x-axis
+    fig.autofmt_xdate()
+    
+    # Tight layout
+    plt.tight_layout()
     
     return fig
 
-# Function to create buffer rate and position multiplier plots
-def create_parameter_plots():
-    """Create plots for buffer rate and position multiplier history."""
-    if (len(st.session_state.buffer_history) < 2 or
-        len(st.session_state.multiplier_history) < 2):
-        return None, None
-    
-    # Extract data for plotting
-    buffer_times = [t for t, _ in st.session_state.buffer_history]
-    buffer_rates = [r for _, r in st.session_state.buffer_history]
-    
-    multiplier_times = [t for t, _ in st.session_state.multiplier_history]
-    multipliers = [m for _, m in st.session_state.multiplier_history]
-    
-    # Create buffer rate plot
-    buffer_fig = go.Figure()
-    
-    buffer_fig.add_trace(go.Scatter(
-        x=buffer_times,
-        y=buffer_rates,
-        mode='lines+markers',
-        name='Buffer Rate',
-        line=dict(color='green', width=2)
-    ))
-    
-    buffer_fig.update_layout(
-        title='Buffer Rate Adjustments',
-        xaxis_title='Time',
-        yaxis_title='Buffer Rate',
-        height=300,
-        margin=dict(l=40, r=40, t=40, b=40),
-        hovermode='x unified'
-    )
-    
-    # Format y-axis
-    buffer_fig.update_yaxes(tickformat='.6f')
-    
-    # Create position multiplier plot
-    multiplier_fig = go.Figure()
-    
-    multiplier_fig.add_trace(go.Scatter(
-        x=multiplier_times,
-        y=multipliers,
-        mode='lines+markers',
-        name='Position Multiplier',
-        line=dict(color='purple', width=2)
-    ))
-    
-    multiplier_fig.update_layout(
-        title='Position Multiplier Adjustments',
-        xaxis_title='Time',
-        yaxis_title='Position Multiplier',
-        height=300,
-        margin=dict(l=40, r=40, t=40, b=40),
-        hovermode='x unified'
-    )
-    
-    return buffer_fig, multiplier_fig
-
-# Function to create fee history plot
-def create_fee_plot():
-    """Create a plot of fee history for 0.1% price move."""
-    if len(st.session_state.fee_history) < 2:
+# Function to create buffer rate plot using matplotlib
+def create_buffer_plot():
+    """Create a plot of buffer rate history using matplotlib."""
+    if len(st.session_state.buffer_history) < 1:
         return None
     
     # Extract data for plotting
-    fee_times = [t for t, _ in st.session_state.fee_history]
+    timestamps = [t for t, _ in st.session_state.buffer_history]
+    buffer_rates = [r for _, r in st.session_state.buffer_history]
+    
+    # Create figure and axis
+    fig, ax = plt.subplots(figsize=(10, 5))
+    
+    # Plot buffer rate line
+    ax.plot(timestamps, buffer_rates, 'g-', marker='o', label='Buffer Rate')
+    
+    # Set title and labels
+    ax.set_title('Buffer Rate Adjustments')
+    ax.set_xlabel('Time')
+    ax.set_ylabel('Buffer Rate')
+    
+    # Add grid
+    ax.grid(True, alpha=0.3)
+    
+    # Format dates on x-axis
+    fig.autofmt_xdate()
+    
+    # Tight layout
+    plt.tight_layout()
+    
+    return fig
+
+# Function to create position multiplier plot using matplotlib
+def create_multiplier_plot():
+    """Create a plot of position multiplier history using matplotlib."""
+    if len(st.session_state.multiplier_history) < 1:
+        return None
+    
+    # Extract data for plotting
+    timestamps = [t for t, _ in st.session_state.multiplier_history]
+    multipliers = [m for _, m in st.session_state.multiplier_history]
+    
+    # Create figure and axis
+    fig, ax = plt.subplots(figsize=(10, 5))
+    
+    # Plot position multiplier line
+    ax.plot(timestamps, multipliers, 'm-', marker='o', label='Position Multiplier')
+    
+    # Set title and labels
+    ax.set_title('Position Multiplier Adjustments')
+    ax.set_xlabel('Time')
+    ax.set_ylabel('Position Multiplier')
+    
+    # Add grid
+    ax.grid(True, alpha=0.3)
+    
+    # Format dates on x-axis
+    fig.autofmt_xdate()
+    
+    # Tight layout
+    plt.tight_layout()
+    
+    return fig
+
+# Function to create fee plot using matplotlib
+def create_fee_plot():
+    """Create a plot of fee history for 0.1% price move using matplotlib."""
+    if len(st.session_state.fee_history) < 1:
+        return None
+    
+    # Extract data for plotting
+    timestamps = [t for t, _ in st.session_state.fee_history]
     fees = [f for _, f in st.session_state.fee_history]
     
-    # Create plotly figure
-    fig = go.Figure()
+    # Create figure and axis
+    fig, ax = plt.subplots(figsize=(10, 5))
     
-    fig.add_trace(go.Scatter(
-        x=fee_times,
-        y=fees,
-        mode='lines+markers',
-        name='Fee for 0.1% Move',
-        line=dict(color='red', width=2)
-    ))
+    # Plot fee line
+    ax.plot(timestamps, fees, 'r-', marker='o', label='Fee for 0.1% Move')
     
-    fig.update_layout(
-        title='Fee for 0.1% Price Move',
-        xaxis_title='Time',
-        yaxis_title='Fee',
-        height=300,
-        margin=dict(l=40, r=40, t=40, b=40),
-        hovermode='x unified'
-    )
+    # Set title and labels
+    ax.set_title('Fee for 0.1% Price Move')
+    ax.set_xlabel('Time')
+    ax.set_ylabel('Fee')
     
-    # Format y-axis
-    fig.update_yaxes(tickformat='.8f')
+    # Add grid
+    ax.grid(True, alpha=0.3)
+    
+    # Format dates on x-axis
+    fig.autofmt_xdate()
+    
+    # Tight layout
+    plt.tight_layout()
     
     return fig
 
@@ -725,6 +712,102 @@ def create_fee_comparison_table():
     
     return fee_df
 
+# Function to create sensitivity analysis plot using matplotlib
+def create_sensitivity_plot():
+    """Create a plot showing fee sensitivity to different parameter combinations."""
+    # Create range of parameter values
+    buffer_range = np.linspace(0.0001, 0.005, 5)
+    multiplier_range = np.linspace(1000, 14000, 5)
+    
+    # Create a mesh grid
+    buffer_mesh, multiplier_mesh = np.meshgrid(buffer_range, multiplier_range)
+    
+    # Calculate fees for each combination
+    fee_mesh = np.zeros_like(buffer_mesh)
+    for i in range(buffer_mesh.shape[0]):
+        for j in range(buffer_mesh.shape[1]):
+            fee_mesh[i, j] = calculate_fee_for_move(0.1, buffer_mesh[i, j], multiplier_mesh[i, j])
+    
+    # Create figure and axis
+    fig, ax = plt.subplots(figsize=(10, 8))
+    
+    # Create contour plot
+    contour = ax.contourf(buffer_mesh, multiplier_mesh, fee_mesh, 20, cmap='viridis')
+    
+    # Add colorbar
+    cbar = fig.colorbar(contour, ax=ax)
+    cbar.set_label('Fee for 0.1% Move')
+    
+    # Mark current parameters
+    ax.plot(st.session_state.buffer_rate, st.session_state.position_multiplier, 'ro', markersize=10,
+           label='Current Parameters')
+    
+    # Mark proposed parameters if available
+    if (st.session_state.proposed_buffer_rate is not None and 
+        st.session_state.proposed_position_multiplier is not None):
+        ax.plot(st.session_state.proposed_buffer_rate, st.session_state.proposed_position_multiplier, 
+               'mo', markersize=10, label='Proposed Parameters')
+    
+    # Set title and labels
+    ax.set_title('Fee Sensitivity to Parameter Combinations')
+    ax.set_xlabel('Buffer Rate')
+    ax.set_ylabel('Position Multiplier')
+    
+    # Add legend
+    ax.legend()
+    
+    # Format axes
+    ax.set_xlim(min(buffer_range), max(buffer_range))
+    ax.set_ylim(min(multiplier_range), max(multiplier_range))
+    
+    # Tight layout
+    plt.tight_layout()
+    
+    return fig
+
+# Function to create fee curve plot using matplotlib
+def create_fee_curve_plot():
+    """Create a plot of fee vs price move for current parameters."""
+    # Calculate fee across a range of move sizes
+    move_sizes = np.linspace(-1, 1, 201)
+    current_fees = [calculate_fee_for_move(move, st.session_state.buffer_rate, 
+                                        st.session_state.position_multiplier) 
+                   for move in move_sizes]
+    
+    # Create figure and axis
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    # Plot current fee curve
+    ax.plot(move_sizes, current_fees, 'b-', label='Current Fee')
+    
+    # Plot proposed fee curve if available
+    if (st.session_state.proposed_buffer_rate is not None and 
+        st.session_state.proposed_position_multiplier is not None):
+        proposed_fees = [calculate_fee_for_move(move, st.session_state.proposed_buffer_rate, 
+                                              st.session_state.proposed_position_multiplier) 
+                       for move in move_sizes]
+        ax.plot(move_sizes, proposed_fees, 'r--', label='Proposed Fee')
+    
+    # Set title and labels
+    ax.set_title('Fee vs. Price Move Size')
+    ax.set_xlabel('Price Move (%)')
+    ax.set_ylabel('Fee')
+    
+    # Add grid
+    ax.grid(True, alpha=0.3)
+    
+    # Add vertical and horizontal lines at 0
+    ax.axhline(y=0, color='k', linestyle='--', alpha=0.3)
+    ax.axvline(x=0, color='k', linestyle='--', alpha=0.3)
+    
+    # Add legend
+    ax.legend()
+    
+    # Tight layout
+    plt.tight_layout()
+    
+    return fig
+
 def main():
     # Title and description
     st.markdown('<div class="header-style">Dynamic House Edge Adjustment Dashboard</div>', unsafe_allow_html=True)
@@ -755,11 +838,28 @@ def main():
         index=0 if st.session_state.selected_pair is None else pairs.index(st.session_state.selected_pair) if st.session_state.selected_pair in pairs else 0
     )
     
+    # Update interval options
+    update_interval_options = {
+        "1 minute": 1,
+        "5 minutes": 5,
+        "10 minutes": 10
+    }
+    
+    # Select update interval
+    update_interval_selection = st.sidebar.radio(
+        "Update Interval",
+        options=list(update_interval_options.keys()),
+        index=2  # Default to 10 minutes
+    )
+    
+    lookback_minutes = update_interval_options[update_interval_selection]
+    st.session_state.lookback_minutes = lookback_minutes
+    
     # Check if pair changed
     if st.session_state.selected_pair != selected_pair:
         st.session_state.selected_pair = selected_pair
         # Initialize system for new pair
-        initialize_system(selected_pair)
+        initialize_system(selected_pair, lookback_minutes)
     
     # Adjustment sensitivity parameters
     st.sidebar.markdown('<div class="subheader-style">Adjustment Sensitivity</div>', unsafe_allow_html=True)
@@ -805,20 +905,17 @@ def main():
     
     st.session_state.auto_update = st.sidebar.checkbox("Auto-update", value=st.session_state.auto_update)
     
-    # Update interval options
-    update_interval_options = {
-        "1 minute": 60,
-        "5 minutes": 300,
-        "10 minutes": 600
-    }
+    # Calculate update interval in seconds
+    update_interval_seconds = lookback_minutes * 60
     
-    update_interval_selection = st.sidebar.radio(
-        "Update Interval",
-        options=list(update_interval_options.keys()),
-        index=0
-    )
-    
-    update_interval = update_interval_options[update_interval_selection]
+    # For demo purposes, allow faster updates
+    if st.sidebar.checkbox("Use Fast Updates for Demo", value=False):
+        update_interval_seconds = st.sidebar.slider(
+            "Demo Update Seconds", 
+            min_value=5, 
+            max_value=60, 
+            value=15
+        )
     
     # History length
     history_length = st.sidebar.slider(
@@ -839,7 +936,7 @@ def main():
     # Main content area
     if not st.session_state.initialized:
         st.warning("Initializing system for selected pair...")
-        initialize_system(selected_pair)
+        initialize_system(selected_pair, lookback_minutes)
         st.rerun()
     else:
         # Create tabs for different views
@@ -855,12 +952,12 @@ def main():
                 should_update = True
             else:
                 time_since_update = (current_time - st.session_state.last_update_time).total_seconds()
-                should_update = time_since_update >= update_interval
+                should_update = time_since_update >= update_interval_seconds
         
         # Fetch and process new edge data if it's time
         if should_update:
             # Fetch new edge data
-            new_edge = calculate_edge(st.session_state.selected_pair)
+            new_edge = calculate_edge(st.session_state.selected_pair, lookback_minutes)
             
             if new_edge is not None:
                 # Process the data and calculate parameter updates
@@ -874,36 +971,51 @@ def main():
         
         # Monitoring tab
         with tabs[0]:
-            # Create columns for key metrics
-            col1, col2, col3, col4 = st.columns(4)
+            # Show reference edge and parameters
+            st.markdown(f"**Reference Values for {st.session_state.selected_pair}:**")
+            ref_col1, ref_col2, ref_col3 = st.columns(3)
+            
+            with ref_col1:
+                if st.session_state.reference_edge is not None:
+                    st.info(f"Reference Edge: {st.session_state.reference_edge:.4%}")
+            
+            with ref_col2:
+                if st.session_state.reference_buffer_rate is not None:
+                    st.info(f"Reference Buffer Rate: {st.session_state.reference_buffer_rate:.6f}")
+            
+            with ref_col3:
+                if st.session_state.reference_position_multiplier is not None:
+                    st.info(f"Reference Position Multiplier: {st.session_state.reference_position_multiplier:.1f}")
+            
+            # Create columns for current metrics
+            st.markdown("### Current Values")
+            col1, col2, col3 = st.columns(3)
             
             # Show current edge
-            if st.session_state.current_edge is not None:
-                col1.metric(
-                    "Current Edge", 
-                    f"{st.session_state.current_edge:.4%}",
-                    f"{(st.session_state.current_edge - st.session_state.reference_edge):.4%}" 
-                    if st.session_state.reference_edge is not None else None
-                )
-            else:
-                col1.metric("Current Edge", "N/A")
-            
-            # Show reference edge
-            if st.session_state.reference_edge is not None:
-                col2.metric("Reference Edge (EWMA)", f"{st.session_state.reference_edge:.4%}")
-            else:
-                col2.metric("Reference Edge (EWMA)", "N/A")
+            with col1:
+                if st.session_state.current_edge is not None:
+                    edge_delta = st.session_state.current_edge - st.session_state.reference_edge if st.session_state.reference_edge is not None else None
+                    st.metric(
+                        "Current Edge", 
+                        f"{st.session_state.current_edge:.4%}",
+                        f"{edge_delta:.4%}" if edge_delta is not None else None,
+                        delta_color="inverse"  # Negative delta is bad for edge
+                    )
+                else:
+                    st.metric("Current Edge", "N/A")
             
             # Show current buffer rate
-            col3.metric("Buffer Rate", f"{st.session_state.buffer_rate:.6f}")
+            with col2:
+                st.metric("Buffer Rate", f"{st.session_state.buffer_rate:.6f}")
             
             # Show current position multiplier
-            col4.metric("Position Multiplier", f"{st.session_state.position_multiplier:.1f}")
+            with col3:
+                st.metric("Position Multiplier", f"{st.session_state.position_multiplier:.1f}")
             
-            # Create real-time edge plot
+            # Create edge plot
             edge_plot = create_edge_plot()
             if edge_plot is not None:
-                st.plotly_chart(edge_plot, use_container_width=True)
+                st.pyplot(edge_plot)
             else:
                 st.info("Not enough data points yet for edge visualization.")
             
@@ -959,7 +1071,7 @@ def main():
             if not st.session_state.auto_update:
                 if st.button("Fetch New Data", key="manual_fetch"):
                     # Fetch new edge data
-                    new_edge = calculate_edge(st.session_state.selected_pair)
+                    new_edge = calculate_edge(st.session_state.selected_pair, lookback_minutes)
                     
                     if new_edge is not None:
                         # Process the data and calculate parameter updates
@@ -979,21 +1091,24 @@ def main():
         # Parameter History tab
         with tabs[1]:
             # Create parameter plots
-            buffer_fig, multiplier_fig = create_parameter_plots()
+            buffer_fig = create_buffer_plot()
+            multiplier_fig = create_multiplier_plot()
+            fee_fig = create_fee_plot()
             
-            if buffer_fig is not None and multiplier_fig is not None:
-                # Buffer rate plot
-                st.plotly_chart(buffer_fig, use_container_width=True)
-                
-                # Position multiplier plot
-                st.plotly_chart(multiplier_fig, use_container_width=True)
-                
-                # Fee plot
-                fee_fig = create_fee_plot()
-                if fee_fig is not None:
-                    st.plotly_chart(fee_fig, use_container_width=True)
+            if buffer_fig is not None:
+                st.pyplot(buffer_fig)
             else:
-                st.info("Not enough data points yet for parameter history visualization.")
+                st.info("Not enough data points yet for buffer rate visualization.")
+                
+            if multiplier_fig is not None:
+                st.pyplot(multiplier_fig)
+            else:
+                st.info("Not enough data points yet for position multiplier visualization.")
+                
+            if fee_fig is not None:
+                st.pyplot(fee_fig)
+            else:
+                st.info("Not enough data points yet for fee visualization.")
             
             # History data tables
             if st.checkbox("Show Raw History Data"):
@@ -1048,59 +1163,19 @@ def main():
             
             # Fee comparison table
             fee_df = create_fee_comparison_table()
-            col1, col2 = st.columns([1, 1])
+            st.dataframe(fee_df, use_container_width=True)
             
-            with col1:
-                st.dataframe(fee_df, use_container_width=True)
+            # Create fee curve plot
+            fee_curve_fig = create_fee_curve_plot()
+            if fee_curve_fig is not None:
+                st.pyplot(fee_curve_fig)
             
-            with col2:
-                # Calculate fee across a range of move sizes
-                move_sizes = np.linspace(-1, 1, 201)
-                fees = [calculate_fee_for_move(move, st.session_state.buffer_rate, 
-                                            st.session_state.position_multiplier) 
-                       for move in move_sizes]
-                
-                # Create fee curve plot
-                fee_curve_fig = go.Figure()
-                
-                fee_curve_fig.add_trace(go.Scatter(
-                    x=move_sizes,
-                    y=fees,
-                    mode='lines',
-                    name='Fee',
-                    line=dict(color='blue', width=2)
-                ))
-                
-                # If proposed parameters exist, add that curve too
-                if (st.session_state.proposed_buffer_rate is not None and 
-                    st.session_state.proposed_position_multiplier is not None):
-                    
-                    proposed_fees = [calculate_fee_for_move(move, st.session_state.proposed_buffer_rate, 
-                                                          st.session_state.proposed_position_multiplier) 
-                                   for move in move_sizes]
-                    
-                    fee_curve_fig.add_trace(go.Scatter(
-                        x=move_sizes,
-                        y=proposed_fees,
-                        mode='lines',
-                        name='Proposed Fee',
-                        line=dict(color='red', width=2, dash='dash')
-                    ))
-                
-                fee_curve_fig.update_layout(
-                    title='Fee vs. Price Move Size',
-                    xaxis_title='Price Move (%)',
-                    yaxis_title='Fee',
-                    height=400,
-                    margin=dict(l=40, r=40, t=40, b=40),
-                    hovermode='x unified'
-                )
-                
-                # Add vertical and horizontal lines at 0
-                fee_curve_fig.add_hline(y=0, line_width=1, line_dash="dash", line_color="gray")
-                fee_curve_fig.add_vline(x=0, line_width=1, line_dash="dash", line_color="gray")
-                
-                st.plotly_chart(fee_curve_fig, use_container_width=True)
+            # Parameter sensitivity analysis
+            st.markdown("### Parameter Sensitivity Analysis")
+            
+            sensitivity_fig = create_sensitivity_plot()
+            if sensitivity_fig is not None:
+                st.pyplot(sensitivity_fig)
             
             # Fee equation details
             st.markdown("### Fee Equation")
@@ -1115,37 +1190,6 @@ def main():
             - The rate multiplier is set to 0.5
             - The base fee rate is set to 0.02
             """)
-            
-            # Parameter sensitivity analysis
-            st.markdown("### Parameter Sensitivity Analysis")
-            
-            # Create range of parameter values
-            buffer_range = np.linspace(0.0001, 0.005, 5)
-            multiplier_range = np.linspace(1000, 14000, 5)
-            
-            # Create a sensitivity table
-            sensitivity_data = []
-            
-            for buffer in buffer_range:
-                for multiplier in multiplier_range:
-                    fee = calculate_fee_for_move(0.1, buffer, multiplier)
-                    sensitivity_data.append({
-                        'Buffer Rate': buffer,
-                        'Position Multiplier': multiplier,
-                        'Fee for 0.1% Move': fee
-                    })
-            
-            sensitivity_df = pd.DataFrame(sensitivity_data)
-            
-            # Create a pivot table
-            pivot_df = sensitivity_df.pivot(
-                index='Buffer Rate', 
-                columns='Position Multiplier', 
-                values='Fee for 0.1% Move'
-            )
-            
-            st.markdown("**Fee for 0.1% Move with Different Parameter Combinations**")
-            st.dataframe(pivot_df.style.format("{:.8f}"), use_container_width=True)
         
         # Prune history if too long
         if len(st.session_state.edge_history) > history_length:
