@@ -183,15 +183,18 @@ def fetch_pairs():
 @st.cache_data(ttl=60)  # Reduced from 300 to 60 seconds to refresh parameters more often
 def fetch_current_parameters(pair_name):
     """
-    Fetch current buffer_rate and position_multiplier for a specific pair.
-    Returns a dictionary with parameter values or defaults if query fails.
+    Fetch current parameters for a specific pair.
+    Returns a dictionary with all parameter values needed for fee calculation.
     """
     engine = init_connection()
     if not engine:
         return {
             "buffer_rate": 0.001,
             "position_multiplier": 10000,
-            "max_leverage": 100
+            "max_leverage": 100,
+            "base_fee_rate": 0.0005,
+            "pnl_base_rate": 0.02,
+            "rate_multiplier": 0.5
         }
     
     try:
@@ -199,7 +202,10 @@ def fetch_current_parameters(pair_name):
         SELECT
             (leverage_config::jsonb->0->>'buffer_rate')::numeric AS buffer_rate,
             position_multiplier,
-            max_leverage
+            max_leverage,
+            base_fee_rate,
+            pnl_base_rate,
+            rate_multiplier
         FROM
             public.trade_pool_pairs
         WHERE
@@ -212,14 +218,20 @@ def fetch_current_parameters(pair_name):
             return {
                 "buffer_rate": 0.001,
                 "position_multiplier": 10000,
-                "max_leverage": 100
+                "max_leverage": 100,
+                "base_fee_rate": 0.0005,
+                "pnl_base_rate": 0.02,
+                "rate_multiplier": 0.5
             }
         
         # Convert to dictionary
         params = {
             "buffer_rate": float(df['buffer_rate'].iloc[0]),
             "position_multiplier": float(df['position_multiplier'].iloc[0]),
-            "max_leverage": float(df['max_leverage'].iloc[0])
+            "max_leverage": float(df['max_leverage'].iloc[0]),
+            "base_fee_rate": float(df['base_fee_rate'].iloc[0]),
+            "pnl_base_rate": float(df['pnl_base_rate'].iloc[0]),
+            "rate_multiplier": float(df['rate_multiplier'].iloc[0])
         }
         
         return params
@@ -228,7 +240,10 @@ def fetch_current_parameters(pair_name):
         return {
             "buffer_rate": 0.001,
             "position_multiplier": 10000,
-            "max_leverage": 100
+            "max_leverage": 100,
+            "base_fee_rate": 0.0005,
+            "pnl_base_rate": 0.02,
+            "rate_multiplier": 0.5
         }
 
 # Calculate edge for a specific pair
@@ -691,11 +706,13 @@ def update_display_parameters(pair_name):
         st.session_state.pair_data[pair_name]['position_multiplier'] = st.session_state.pair_data[pair_name]['proposed_position_multiplier']
         st.session_state.pair_data[pair_name]['multiplier_history'].append((timestamp, st.session_state.pair_data[pair_name]['position_multiplier']))
         
-        # Calculate and record fee for 0.1% move
+        # Modify the fee calculation call to use the fetched parameters
         fee_for_01pct_move = calculate_fee_for_move(
-            0.1, 
-            st.session_state.pair_data[pair_name]['buffer_rate'], 
-            st.session_state.pair_data[pair_name]['position_multiplier']
+         0.1, 
+        st.session_state.pair_data[pair_name]['buffer_rate'], 
+        st.session_state.pair_data[pair_name]['position_multiplier'],
+        rate_multiplier=st.session_state.pair_data[pair_name]['rate_multiplier'],
+        base_rate=st.session_state.pair_data[pair_name]['pnl_base_rate']
         )
         st.session_state.pair_data[pair_name]['fee_history'].append((timestamp, fee_for_01pct_move))
         
