@@ -1538,6 +1538,9 @@ def main():
                 display_last_update = st.session_state.last_update_time.replace(tzinfo=pytz.utc)
             else:
                 display_last_update = st.session_state.last_update_time
+                # Convert to Singapore time for display
+            singapore_tz = pytz.timezone('Asia/Singapore')
+            display_last_update = display_last_update.astimezone(singapore_tz)    
                 
             st.markdown(f"**Last Update:** {display_last_update.strftime('%H:%M:%S')}")
             
