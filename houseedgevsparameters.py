@@ -190,7 +190,7 @@ def fetch_current_parameters(pair_name):
     if not engine:
         return {
             "buffer_rate": 0.001,
-            "position_multiplier": 10000,
+            "position_multiplier": 1000,
             "max_leverage": 100,
             "rate_multiplier": 10000,
             "rate_exponent": 1,
@@ -217,7 +217,7 @@ def fetch_current_parameters(pair_name):
         if df.empty:
             return {
                 "buffer_rate": 0.001,
-                "position_multiplier": 10000,
+                "position_multiplier": 1000,
                 "max_leverage": 100,
                 "rate_multiplier": 10000,
                 "rate_exponent": 1,
