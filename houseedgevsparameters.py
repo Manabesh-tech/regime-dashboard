@@ -930,6 +930,7 @@ def render_pair_overview():
             
             # Determine status indicator
             status = get_pair_status(current_edge, reference_edge)
+            status_color = "green" if status == "green" else "orange" if status == "yellow" else "red"
             
             # Format edge values and last update time
             edge_display = f"{current_edge:.4%}" if current_edge is not None else "N/A"
@@ -939,9 +940,11 @@ def render_pair_overview():
             if current_edge is not None and reference_edge is not None:
                 edge_delta = current_edge - reference_edge
                 delta_pct = edge_delta / abs(reference_edge) * 100 if reference_edge != 0 else 0
-                delta_display = f"<span class='{'up' if edge_delta >= 0 else 'down'}'>{edge_delta:.4%} ({delta_pct:+.2f}%)</span>"
+                delta_color = "green" if edge_delta >= 0 else "red"
+                delta_display = f"{edge_delta:.4%} ({delta_pct:+.2f}%)"
             else:
                 delta_display = "N/A"
+                delta_color = "gray"
             
             # Calculate last update time
             if last_update:
@@ -959,52 +962,54 @@ def render_pair_overview():
             buffer_display = f"{buffer_rate:.6f}" if buffer_rate is not None else "N/A"
             multiplier_display = f"{position_multiplier:.1f}" if position_multiplier is not None else "N/A"
             
-            # Render the card
-            st.markdown(f"""
-            <div class="pair-card">
-                <div class="pair-title">
-                    <span class="status-indicator status-{status}"></span>
-                    {pair_name}
+            # Create a container with custom styling for the card
+            with st.container():
+                st.markdown(f"""
+                <div style="background-color: #f8f9fa; border-radius: 10px; padding: 15px; margin-bottom: 15px; border: 1px solid #e0e0e0;">
+                    <div style="font-weight: bold; font-size: 18px; margin-bottom: 10px;">
+                        <span style="display: inline-block; width: 12px; height: 12px; border-radius: 50%; background-color: {status_color}; margin-right: 8px;"></span>
+                        {pair_name}
+                    </div>
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
+                        <span style="color: #666;">Current Edge:</span>
+                        <span style="font-weight: 500;">{edge_display}</span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
+                        <span style="color: #666;">Reference Edge:</span>
+                        <span style="font-weight: 500;">{ref_display}</span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
+                        <span style="color: #666;">Delta:</span>
+                        <span style="font-weight: 500; color: {delta_color};">{delta_display}</span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
+                        <span style="color: #666;">Buffer Rate:</span>
+                        <span style="font-weight: 500;">{buffer_display}</span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
+                        <span style="color: #666;">Position Multiplier:</span>
+                        <span style="font-weight: 500;">{multiplier_display}</span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
+                        <span style="color: #666;">Last Update:</span>
+                        <span style="font-weight: 500;">{update_display}</span>
+                    </div>
                 </div>
-                <div class="metric-row">
-                    <span class="metric-label">Current Edge:</span>
-                    <span class="metric-value">{edge_display}</span>
-                </div>
-                <div class="metric-row">
-                    <span class="metric-label">Reference Edge:</span>
-                    <span class="metric-value">{ref_display}</span>
-                </div>
-                <div class="metric-row">
-                    <span class="metric-label">Delta:</span>
-                    <span class="metric-value">{delta_display}</span>
-                </div>
-                <div class="metric-row">
-                    <span class="metric-label">Buffer Rate:</span>
-                    <span class="metric-value">{buffer_display}</span>
-                </div>
-                <div class="metric-row">
-                    <span class="metric-label">Position Multiplier:</span>
-                    <span class="metric-value">{multiplier_display}</span>
-                </div>
-                <div class="metric-row">
-                    <span class="metric-label">Last Update:</span>
-                    <span class="metric-value">{update_display}</span>
-                </div>
-                <div style="display: flex; justify-content: space-between; margin-top: 10px;">
-                    <button 
-                        onclick="window.parent.postMessage({{
-                            type: 'streamlit:setComponentValue',
-                            value: {{ action: 'view', pair: '{pair_name}' }}
-                        }}, '*')">View Details</button>
-                    <button 
-                        style="background-color: {params_changed and '#ffc107' or '#28a745'};"
-                        onclick="window.parent.postMessage({{
-                            type: 'streamlit:setComponentValue',
-                            value: {{ action: 'monitor', pair: '{pair_name}' }}
-                        }}, '*')">Monitor{params_changed and ' ⚠️' or ''}</button>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+                """, unsafe_allow_html=True)
+                
+                # Use standard Streamlit buttons instead of HTML buttons
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button(f"View Details", key=f"view_{pair_name}"):
+                        st.session_state.view_mode = "Pair Detail"
+                        st.session_state.current_pair = pair_name
+                        st.rerun()
+                with col2:
+                    button_label = f"Monitor{' ⚠️' if params_changed else ''}"
+                    if st.button(button_label, key=f"monitor_{pair_name}"):
+                        st.session_state.view_mode = "Pair Monitor"
+                        st.session_state.current_pair = pair_name
+                        st.rerun()
 
 # Function to batch update all monitored pairs
 def batch_update_all_pairs():
@@ -1430,25 +1435,6 @@ def main():
     )
     
     # Main content area
-    # Process UI component interaction
-    if "streamlitForm" in st.session_state and st.session_state.streamlitForm is not None:
-        form_data = st.session_state.streamlitForm
-        if isinstance(form_data, dict) and "action" in form_data and "pair" in form_data:
-            action = form_data["action"]
-            pair = form_data["pair"]
-            
-            if action == "view":
-                st.session_state.view_mode = "Pair Detail"
-                st.session_state.current_pair = pair
-                st.rerun()
-            elif action == "monitor":
-                st.session_state.view_mode = "Pair Monitor"
-                st.session_state.current_pair = pair
-                st.rerun()
-            
-            # Clear form data
-            st.session_state.streamlitForm = None
-    
     # Render different views based on current mode
     if st.session_state.view_mode == "Pairs Overview":
         render_pair_overview()
@@ -1507,34 +1493,6 @@ def main():
     # Add heartbeat to prevent browser sleep
     if st.session_state.auto_update:
         heartbeat()
-    
-    # Handle button clicks from generated HTML
-    component_value = st.empty()
-    component_value.markdown("""
-    <div id="component-value" style="display: none;"></div>
-    <script>
-    // Listen for messages from HTML buttons
-    window.addEventListener('message', function(event) {
-        if (event.data.type === 'streamlit:setComponentValue') {
-            const componentValue = document.getElementById('component-value');
-            componentValue.textContent = JSON.stringify(event.data.value);
-            componentValue.dispatchEvent(new Event('input', { bubbles: true }));
-        }
-    });
-    </script>
-    """, unsafe_allow_html=True)
-    
-    # Create a callback to handle component value changes
-    if component_value is not None:
-        value_from_component = component_value.text
-        if value_from_component:
-            try:
-                import json
-                form_data = json.loads(value_from_component)
-                st.session_state.streamlitForm = form_data
-                st.rerun()
-            except:
-                pass
 
 if __name__ == "__main__":
     main()
