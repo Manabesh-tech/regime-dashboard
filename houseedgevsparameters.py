@@ -194,7 +194,7 @@ def fetch_current_parameters(pair_name):
             "max_leverage": 100,
             "rate_multiplier": 10000,
             "rate_exponent": 1,
-            "base_fee_rate": 0.0005
+            "pnl_base_rate": 0.0005
         }
     
     try:
@@ -205,7 +205,7 @@ def fetch_current_parameters(pair_name):
             max_leverage,
             rate_multiplier,
             rate_exponent,
-            base_fee_rate
+            pnl_base_rate
         FROM
             public.trade_pool_pairs
         WHERE
@@ -221,7 +221,7 @@ def fetch_current_parameters(pair_name):
                 "max_leverage": 100,
                 "rate_multiplier": 10000,
                 "rate_exponent": 1,
-                "base_fee_rate": 0.0005
+                "pnl_base_rate": 0.0005
             }
         
         # Convert to dictionary
@@ -231,7 +231,7 @@ def fetch_current_parameters(pair_name):
             "max_leverage": float(df['max_leverage'].iloc[0]),
             "rate_multiplier": float(df['rate_multiplier'].iloc[0]),
             "rate_exponent": float(df['rate_exponent'].iloc[0]),
-            "base_fee_rate": float(df['base_fee_rate'].iloc[0])
+            "pnl_base_rate": float(df['pnl_base_rate'].iloc[0])
         }
         
         return params
@@ -243,7 +243,7 @@ def fetch_current_parameters(pair_name):
             "max_leverage": 100,
             "rate_multiplier": 10000,
             "rate_exponent": 1,
-            "base_fee_rate": 0.0005
+            "pnl_base_rate": 0.0005
         }
 
 # Calculate edge for a specific pair
@@ -360,20 +360,20 @@ def calculate_edge(pair_name, lookback_minutes=10):
         return 0.001 + random.uniform(-0.0005, 0.0010)
 
 # Function to calculate fee for a percentage price move based on the Profit Share Model
-def calculate_fee_for_move(move_pct, base_rate, position_multiplier, rate_multiplier=15000, 
+def calculate_fee_for_move(move_pct, pnl_base_rate, position_multiplier, rate_multiplier=15000, 
                            rate_exponent=1, bet=1.0, leverage=1.0, debug=False):
     """
     Calculate fee for a percentage price move using the Profit Share Model formula.
     
     The formula calculates P_close as:
-    P_close = initial_price + ((1 - base_rate) / (1 + (1/(abs(price_ratio - 1) * rate_multiplier))^rate_exponent 
+    P_close = initial_price + ((1 - pnl_base_rate) / (1 + (1/(abs(price_ratio - 1) * rate_multiplier))^rate_exponent 
                 + (bet*leverage)/(10^6 * abs(price_ratio - 1) * position_multiplier))) * (price_after_move - initial_price)
     
     Where price_ratio = price_after_move/initial_price
     
     Args:
         move_pct: Price move percentage (positive for price increase, negative for decrease)
-        buffer_rate: The buffer rate parameter (equivalent to base_rate in some documentation)
+        buffer_rate: The base rate parameter (equivalent to pnl_base_rate in some documentation)
         position_multiplier: The position multiplier parameter
         rate_multiplier: Rate multiplier (default 15000)
         rate_exponent: Rate exponent (default 1)
@@ -406,7 +406,7 @@ def calculate_fee_for_move(move_pct, base_rate, position_multiplier, rate_multip
     term2 = (bet * leverage) / (1000000 * relative_change * position_multiplier)
     
     # Calculate P_close
-    p_close = initial_price + (1 - base_rate) * (price_after_move - initial_price) / (term1 + term2)
+    p_close = initial_price + (1 - pnl_base_rate) * (price_after_move - initial_price) / (term1 + term2)
     
     # Calculate hypothetical PnL
     hypothetical_pnl = relative_change * initial_price
@@ -421,7 +421,7 @@ def calculate_fee_for_move(move_pct, base_rate, position_multiplier, rate_multip
         debug_info = {
             "inputs": {
                 "move_pct": move_pct,
-                "base_rate": base_rate,
+                "pnl_base_rate": pnl_base_rate,
                 "position_multiplier": position_multiplier,
                 "rate_multiplier": rate_multiplier,
                 "rate_exponent": rate_exponent,
@@ -653,6 +653,7 @@ def calculate_and_record_fee(pair_name, timestamp):
     # Get required parameters
     buffer_rate = st.session_state.pair_data[pair_name]['buffer_rate']
     position_multiplier = st.session_state.pair_data[pair_name]['position_multiplier']
+    pnl_base_rate = st.session_state.pair_data[pair_name].get('pnl_base_rate', 0.1)  # Get base_rate with default
     
     # Get rate parameters from session state or fetch them
     if 'rate_multiplier' not in st.session_state.pair_data[pair_name]:
@@ -674,7 +675,8 @@ def calculate_and_record_fee(pair_name, timestamp):
         buffer_rate, 
         position_multiplier,
         rate_multiplier,
-        rate_exponent
+        rate_exponent, 
+        pnl_base_rate
     )
     
     # Record in fee history
