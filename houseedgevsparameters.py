@@ -492,10 +492,13 @@ def to_singapore_time(utc_time):
     return sg_time
 
 # Function to format Singapore time for display
-def format_sg_time(dt):
+def format_sg_time(dt, include_date=False):
     """Format a datetime in Singapore time for display."""
     sg_time = to_singapore_time(dt)
-    return sg_time.strftime('%H:%M:%S')
+    if include_date:
+        return sg_time.strftime('%Y-%m-%d %H:%M:%S')
+    else:
+        return sg_time.strftime('%H:%M:%S')
 
 # Function to process edge data and calculate parameter updates for a specific pair
 def process_edge_data(pair_name, timestamp=None):
