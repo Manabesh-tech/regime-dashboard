@@ -473,32 +473,25 @@ def init_session_state():
     if 'view_mode' not in st.session_state:
         st.session_state.view_mode = "Pairs Overview"  # Default view mode
 
-# Function to get current Singapore time
-def get_singapore_time():
+# Function to get current time in Singapore timezone
+def get_sg_time():
     """Get current time in Singapore timezone."""
-    singapore_tz = pytz.timezone('Asia/Singapore')
-    now_utc = datetime.now(pytz.utc)
-    now_sg = now_utc.astimezone(singapore_tz)
-    return now_sg
+    utc_now = datetime.now(timezone.utc)
+    singapore_tz = timezone(timedelta(hours=8))
+    return utc_now.astimezone(singapore_tz)
 
-# Function to convert UTC time to Singapore time
-def to_singapore_time(utc_time):
-    """Convert a UTC datetime to Singapore timezone."""
-    if not utc_time.tzinfo:
-        # If the time has no timezone info, assume it's UTC
-        utc_time = utc_time.replace(tzinfo=pytz.utc)
-    singapore_tz = pytz.timezone('Asia/Singapore')
-    sg_time = utc_time.astimezone(singapore_tz)
-    return sg_time
-
-# Function to format Singapore time for display
-def format_sg_time(dt, include_date=False):
-    """Format a datetime in Singapore time for display."""
-    sg_time = to_singapore_time(dt)
-    if include_date:
-        return sg_time.strftime('%Y-%m-%d %H:%M:%S')
-    else:
-        return sg_time.strftime('%H:%M:%S')
+# Function to format time display consistently
+def format_time_display(dt):
+    """Format a datetime for display."""
+    if dt is None:
+        return "N/A"
+    if not isinstance(dt, datetime):
+        return "N/A"
+    try:
+        # Basic formatting approach that works with or without timezone info
+        return dt.strftime('%Y-%m-%d %H:%M:%S')
+    except:
+        return "N/A"
 
 # Function to process edge data and calculate parameter updates for a specific pair
 def process_edge_data(pair_name, timestamp=None):
@@ -1565,7 +1558,7 @@ def main():
     # Handle button actions
     if initialize_button:
         try:
-            add_pair(selected_pair, lookback_minutes)
+            initialize_system(selected_pair, lookback_minutes)
             st.sidebar.success(f"Started monitoring for {selected_pair}")
             st.session_state.view_mode = "Pairs Overview"
             
@@ -1599,7 +1592,7 @@ def main():
                             progress_bar.progress(progress, text=f"Initializing {current_pair}...")
                             
                             # Initialize this pair
-                            add_pair(current_pair, lookback_minutes)
+                            initialize_system(current_pair, lookback_minutes)
                             pairs_added += 1
                         except Exception as e:
                             st.error(f"Error initializing {current_pair}: {str(e)}")
