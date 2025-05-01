@@ -1269,6 +1269,42 @@ def render_pair_monitor(pair_name):
     else:
         st.info("Not enough data points yet for edge visualization.")
     
+    # Add a row of action buttons
+    hist_col1, hist_col2, hist_col3 = st.columns(3)
+    
+    with hist_col1:
+        if st.button("View Edge History", key=f"view_edge_history_{pair_name}"):
+            if len(st.session_state.pair_data[pair_name]['edge_history']) > 0:
+                edge_df = pd.DataFrame({
+                    'Timestamp': [t for t, _ in st.session_state.pair_data[pair_name]['edge_history']],
+                    'Edge Value': [f"{e:.6f}" for _, e in st.session_state.pair_data[pair_name]['edge_history']]
+                })
+                st.dataframe(edge_df, hide_index=True, use_container_width=True)
+            else:
+                st.info("No edge history data yet.")
+                
+    with hist_col2:
+        if st.button("View Buffer Rate History", key=f"view_buffer_history_{pair_name}"):
+            if len(st.session_state.pair_data[pair_name]['buffer_history']) > 0:
+                buffer_df = pd.DataFrame({
+                    'Timestamp': [t for t, _ in st.session_state.pair_data[pair_name]['buffer_history']],
+                    'Buffer Rate': [f"{r:.6f}" for _, r in st.session_state.pair_data[pair_name]['buffer_history']]
+                })
+                st.dataframe(buffer_df, hide_index=True, use_container_width=True)
+            else:
+                st.info("No buffer rate history data yet.")
+                
+    with hist_col3:
+        if st.button("View Multiplier History", key=f"view_multiplier_history_{pair_name}"):
+            if len(st.session_state.pair_data[pair_name]['multiplier_history']) > 0:
+                multiplier_df = pd.DataFrame({
+                    'Timestamp': [t for t, _ in st.session_state.pair_data[pair_name]['multiplier_history']],
+                    'Position Multiplier': [f"{m:.1f}" for _, m in st.session_state.pair_data[pair_name]['multiplier_history']]
+                })
+                st.dataframe(multiplier_df, hide_index=True, use_container_width=True)
+            else:
+                st.info("No position multiplier history data yet.")
+    
     # Show parameter update notification
     if st.session_state.pair_data[pair_name].get('params_changed', False):
         st.markdown('<div class="warning">Parameter updates available. Review proposed changes below.</div>', unsafe_allow_html=True)
