@@ -360,13 +360,13 @@ def calculate_edge(pair_name, lookback_minutes=10):
         return 0.001 + random.uniform(-0.0005, 0.0010)
 
 # Function to calculate fee for a percentage price move based on the Profit Share Model
-def calculate_fee_for_move(move_pct, buffer_rate, position_multiplier, rate_multiplier=15000, 
+def calculate_fee_for_move(move_pct, base_rate, position_multiplier, rate_multiplier=15000, 
                            rate_exponent=1, bet=1.0, leverage=1.0, debug=False):
     """
     Calculate fee for a percentage price move using the Profit Share Model formula.
     
     The formula calculates P_close as:
-    P_close = initial_price + ((1 - buffer_rate) / (1 + (1/(abs(price_ratio - 1) * rate_multiplier))^rate_exponent 
+    P_close = initial_price + ((1 - base_rate) / (1 + (1/(abs(price_ratio - 1) * rate_multiplier))^rate_exponent 
                 + (bet*leverage)/(10^6 * abs(price_ratio - 1) * position_multiplier))) * (price_after_move - initial_price)
     
     Where price_ratio = price_after_move/initial_price
@@ -406,7 +406,7 @@ def calculate_fee_for_move(move_pct, buffer_rate, position_multiplier, rate_mult
     term2 = (bet * leverage) / (1000000 * relative_change * position_multiplier)
     
     # Calculate P_close
-    p_close = initial_price + (1 - buffer_rate) * (price_after_move - initial_price) / (term1 + term2)
+    p_close = initial_price + (1 - base_rate) * (price_after_move - initial_price) / (term1 + term2)
     
     # Calculate hypothetical PnL
     hypothetical_pnl = relative_change * initial_price
@@ -421,7 +421,7 @@ def calculate_fee_for_move(move_pct, buffer_rate, position_multiplier, rate_mult
         debug_info = {
             "inputs": {
                 "move_pct": move_pct,
-                "buffer_rate": buffer_rate,
+                "base_rate": base_rate,
                 "position_multiplier": position_multiplier,
                 "rate_multiplier": rate_multiplier,
                 "rate_exponent": rate_exponent,
