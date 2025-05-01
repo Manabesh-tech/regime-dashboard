@@ -894,13 +894,14 @@ def main():
         help="Automatically fetch new edge data at the specified interval"
     )
     
-    # History length
+    # History length (with specific key to prevent duplication)
     st.session_state.history_length = st.sidebar.slider(
         "History Length (points)", 
         min_value=10, 
         max_value=1000, 
         value=st.session_state.history_length,
-        help="Number of data points to keep in history"
+        help="Number of data points to keep in history",
+        key="history_length_slider"
     )
     
     # Initialize button
