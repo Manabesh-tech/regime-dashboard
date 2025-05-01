@@ -1564,46 +1564,57 @@ def main():
     
     # Handle button actions
     if initialize_button:
-        initialize_system(selected_pair, lookback_minutes)
-        st.sidebar.success(f"Started monitoring for {selected_pair}")
-        st.session_state.view_mode = "Pairs Overview"
-        
-        # Reset auto-update timer when adding a new pair
-        st.session_state.last_update_time = get_singapore_time()
-        st.session_state.next_update_time = get_singapore_time() + timedelta(minutes=lookback_minutes)
-        
-        st.rerun()
-    
-    if add_all_button:
-        # Filter out pairs that are already being monitored
-        unmonitored_pairs = [pair for pair in pairs if pair not in st.session_state.monitored_pairs]
-        
-        if not unmonitored_pairs:
-            st.sidebar.info("All available pairs are already being monitored.")
-        else:
-            # Show a progress bar during initialization
-            with st.sidebar:
-                progress_bar = st.progress(0)
-                total_pairs = len(unmonitored_pairs)
-                
-                for i, pair in enumerate(unmonitored_pairs):
-                    # Update progress
-                    progress = (i+1) / total_pairs
-                    progress_bar.progress(progress, text=f"Initializing {pair}...")
-                    
-                    # Initialize this pair
-                    initialize_system(pair, lookback_minutes)
-                    
-                # Complete progress
-                progress_bar.progress(1.0, text="All pairs initialized!")
-                
-            # Reset auto-update timer after adding all pairs
+        try:
+            initialize_system(selected_pair, lookback_minutes)
+            st.sidebar.success(f"Started monitoring for {selected_pair}")
+            st.session_state.view_mode = "Pairs Overview"
+            
+            # Reset auto-update timer when adding a new pair
             st.session_state.last_update_time = get_singapore_time()
             st.session_state.next_update_time = get_singapore_time() + timedelta(minutes=lookback_minutes)
             
-            st.sidebar.success(f"Added {len(unmonitored_pairs)} new pairs to monitoring")
-            st.session_state.view_mode = "Pairs Overview"
             st.rerun()
+        except Exception as e:
+            st.sidebar.error(f"Error initializing pair: {str(e)}")
+    
+    if add_all_button:
+        try:
+            # Filter out pairs that are already being monitored
+            unmonitored_pairs = [pair for pair in pairs if pair not in st.session_state.monitored_pairs]
+            
+            if not unmonitored_pairs:
+                st.sidebar.info("All available pairs are already being monitored.")
+            else:
+                # Show a progress bar during initialization
+                with st.sidebar:
+                    progress_bar = st.progress(0)
+                    total_pairs = len(unmonitored_pairs)
+                    pairs_added = 0
+                    
+                    for i, current_pair in enumerate(unmonitored_pairs):
+                        try:
+                            # Update progress
+                            progress = (i+1) / total_pairs
+                            progress_bar.progress(progress, text=f"Initializing {current_pair}...")
+                            
+                            # Initialize this pair
+                            initialize_system(current_pair, lookback_minutes)
+                            pairs_added += 1
+                        except Exception as e:
+                            st.error(f"Error initializing {current_pair}: {str(e)}")
+                    
+                    # Complete progress
+                    progress_bar.progress(1.0, text="All pairs initialized!")
+                    
+                # Reset auto-update timer after adding all pairs
+                st.session_state.last_update_time = get_singapore_time()
+                st.session_state.next_update_time = get_singapore_time() + timedelta(minutes=lookback_minutes)
+                
+                st.sidebar.success(f"Added {pairs_added} new pairs to monitoring")
+                st.session_state.view_mode = "Pairs Overview"
+                st.rerun()
+        except Exception as e:
+            st.sidebar.error(f"Error adding pairs: {str(e)}")
     
     # Batch operations section
     st.sidebar.markdown('<div class="subheader-style">Batch Operations</div>', unsafe_allow_html=True)
