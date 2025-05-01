@@ -811,7 +811,11 @@ def update_display_parameters(pair_name):
         
         # Calculate and record fee for 0.1% move with updated parameters
         calculate_and_record_fee(pair_name, timestamp)
-        
+        # ADD THESE THREE LINES HERE:
+        # Update reference parameters to match the new values
+        st.session_state.pair_data[pair_name]['reference_buffer_rate'] = st.session_state.pair_data[pair_name]['buffer_rate']
+        st.session_state.pair_data[pair_name]['reference_position_multiplier'] = st.session_state.pair_data[pair_name]['position_multiplier']
+        st.session_state.pair_data[pair_name]['reference_edge'] = st.session_state.pair_data[pair_name]['current_edge']
         # Mark that parameters have been changed
         st.session_state.pair_data[pair_name]['params_changed'] = False
         
