@@ -1558,9 +1558,67 @@ def main():
     # Handle button actions
     if initialize_button:
         try:
-            # Call initialize_system function (not add_pair)
-            initialize_system(selected_pair, lookback_minutes)
-            st.sidebar.success(f"Started monitoring for {selected_pair}")
+            # Initialize pair directly inside this block instead of calling function
+            pair_name = selected_pair
+            
+            # Initialize pair state if it doesn't exist
+            init_pair_state(pair_name)
+            
+            # Fetch current parameters from database
+            params = fetch_current_parameters(pair_name)
+            
+            # Update session state with current parameters
+            st.session_state.pair_data[pair_name]['buffer_rate'] = params["buffer_rate"]
+            st.session_state.pair_data[pair_name]['position_multiplier'] = params["position_multiplier"]
+            st.session_state.pair_data[pair_name]['max_leverage'] = params["max_leverage"]
+            
+            # Save reference values
+            st.session_state.pair_data[pair_name]['reference_buffer_rate'] = params["buffer_rate"]
+            st.session_state.pair_data[pair_name]['reference_position_multiplier'] = params["position_multiplier"]
+            
+            # Reset history - use Singapore time
+            timestamp = get_sg_time()
+            st.session_state.pair_data[pair_name]['edge_history'] = []
+            st.session_state.pair_data[pair_name]['buffer_history'] = [(timestamp, st.session_state.pair_data[pair_name]['buffer_rate'])]
+            st.session_state.pair_data[pair_name]['multiplier_history'] = [(timestamp, st.session_state.pair_data[pair_name]['position_multiplier'])]
+            
+            # Calculate and record initial fee for 0.1% move
+            initial_fee = calculate_fee_for_move(
+                0.1, 
+                st.session_state.pair_data[pair_name]['buffer_rate'], 
+                st.session_state.pair_data[pair_name]['position_multiplier']
+            )
+            st.session_state.pair_data[pair_name]['fee_history'] = [(timestamp, initial_fee)]
+            
+            # Fetch initial reference edge based on selected lookback period
+            initial_edge = calculate_edge(pair_name, lookback_minutes)
+            if initial_edge is not None:
+                st.session_state.pair_data[pair_name]['reference_edge'] = initial_edge
+                st.session_state.pair_data[pair_name]['current_edge'] = initial_edge
+                st.session_state.pair_data[pair_name]['edge_history'] = [(timestamp, initial_edge)]
+            
+            # Reset proposed values
+            st.session_state.pair_data[pair_name]['proposed_buffer_rate'] = None
+            st.session_state.pair_data[pair_name]['proposed_position_multiplier'] = None
+            
+            # Reset params_changed flag
+            st.session_state.pair_data[pair_name]['params_changed'] = False
+            
+            # Set last update time
+            st.session_state.pair_data[pair_name]['last_update_time'] = timestamp
+            
+            # Mark pair as initialized
+            st.session_state.pair_data[pair_name]['initialized'] = True
+            
+            # Add to monitored pairs if not already there
+            if pair_name not in st.session_state.monitored_pairs:
+                st.session_state.monitored_pairs.append(pair_name)
+            
+            # Set as current pair
+            st.session_state.current_pair = pair_name
+            
+            # Success message and reset timers
+            st.sidebar.success(f"Started monitoring for {pair_name}")
             st.session_state.view_mode = "Pairs Overview"
             
             # Reset auto-update timer when adding a new pair
@@ -1594,9 +1652,64 @@ def main():
                             progress = (i+1) / total_pairs
                             progress_bar.progress(progress, text=f"Initializing {p}...")
                             
-                            # Initialize this pair using initialize_system (not add_pair)
-                            initialize_system(p, lookback_minutes)
+                            # Initialize pair directly inline
+                            pair_name = p
+                            
+                            # Initialize pair state if it doesn't exist
+                            init_pair_state(pair_name)
+                            
+                            # Fetch current parameters from database
+                            params = fetch_current_parameters(pair_name)
+                            
+                            # Update session state with current parameters
+                            st.session_state.pair_data[pair_name]['buffer_rate'] = params["buffer_rate"]
+                            st.session_state.pair_data[pair_name]['position_multiplier'] = params["position_multiplier"]
+                            st.session_state.pair_data[pair_name]['max_leverage'] = params["max_leverage"]
+                            
+                            # Save reference values
+                            st.session_state.pair_data[pair_name]['reference_buffer_rate'] = params["buffer_rate"]
+                            st.session_state.pair_data[pair_name]['reference_position_multiplier'] = params["position_multiplier"]
+                            
+                            # Reset history - use Singapore time
+                            timestamp = get_sg_time()
+                            st.session_state.pair_data[pair_name]['edge_history'] = []
+                            st.session_state.pair_data[pair_name]['buffer_history'] = [(timestamp, st.session_state.pair_data[pair_name]['buffer_rate'])]
+                            st.session_state.pair_data[pair_name]['multiplier_history'] = [(timestamp, st.session_state.pair_data[pair_name]['position_multiplier'])]
+                            
+                            # Calculate and record initial fee for 0.1% move
+                            initial_fee = calculate_fee_for_move(
+                                0.1, 
+                                st.session_state.pair_data[pair_name]['buffer_rate'], 
+                                st.session_state.pair_data[pair_name]['position_multiplier']
+                            )
+                            st.session_state.pair_data[pair_name]['fee_history'] = [(timestamp, initial_fee)]
+                            
+                            # Fetch initial reference edge based on selected lookback period
+                            initial_edge = calculate_edge(pair_name, lookback_minutes)
+                            if initial_edge is not None:
+                                st.session_state.pair_data[pair_name]['reference_edge'] = initial_edge
+                                st.session_state.pair_data[pair_name]['current_edge'] = initial_edge
+                                st.session_state.pair_data[pair_name]['edge_history'] = [(timestamp, initial_edge)]
+                            
+                            # Reset proposed values
+                            st.session_state.pair_data[pair_name]['proposed_buffer_rate'] = None
+                            st.session_state.pair_data[pair_name]['proposed_position_multiplier'] = None
+                            
+                            # Reset params_changed flag
+                            st.session_state.pair_data[pair_name]['params_changed'] = False
+                            
+                            # Set last update time
+                            st.session_state.pair_data[pair_name]['last_update_time'] = timestamp
+                            
+                            # Mark pair as initialized
+                            st.session_state.pair_data[pair_name]['initialized'] = True
+                            
+                            # Add to monitored pairs if not already there
+                            if pair_name not in st.session_state.monitored_pairs:
+                                st.session_state.monitored_pairs.append(pair_name)
+                                
                             pairs_added += 1
+                            
                         except Exception as e:
                             st.error(f"Error initializing {p}: {str(e)}")
                     
