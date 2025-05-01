@@ -1558,18 +1558,21 @@ def main():
     # Handle button actions
     if initialize_button:
         try:
+            # Call initialize_system function (not add_pair)
             initialize_system(selected_pair, lookback_minutes)
             st.sidebar.success(f"Started monitoring for {selected_pair}")
             st.session_state.view_mode = "Pairs Overview"
             
             # Reset auto-update timer when adding a new pair
-            current_time = datetime.now()
+            current_time = get_sg_time()
             st.session_state.last_update_time = current_time
             st.session_state.next_update_time = current_time + timedelta(minutes=lookback_minutes)
             
             st.rerun()
         except Exception as e:
             st.sidebar.error(f"Error adding pair: {str(e)}")
+            import traceback
+            st.sidebar.error(traceback.format_exc())  # Display full traceback
     
     if add_all_button:
         try:
@@ -1585,23 +1588,23 @@ def main():
                     total_pairs = len(unmonitored_pairs)
                     pairs_added = 0
                     
-                    for i, current_pair in enumerate(unmonitored_pairs):
+                    for i, p in enumerate(unmonitored_pairs):
                         try:
                             # Update progress
                             progress = (i+1) / total_pairs
-                            progress_bar.progress(progress, text=f"Initializing {current_pair}...")
+                            progress_bar.progress(progress, text=f"Initializing {p}...")
                             
-                            # Initialize this pair
-                            initialize_system(current_pair, lookback_minutes)
+                            # Initialize this pair using initialize_system (not add_pair)
+                            initialize_system(p, lookback_minutes)
                             pairs_added += 1
                         except Exception as e:
-                            st.error(f"Error initializing {current_pair}: {str(e)}")
+                            st.error(f"Error initializing {p}: {str(e)}")
                     
                     # Complete progress
                     progress_bar.progress(1.0, text="All pairs initialized!")
                     
                 # Reset auto-update timer after adding all pairs
-                current_time = datetime.now()
+                current_time = get_sg_time()
                 st.session_state.last_update_time = current_time
                 st.session_state.next_update_time = current_time + timedelta(minutes=lookback_minutes)
                 
@@ -1610,6 +1613,8 @@ def main():
                 st.rerun()
         except Exception as e:
             st.sidebar.error(f"Error adding pairs: {str(e)}")
+            import traceback
+            st.sidebar.error(traceback.format_exc())  # Display full traceback
     
     # Batch operations section
     st.sidebar.markdown('<div class="subheader-style">Batch Operations</div>', unsafe_allow_html=True)
