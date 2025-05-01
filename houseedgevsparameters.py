@@ -302,36 +302,57 @@ def calculate_edge(pair_name, lookback_minutes=10):
         return 0.001
 
 # Function to calculate fee for a percentage price move
+# Function to calculate fee for a percentage price move based on the Profit Share Model
 def calculate_fee_for_move(move_pct, buffer_rate, position_multiplier, rate_multiplier=0.5, 
                           base_rate=0.02, bet=1.0, leverage=1.0):
     """
-    Calculate fee for a percentage price move using the fee equation.
-    Returns the fee value.
+    Calculate fee for a percentage price move using the Profit Share Model formula.
+    
+    Trading Fee = PNL@(P(T)) - PNL@(P_Close(T))
+    
+    Where P_Close(T) is calculated using:
+    P_Close(T) = P(t) + [1 + |P(t)/P(T) - 1| × Rate_Multiplier] / 
+                [1 + 10^6 × |P(t)/P(T) - 1| × Position_Multiplier] × 
+                [Bet_Amount × Position_Leverage / (1 - Base_Rate)] × (P(T) - P(t))
+    
+    Args:
+        move_pct: Price move percentage (positive for price increase, negative for decrease)
+        buffer_rate: The buffer rate parameter
+        position_multiplier: The position multiplier parameter
+        rate_multiplier: Rate multiplier (default 0.5)
+        base_rate: Base rate (default 0.02)
+        bet: Bet amount (default 1.0)
+        leverage: Position leverage (default 1.0)
+        
+    Returns:
+        The calculated fee value
     """
     # Convert percentage move to decimal
     move_decimal = move_pct / 100
     
-    # Assuming PT = 1 (starting price) for simplicity
-    PT = 1.0
+    # Initial price (P(T)) and final price (P(t))
+    PT = 1.0  # Starting price normalized to 1
     Pt = PT * (1 - move_decimal)  # Price after move
     
     # Calculate price difference and its absolute relative value
     price_diff = PT - Pt
     abs_relative_diff = abs(price_diff / PT)
     
-    # Calculate numerator and denominator
-    numerator = -bet * leverage * price_diff * (1 + rate_multiplier * abs_relative_diff)
-    denominator = (1 - buffer_rate) * (1 + 1000000 * position_multiplier * abs_relative_diff)
+    # Calculate numerator of the fee formula
+    numerator = (1 + rate_multiplier * abs_relative_diff)
     
-    # Calculate fee
-    fee = numerator / denominator
+    # Calculate denominator of the fee formula
+    denominator = (1 + 1000000 * position_multiplier * abs_relative_diff)
+    
+    # Calculate the scaling factor
+    scaling_factor = bet * leverage / (1 - buffer_rate)
+    
+    # Calculate the fee
+    fee = -(numerator / denominator) * scaling_factor * price_diff
     
     # Ensure we don't return exactly zero (for display purposes)
     if abs(fee) < 1e-10:
-        if fee >= 0:
-            return 1e-10
-        else:
-            return -1e-10
+        return 1e-10 if fee >= 0 else -1e-10
             
     return fee
 
