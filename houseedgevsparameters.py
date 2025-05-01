@@ -1157,7 +1157,7 @@ def create_fee_comparison_table(pair_name):
         for move in move_sizes:
             fee_amount, fee_pct = calculate_fee_for_move(
                 move, 
-                proposed_buffer, 
+                pnl_base_rate, 
                 proposed_multiplier,
                 rate_multiplier,
                 rate_exponent
