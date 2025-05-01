@@ -199,7 +199,7 @@ def fetch_current_parameters(pair_name):
         }
 
 # Calculate edge for a specific pair
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=30)  # Cache for 30 seconds to avoid repeated identical queries
 def calculate_edge(pair_name, lookback_minutes=10):
     """
     Calculate house edge for a specific pair using the SQL query from the first file.
@@ -270,6 +270,9 @@ def calculate_edge(pair_name, lookback_minutes=10):
         CROSS JOIN rebate_data rd
         """
         
+        # Add a debug log
+        st.session_state.last_query_time = datetime.now()
+        
         df = pd.read_sql(edge_query, engine)
         
         if df.empty or pd.isna(df['house_edge'].iloc[0]):
@@ -282,6 +285,10 @@ def calculate_edge(pair_name, lookback_minutes=10):
         # This avoids issues with initial reference being zero
         if edge_value == 0:
             return 0.001
+        
+        # Add random small variation for testing if needed
+        # import random
+        # edge_value += random.uniform(-0.001, 0.001)
         
         return edge_value
     
@@ -1339,7 +1346,7 @@ def main():
     update_interval_selection = st.sidebar.radio(
         "Update Interval",
         options=list(update_interval_options.keys()),
-        index=2,  # Default to 10 minutes
+        index=0,  # Default to 1 minute for more frequent updates
         key="interval_radio"
     )
     
@@ -1358,7 +1365,14 @@ def main():
         initialize_system(selected_pair, lookback_minutes)
         st.sidebar.success(f"Started monitoring for {selected_pair}")
         st.session_state.view_mode = "Pairs Overview"
+        
+        # Reset the timer for auto-update
+        st.session_state.last_global_update = datetime.now()
         st.rerun()
+    
+    # Add a timestamp to track the last global update
+    if 'last_global_update' not in st.session_state:
+        st.session_state.last_global_update = datetime.now()
     
     # Batch operations section
     st.sidebar.markdown('<div class="subheader-style">Batch Operations</div>', unsafe_allow_html=True)
@@ -1384,10 +1398,6 @@ def main():
                 st.sidebar.success("All pairs updated, no parameter changes needed")
         
         st.rerun()
-    
-    # Add a timestamp to track the last global update
-    if 'last_global_update' not in st.session_state:
-        st.session_state.last_global_update = datetime.now()
         
     # Show auto-update status and last update time
     current_time = datetime.now()
@@ -1404,13 +1414,16 @@ def main():
             key="auto_update_checkbox"
         )
     
+    # Calculate next update time and display
+    update_interval_seconds = lookback_minutes * 60
+    time_to_next_update = max(0, update_interval_seconds - time_since_update)
+    
     with auto_update_col2:
         if st.session_state.auto_update:
-            next_update = max(0, lookback_minutes * 60 - time_since_update)
-            if next_update < 60:
-                st.info(f"Next update in {int(next_update)} sec")
+            if time_to_next_update < 60:
+                st.info(f"Next update in {int(time_to_next_update)} sec")
             else:
-                st.info(f"Next update in {int(next_update/60)} min")
+                st.info(f"Next update in {int(time_to_next_update/60)} min")
     
     # Show last update time
     if st.session_state.last_global_update:
@@ -1492,34 +1505,19 @@ def main():
         st.session_state.view_mode = "Pairs Overview"
         render_pair_overview()
     
-    # Auto-update logic
+    # Auto-update logic - check if it's time for an update
     if st.session_state.auto_update and len(st.session_state.monitored_pairs) > 0:
-        current_time = datetime.now()
-        update_interval_seconds = lookback_minutes * 60
-        time_since_update = (current_time - st.session_state.last_global_update).total_seconds()
-        
         # Check if it's time for an update
-        should_update = time_since_update >= update_interval_seconds
-        
-        # Force an update if the button was clicked
-        if "update_clicked" in st.session_state and st.session_state.update_clicked:
-            should_update = True
-            st.session_state.update_clicked = False
-        
-        if should_update:
+        if time_since_update >= update_interval_seconds:
             # Update all pairs
             with st.spinner("Updating all pairs..."):
                 pairs_updated = batch_update_all_pairs()
                 # Update the global update timestamp
                 st.session_state.last_global_update = current_time
                 
-                # Show notification if pairs were updated
-                if pairs_updated:
-                    st.warning(f"Parameter updates available for {len(pairs_updated)} pairs")
-                
-                # Log the update to help with debugging
-                st.sidebar.success(f"Data updated at {current_time.strftime('%H:%M:%S')}")
-                
+            # Log the update to help with debugging
+            st.sidebar.success(f"Auto-updated at {current_time.strftime('%H:%M:%S')}")
+            
             # Force refresh
             st.rerun()
     
