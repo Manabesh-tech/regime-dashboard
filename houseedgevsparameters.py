@@ -1567,6 +1567,11 @@ def main():
         initialize_system(selected_pair, lookback_minutes)
         st.sidebar.success(f"Started monitoring for {selected_pair}")
         st.session_state.view_mode = "Pairs Overview"
+        
+        # Reset auto-update timer when adding a new pair
+        st.session_state.last_update_time = get_singapore_time()
+        st.session_state.next_update_time = get_singapore_time() + timedelta(minutes=lookback_minutes)
+        
         st.rerun()
     
     if add_all_button:
@@ -1591,6 +1596,10 @@ def main():
                     
                 # Complete progress
                 progress_bar.progress(1.0, text="All pairs initialized!")
+                
+            # Reset auto-update timer after adding all pairs
+            st.session_state.last_update_time = get_singapore_time()
+            st.session_state.next_update_time = get_singapore_time() + timedelta(minutes=lookback_minutes)
             
             st.sidebar.success(f"Added {len(unmonitored_pairs)} new pairs to monitoring")
             st.session_state.view_mode = "Pairs Overview"
