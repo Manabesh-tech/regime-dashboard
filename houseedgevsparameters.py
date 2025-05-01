@@ -1723,6 +1723,7 @@ def initialize_pair(pair_name):
     
     # Update session state with current parameters
     st.session_state.pair_data[pair_name]['buffer_rate'] = params["buffer_rate"]
+    st.session_state.pair_data[pair_name]['pnl_base_rate'] = params["pnl_base_rate"]
     st.session_state.pair_data[pair_name]['position_multiplier'] = params["position_multiplier"]
     st.session_state.pair_data[pair_name]['max_leverage'] = params["max_leverage"]
     st.session_state.pair_data[pair_name]['rate_multiplier'] = params["rate_multiplier"]
