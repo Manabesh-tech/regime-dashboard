@@ -1165,7 +1165,19 @@ def main():
                 
                 # Force refresh
                 st.rerun()
-    
+                
+                
+    # Add a heartbeat to prevent browser sleep (place this at the end of the main function)
+if st.session_state.auto_update:
+    # Hidden placeholder for a changing element to keep the page active
+    heartbeat_placeholder = st.empty()
+    # Display current time (invisible but changing)
+    current_time = datetime.now()
+    heartbeat_placeholder.markdown(f"""
+    <div style="display: none;">
+        Heartbeat: {current_time.timestamp()}
+    </div>
+    """, unsafe_allow_html=True)
     # Prune history if too long
     if len(st.session_state.edge_history) > st.session_state.history_length:
         st.session_state.edge_history = st.session_state.edge_history[-st.session_state.history_length:]
