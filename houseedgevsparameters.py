@@ -907,7 +907,7 @@ def create_fee_comparison_table(pair_name):
 def render_pair_overview():
     """Render overview cards for all monitored pairs."""
     if not st.session_state.monitored_pairs:
-        st.info("No pairs are currently being monitored. Initialize a pair using the sidebar controls.")
+        st.info("No pairs are currently being monitored. Select a pair and click 'Initialize Pair and Start Monitoring' in the sidebar.")
         return
     
     st.markdown("### Monitored Trading Pairs")
@@ -1340,15 +1340,15 @@ def main():
     
     # Initialize button
     initialize_button = st.sidebar.button(
-        "Initialize System", 
-        help=f"Initialize the system with {selected_pair}",
+        "Initialize Pair and Start Monitoring", 
+        help=f"Initialize the selected pair {selected_pair} and begin monitoring",
         type="primary",
         key="init_button"
     )
     
     if initialize_button:
         initialize_system(selected_pair, lookback_minutes)
-        st.sidebar.success(f"System initialized for {selected_pair}")
+        st.sidebar.success(f"Started monitoring for {selected_pair}")
         st.session_state.view_mode = "Pairs Overview"
         st.rerun()
     
