@@ -1425,39 +1425,264 @@ def render_pair_monitor(pair_name):
         st.rerun()
 
 # Function to add auto-update capability with time-based updates
+# Improved auto_update_timer function with better triggering logic
 def auto_update_timer():
-    """Force updates based on time interval regardless of other conditions."""
-    # Make sure last_auto_refresh is timezone-aware
-    if 'last_auto_refresh' not in st.session_state:
-        st.session_state.last_auto_refresh = datetime.now(pytz.utc)
-    
-    # Get current time and calculate time since last refresh
+    """
+    Force updates based on time interval with more robust checking.
+    This improved function includes redundant checks and better time handling.
+    """
+    # Get current time in UTC for consistent comparisons
     current_time = datetime.now(pytz.utc)
     
-    # Ensure last_auto_refresh is timezone-aware
-    if st.session_state.last_auto_refresh.tzinfo is None:
+    # Ensure session state variables exist and are timezone-aware
+    if 'last_auto_refresh' not in st.session_state:
+        st.session_state.last_auto_refresh = current_time
+    elif st.session_state.last_auto_refresh.tzinfo is None:
         st.session_state.last_auto_refresh = st.session_state.last_auto_refresh.replace(tzinfo=pytz.utc)
-        
+    
+    if 'next_update_time' not in st.session_state:
+        st.session_state.next_update_time = current_time + timedelta(minutes=st.session_state.lookback_minutes)
+    elif st.session_state.next_update_time.tzinfo is None:
+        st.session_state.next_update_time = st.session_state.next_update_time.replace(tzinfo=pytz.utc)
+    
+    # Check both the time elapsed since last update AND if we've passed the next scheduled update
     time_since_refresh = (current_time - st.session_state.last_auto_refresh).total_seconds()
-    
-    # Get the update interval in seconds
     update_interval_seconds = st.session_state.lookback_minutes * 60
+    passed_scheduled_time = current_time >= st.session_state.next_update_time
     
-    # If enough time has passed, update the pairs and rerun
-    if len(st.session_state.monitored_pairs) > 0 and time_since_refresh >= update_interval_seconds:
+    # Debug information to help track auto-update behavior
+    print(f"Auto-update check: Current time: {current_time.strftime('%H:%M:%S')}")
+    print(f"Last refresh: {st.session_state.last_auto_refresh.strftime('%H:%M:%S')}")
+    print(f"Next update scheduled: {st.session_state.next_update_time.strftime('%H:%M:%S')}")
+    print(f"Time since refresh: {time_since_refresh}s (interval: {update_interval_seconds}s)")
+    print(f"Passed scheduled time: {passed_scheduled_time}")
+    print(f"Auto-update enabled: {st.session_state.auto_update}")
+    print(f"Has monitored pairs: {len(st.session_state.monitored_pairs) > 0}")
+    
+    # Trigger update if ANY of these conditions are met:
+    # 1. We've passed the scheduled next update time
+    # 2. Enough time has passed since the last update
+    should_update = (passed_scheduled_time or time_since_refresh >= update_interval_seconds)
+    
+    if st.session_state.auto_update and len(st.session_state.monitored_pairs) > 0 and should_update:
+        print(f"*** Auto-update triggered at {current_time.strftime('%H:%M:%S')} (UTC) ***")
+        
         # Update all pairs
         pairs_updated = batch_update_all_pairs()
         
-        # Update the last refresh time
+        # Update the refresh time records
         st.session_state.last_auto_refresh = current_time
         st.session_state.last_update_time = current_time
         st.session_state.next_update_time = current_time + timedelta(minutes=st.session_state.lookback_minutes)
         
-        # Log the update
-        print(f"Auto-update triggered at {current_time.strftime('%H:%M:%S')} (UTC)")
+        # Store info about the update
+        st.session_state.last_auto_update_info = {
+            'time': current_time,
+            'pairs_updated': len(pairs_updated),
+            'pairs': pairs_updated
+        }
         
         # Force page refresh
         st.rerun()
+    
+    # Add an additional forward-looking check - if we're getting close to the next update
+    # This helps ensure we don't miss updates even with page refresh delays
+    elif st.session_state.auto_update and len(st.session_state.monitored_pairs) > 0:
+        # If we're within 10 seconds of the next update, schedule a rerun to catch it
+        time_to_next = (st.session_state.next_update_time - current_time).total_seconds()
+        if 0 < time_to_next < 10:
+            print(f"Scheduling imminent update in {time_to_next:.1f} seconds")
+            # Force a rerun to catch the imminent update
+            time.sleep(min(time_to_next, 5))  # Wait at most 5 seconds
+            st.rerun()
+
+# Alternative front-end checker to supplement the primary auto-update mechanism
+def check_for_missed_updates():
+    """
+    Secondary check for missed updates that runs on each page load.
+    This provides redundancy in case the main auto-update mechanism fails.
+    """
+    current_time = datetime.now(pytz.utc)
+    
+    # Skip this check if auto-update is disabled or no pairs are monitored
+    if not st.session_state.auto_update or len(st.session_state.monitored_pairs) == 0:
+        return
+    
+    # Ensure next_update_time is timezone-aware
+    if st.session_state.next_update_time.tzinfo is None:
+        next_update_time = st.session_state.next_update_time.replace(tzinfo=pytz.utc)
+    else:
+        next_update_time = st.session_state.next_update_time
+    
+    # If we've somehow gotten more than 2x the interval past the next update time,
+    # assume something went wrong and force an update now
+    time_overdue = (current_time - next_update_time).total_seconds()
+    update_interval_seconds = st.session_state.lookback_minutes * 60
+    
+    if time_overdue > update_interval_seconds:
+        print(f"Detected missed update! Current time: {current_time.strftime('%H:%M:%S')}, "
+              f"Next update was scheduled for: {next_update_time.strftime('%H:%M:%S')}")
+        print(f"Time overdue: {time_overdue:.1f} seconds (more than interval: {update_interval_seconds}s)")
+        
+        # Update all pairs immediately
+        pairs_updated = batch_update_all_pairs()
+        
+        # Update the refresh time records
+        st.session_state.last_auto_refresh = current_time
+        st.session_state.last_update_time = current_time
+        st.session_state.next_update_time = current_time + timedelta(minutes=st.session_state.lookback_minutes)
+        
+        # Store update info
+        st.session_state.last_auto_update_info = {
+            'time': current_time,
+            'pairs_updated': len(pairs_updated),
+            'pairs': pairs_updated,
+            'message': 'Recovered from missed update',
+        }
+        
+        # Force page refresh
+        st.rerun()
+
+# Modified main function that utilizes both auto-update mechanisms
+def main():
+    # Initialize all session state variables to prevent duplicates
+    init_session_state()
+    
+    # Run both auto-update mechanisms for redundancy
+    check_for_missed_updates()  # Check if we missed any updates
+    auto_update_timer()  # Run the regular auto-update check
+    
+    # Title and description
+    st.markdown('<div class="header-style">House Edge Parameter Adjustment Dashboard</div>', unsafe_allow_html=True)
+    st.markdown("""
+    This dashboard monitors house edge and dynamically adjusts buffer rate and position multiplier parameters 
+    to maintain exchange profitability.
+    
+    Parameters respond asymmetrically: buffer rate increases quickly when edge declines and decreases slowly when edge improves, 
+    while position multiplier does the opposite.
+    """)
+    
+    # Singapore time display
+    singapore_tz = pytz.timezone('Asia/Singapore')
+    now_utc = datetime.now(pytz.utc)
+    now_sg = now_utc.astimezone(singapore_tz)
+    st.markdown(f"**Current Singapore Time:** {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    # Create a container that will be shown on every run at the top
+    update_metrics_container = st.container()
+    
+    # Display update status in the container with debug info
+    with update_metrics_container:
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            # Ensure last_update_time is timezone-aware for display
+            if st.session_state.last_update_time.tzinfo is None:
+                display_last_update = st.session_state.last_update_time.replace(tzinfo=pytz.utc)
+            else:
+                display_last_update = st.session_state.last_update_time
+                
+            # Convert to Singapore time for display
+            display_last_update_sg = display_last_update.astimezone(singapore_tz)
+            
+            # Show last update time
+            st.markdown(f"**Last Update:** {display_last_update_sg.strftime('%H:%M:%S')}")
+            
+            # If we have info about the last auto-update, show it
+            if hasattr(st.session_state, 'last_auto_update_info'):
+                last_info = st.session_state.last_auto_update_info
+                if 'time' in last_info:
+                    auto_time_sg = last_info['time'].astimezone(singapore_tz)
+                    st.markdown(f"**Last Auto Update:** {auto_time_sg.strftime('%H:%M:%S')}")
+            
+        with col2:
+            # Get current time for comparison
+            current_time = datetime.now(pytz.utc)
+            
+            # Ensure next_update_time is timezone-aware for comparison
+            if st.session_state.next_update_time.tzinfo is None:
+                next_update_time = st.session_state.next_update_time.replace(tzinfo=pytz.utc)
+            else:
+                next_update_time = st.session_state.next_update_time
+            
+            # Convert to Singapore time for display
+            next_update_time_sg = next_update_time.astimezone(singapore_tz)
+                
+            if next_update_time > current_time:
+                time_to_next = (next_update_time - current_time).total_seconds()
+                if time_to_next < 60:
+                    st.markdown(f"**Next Update:** {int(time_to_next)} seconds")
+                else:
+                    minutes = int(time_to_next / 60)
+                    seconds = int(time_to_next % 60)
+                    st.markdown(f"**Next Update:** {minutes}m {seconds}s")
+                    
+                # Show actual next update time
+                st.markdown(f"**Next Update Time:** {next_update_time_sg.strftime('%H:%M:%S')} (SG)")
+            else:
+                st.markdown("**Next Update:** Due now")
+                st.markdown(f"**Next Update Time:** {next_update_time_sg.strftime('%H:%M:%S')} (SG)")
+                
+            # Show auto-update status
+            auto_status = "**Auto Update:** Enabled" if st.session_state.auto_update else "**Auto Update:** Disabled"
+            st.markdown(auto_status)
+                
+        with col3:
+            if st.button("Update Now", key="force_update"):
+                # Force an immediate update
+                with st.spinner("Forcing immediate update..."):
+                    current_time = datetime.now(pytz.utc)
+                    pairs_updated = batch_update_all_pairs()
+                    
+                    # Update timestamps
+                    st.session_state.last_update_time = current_time
+                    st.session_state.next_update_time = current_time + timedelta(minutes=st.session_state.lookback_minutes)
+                    st.session_state.last_auto_refresh = current_time
+                    
+                    # Store update info
+                    st.session_state.last_auto_update_info = {
+                        'time': current_time,
+                        'pairs_updated': len(pairs_updated),
+                        'pairs': pairs_updated,
+                        'message': 'Manual update',
+                    }
+                    
+                    # Rerun to refresh
+                    st.rerun()
+            
+            # Add a visible countdown timer
+            if next_update_time > current_time:
+                time_to_next = (next_update_time - current_time).total_seconds()
+                seconds_to_next = int(time_to_next)
+                minutes_to_next = seconds_to_next // 60
+                seconds_remainder = seconds_to_next % 60
+                
+                progress_value = 1.0 - (time_to_next / (st.session_state.lookback_minutes * 60))
+                progress_value = max(0.0, min(1.0, progress_value))  # Ensure value is between 0 and 1
+                
+                st.progress(progress_value, text=f"Next update in {minutes_to_next}m {seconds_remainder}s")
+                
+        # Add debug info about auto-update status
+        update_debug_info = f"""
+        **Auto-Update Status:** The dashboard will automatically update at the interval 
+        selected in the sidebar ({st.session_state.lookback_minutes} minutes). The next update will happen at the 
+        time shown above without any manual action needed.
+        
+        **Debug Info:**
+        - Current Time (UTC): {current_time.strftime('%H:%M:%S')}
+        - Current Time (SG): {current_time.astimezone(singapore_tz).strftime('%H:%M:%S')}
+        - Last Update (UTC): {display_last_update.strftime('%H:%M:%S')}
+        - Last Update (SG): {display_last_update_sg.strftime('%H:%M:%S')}
+        - Next Update (UTC): {next_update_time.strftime('%H:%M:%S')}
+        - Next Update (SG): {next_update_time_sg.strftime('%H:%M:%S')}
+        - Time Until Next Update: {int((next_update_time - current_time).total_seconds())} seconds
+        - Auto-Update Enabled: {st.session_state.auto_update}
+        - Monitored Pairs: {len(st.session_state.monitored_pairs)}
+        """
+        st.info(update_debug_info)
+
+    # Rest of the main function continues as before...
+    # ...
 
 # Add a heartbeat function to prevent browser sleep
 def heartbeat():
