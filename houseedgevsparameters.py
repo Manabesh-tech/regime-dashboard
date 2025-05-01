@@ -8,6 +8,12 @@ import math
 import pytz
 from sqlalchemy import create_engine, text
 from streamlit_autorefresh import st_autorefresh  # Import the auto-refresh component
+# Add this near the top of your script, after imports
+if 'next_update_time' in st.session_state:
+    del st.session_state.next_update_time
+
+if 'last_update_time' in st.session_state:
+    del st.session_state.last_update_time
 
 # Page configuration
 st.set_page_config(
