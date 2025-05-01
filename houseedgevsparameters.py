@@ -1010,7 +1010,7 @@ def create_fee_curve_plot(pair_name):
     init_pair_state(pair_name)
     
     # Get required parameters
-    base_rate = st.session_state.pair_data[pair_name]['buffer_rate']
+    pnl_base_rate = st.session_state.pair_data[pair_name]['pnl_base_rate']
     position_multiplier = st.session_state.pair_data[pair_name]['position_multiplier']
     rate_multiplier = st.session_state.pair_data[pair_name].get('rate_multiplier', 10000)
     rate_exponent = st.session_state.pair_data[pair_name].get('rate_exponent', 1)
@@ -1023,7 +1023,7 @@ def create_fee_curve_plot(pair_name):
     for move in move_sizes:
         fee_amount, fee_pct = calculate_fee_for_move(
             move, 
-            buffer_rate, 
+            pnl_base_rate, 
             position_multiplier,
             rate_multiplier,
             rate_exponent
