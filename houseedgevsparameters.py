@@ -900,7 +900,7 @@ def create_fee_comparison_table(pair_name):
 def render_pair_overview():
     """Render overview cards for all monitored pairs."""
     if not st.session_state.monitored_pairs:
-        st.info("No pairs are currently being monitored. Select a pair and click 'Initialize Pair and Start Monitoring' in the sidebar.")
+        st.info("No pairs are currently being monitored. Select a pair and click 'Add Pair' in the sidebar.")
         return
     
     st.markdown("### Monitored Trading Pairs")
@@ -939,9 +939,10 @@ def render_pair_overview():
                 delta_display = "N/A"
                 delta_color = "gray"
             
-            # Calculate last update time
+            # Calculate last update time - format in Singapore time
             if last_update:
-                time_since_update = datetime.now() - last_update
+                sg_last_update = to_singapore_time(last_update)
+                time_since_update = current_time - sg_last_update
                 if time_since_update.total_seconds() < 60:
                     update_display = f"{int(time_since_update.total_seconds())} seconds ago"
                 elif time_since_update.total_seconds() < 3600:
