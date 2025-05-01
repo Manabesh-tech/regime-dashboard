@@ -677,8 +677,8 @@ def calculate_and_record_fee(pair_name, timestamp):
         position_multiplier,
         rate_multiplier,
         rate_exponent, 
-        pnl_base_rate
-    )
+        
+        )
     
     # Record in fee history
     st.session_state.pair_data[pair_name]['fee_history'].append((timestamp, fee_amount))
