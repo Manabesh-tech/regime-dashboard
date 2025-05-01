@@ -326,72 +326,80 @@ def update_position_multiplier(current_multiplier, edge, edge_ref, alpha_up=0.02
     
     return max(lower_bound, min(upper_bound, current_multiplier + adjustment))
 
-# Initialize session state variables
-if 'buffer_rate' not in st.session_state:
-    st.session_state.buffer_rate = 0.001
+# Initialize session state variables if they don't exist already
+def init_session_state():
+    """Initialize all session state variables to prevent duplicates."""
+    if 'initialized' not in st.session_state:
+        st.session_state.initialized = False
+    
+    if 'buffer_rate' not in st.session_state:
+        st.session_state.buffer_rate = 0.001
 
-if 'position_multiplier' not in st.session_state:
-    st.session_state.position_multiplier = 10000
+    if 'position_multiplier' not in st.session_state:
+        st.session_state.position_multiplier = 10000
 
-if 'max_leverage' not in st.session_state:
-    st.session_state.max_leverage = 100
+    if 'max_leverage' not in st.session_state:
+        st.session_state.max_leverage = 100
 
-if 'edge_history' not in st.session_state:
-    st.session_state.edge_history = []  # List of (timestamp, edge) tuples
+    if 'edge_history' not in st.session_state:
+        st.session_state.edge_history = []  # List of (timestamp, edge) tuples
 
-if 'buffer_history' not in st.session_state:
-    st.session_state.buffer_history = []  # List of (timestamp, buffer_rate) tuples
+    if 'buffer_history' not in st.session_state:
+        st.session_state.buffer_history = []  # List of (timestamp, buffer_rate) tuples
 
-if 'multiplier_history' not in st.session_state:
-    st.session_state.multiplier_history = []  # List of (timestamp, position_multiplier) tuples
+    if 'multiplier_history' not in st.session_state:
+        st.session_state.multiplier_history = []  # List of (timestamp, position_multiplier) tuples
 
-if 'fee_history' not in st.session_state:
-    st.session_state.fee_history = []  # List of (timestamp, fee_for_01pct_move) tuples
+    if 'fee_history' not in st.session_state:
+        st.session_state.fee_history = []  # List of (timestamp, fee_for_01pct_move) tuples
 
-if 'current_edge' not in st.session_state:
-    st.session_state.current_edge = None
+    if 'current_edge' not in st.session_state:
+        st.session_state.current_edge = None
 
-if 'reference_edge' not in st.session_state:
-    st.session_state.reference_edge = None
+    if 'reference_edge' not in st.session_state:
+        st.session_state.reference_edge = None
 
-if 'proposed_buffer_rate' not in st.session_state:
-    st.session_state.proposed_buffer_rate = None
+    if 'proposed_buffer_rate' not in st.session_state:
+        st.session_state.proposed_buffer_rate = None
 
-if 'proposed_position_multiplier' not in st.session_state:
-    st.session_state.proposed_position_multiplier = None
+    if 'proposed_position_multiplier' not in st.session_state:
+        st.session_state.proposed_position_multiplier = None
 
-if 'reference_buffer_rate' not in st.session_state:
-    st.session_state.reference_buffer_rate = None
+    if 'reference_buffer_rate' not in st.session_state:
+        st.session_state.reference_buffer_rate = None
 
-if 'reference_position_multiplier' not in st.session_state:
-    st.session_state.reference_position_multiplier = None
+    if 'reference_position_multiplier' not in st.session_state:
+        st.session_state.reference_position_multiplier = None
 
-if 'lookback_minutes' not in st.session_state:
-    st.session_state.lookback_minutes = 10  # Default to 10 minutes
+    if 'lookback_minutes' not in st.session_state:
+        st.session_state.lookback_minutes = 10  # Default to 10 minutes
 
-if 'last_update_time' not in st.session_state:
-    st.session_state.last_update_time = None
+    if 'last_update_time' not in st.session_state:
+        st.session_state.last_update_time = None
 
-if 'buffer_alpha_up' not in st.session_state:
-    st.session_state.buffer_alpha_up = 0.1
+    if 'buffer_alpha_up' not in st.session_state:
+        st.session_state.buffer_alpha_up = 0.1
 
-if 'buffer_alpha_down' not in st.session_state:
-    st.session_state.buffer_alpha_down = 0.02
+    if 'buffer_alpha_down' not in st.session_state:
+        st.session_state.buffer_alpha_down = 0.02
 
-if 'multiplier_alpha_up' not in st.session_state:
-    st.session_state.multiplier_alpha_up = 0.02
+    if 'multiplier_alpha_up' not in st.session_state:
+        st.session_state.multiplier_alpha_up = 0.02
 
-if 'multiplier_alpha_down' not in st.session_state:
-    st.session_state.multiplier_alpha_down = 0.1
+    if 'multiplier_alpha_down' not in st.session_state:
+        st.session_state.multiplier_alpha_down = 0.1
 
-if 'params_changed' not in st.session_state:
-    st.session_state.params_changed = False
+    if 'params_changed' not in st.session_state:
+        st.session_state.params_changed = False
 
-if 'history_length' not in st.session_state:
-    st.session_state.history_length = 100  # Default history length
+    if 'history_length' not in st.session_state:
+        st.session_state.history_length = 100  # Default history length
 
-if 'auto_update' not in st.session_state:
-    st.session_state.auto_update = False
+    if 'auto_update' not in st.session_state:
+        st.session_state.auto_update = False
+        
+    if 'initialized' not in st.session_state:
+        st.session_state.initialized = False
 
 # Function to update display parameters
 def update_display_parameters():
@@ -732,6 +740,9 @@ def initialize_system(pair_name, lookback_minutes):
     
     # Set last update time
     st.session_state.last_update_time = timestamp
+    
+    # Mark system as initialized
+    st.session_state.initialized = True
 
 # Function to process edge data and calculate parameter updates
 def process_edge_data(pair_name, timestamp=None):
@@ -791,7 +802,22 @@ def process_edge_data(pair_name, timestamp=None):
     
     return parameters_changed
 
+# Add a heartbeat function to prevent browser sleep
+def heartbeat():
+    """Add a hidden heartbeat to prevent browser sleep."""
+    current_time = datetime.now()
+    
+    # Create a hidden element that changes every second
+    st.markdown(f"""
+    <div style="display: none;">
+        Heartbeat: {current_time.timestamp()}
+    </div>
+    """, unsafe_allow_html=True)
+
 def main():
+    # Initialize all session state variables to prevent duplicates
+    init_session_state()
+    
     # Title and description
     st.markdown('<div class="header-style">House Edge Parameter Adjustment Dashboard</div>', unsafe_allow_html=True)
     st.markdown("""
@@ -818,7 +844,8 @@ def main():
     selected_pair = st.sidebar.selectbox(
         "Select Trading Pair",
         options=pairs,
-        index=0
+        index=0,
+        key="pair_selector"  # Add unique key
     )
     
     # Update interval options
@@ -832,83 +859,87 @@ def main():
     update_interval_selection = st.sidebar.radio(
         "Update Interval",
         options=list(update_interval_options.keys()),
-        index=2  # Default to 10 minutes
+        index=2,  # Default to 10 minutes
+        key="interval_radio"  # Add unique key
     )
     
     lookback_minutes = update_interval_options[update_interval_selection]
     st.session_state.lookback_minutes = lookback_minutes
     
-    # Sensitivity parameters
+    # Sensitivity parameters section
     st.sidebar.markdown('<div class="subheader-style">Sensitivity Parameters</div>', unsafe_allow_html=True)
     
     # Buffer rate increase sensitivity
-    st.sidebar.markdown("**Buffer Rate Increase Sensitivity**")
     st.session_state.buffer_alpha_up = st.sidebar.slider(
-        "Buffer Alpha Up",
+        "Buffer Rate Increase Sensitivity",
         min_value=0.01, 
         max_value=0.5, 
         value=st.session_state.buffer_alpha_up,
         step=0.01,
-        help="How quickly buffer rate increases when edge declines"
+        help="How quickly buffer rate increases when edge declines",
+        key="buffer_up_slider"  # Add unique key
     )
     
     # Buffer rate decrease sensitivity
-    st.sidebar.markdown("**Buffer Rate Decrease Sensitivity**")
     st.session_state.buffer_alpha_down = st.sidebar.slider(
-        "Buffer Alpha Down",
+        "Buffer Rate Decrease Sensitivity",
         min_value=0.001, 
         max_value=0.1, 
         value=st.session_state.buffer_alpha_down,
         step=0.001,
-        help="How quickly buffer rate decreases when edge improves"
+        help="How quickly buffer rate decreases when edge improves",
+        key="buffer_down_slider"  # Add unique key
     )
     
     # Position multiplier increase sensitivity
-    st.sidebar.markdown("**Position Multiplier Increase Sensitivity**")
     st.session_state.multiplier_alpha_up = st.sidebar.slider(
-        "Position Alpha Up",
+        "Position Multiplier Increase Sensitivity",
         min_value=0.001, 
         max_value=0.1, 
         value=st.session_state.multiplier_alpha_up,
         step=0.001,
-        help="How quickly position multiplier increases when edge improves"
+        help="How quickly position multiplier increases when edge improves",
+        key="multiplier_up_slider"  # Add unique key
     )
     
     # Position multiplier decrease sensitivity
-    st.sidebar.markdown("**Position Multiplier Decrease Sensitivity**")
     st.session_state.multiplier_alpha_down = st.sidebar.slider(
-        "Position Alpha Down",
+        "Position Multiplier Decrease Sensitivity",
         min_value=0.01, 
         max_value=0.5, 
         value=st.session_state.multiplier_alpha_down,
         step=0.01,
-        help="How quickly position multiplier decreases when edge declines"
+        help="How quickly position multiplier decreases when edge declines",
+        key="multiplier_down_slider"  # Add unique key
     )
     
-    # Auto-update toggle
+    # Update controls section
     st.sidebar.markdown('<div class="subheader-style">Update Controls</div>', unsafe_allow_html=True)
     
+    # Auto-update toggle
     st.session_state.auto_update = st.sidebar.checkbox(
         "Auto-update", 
         value=st.session_state.auto_update,
-        help="Automatically fetch new edge data at the specified interval"
+        help="Automatically fetch new edge data at the specified interval",
+        key="auto_update_checkbox"  # Add unique key
     )
     
-    # History length (with specific key to prevent duplication)
+    # History length slider (with unique key)
     st.session_state.history_length = st.sidebar.slider(
         "History Length (points)", 
         min_value=10, 
         max_value=1000, 
         value=st.session_state.history_length,
         help="Number of data points to keep in history",
-        key="history_length_slider"
+        key="history_length_slider"  # Add unique key
     )
     
     # Initialize button
     initialize_button = st.sidebar.button(
         "Initialize System", 
         help="Initialize the system with the selected pair",
-        type="primary"
+        type="primary",
+        key="init_button"  # Add unique key
     )
     
     if initialize_button:
@@ -920,7 +951,8 @@ def main():
     if st.sidebar.button(
         "Reset to Reference", 
         help="Reset parameters to reference values",
-        type="secondary"
+        type="secondary",
+        key="reset_button"  # Add unique key
     ):
         success, old_buffer, new_buffer, old_multiplier, new_multiplier = reset_to_reference_parameters()
         if success:
@@ -929,11 +961,12 @@ def main():
         else:
             st.sidebar.error("No reference parameters available")
     
-    # Manual update button
+    # Manual update button (only shown when auto-update is off)
     update_button = st.sidebar.button(
         "Fetch New Data", 
         help="Manually fetch new edge data",
-        disabled=st.session_state.auto_update
+        disabled=st.session_state.auto_update,
+        key="update_button"  # Add unique key
     )
     
     # Main dashboard tabs
@@ -942,7 +975,7 @@ def main():
     # Monitoring tab
     with tabs[0]:
         # Check if the system has been initialized
-        if st.session_state.reference_edge is None or len(st.session_state.edge_history) == 0:
+        if not st.session_state.initialized or st.session_state.reference_edge is None:
             st.warning("Please initialize the system by clicking the 'Initialize System' button in the sidebar.")
         else:
             # Create columns for key metrics
@@ -1044,7 +1077,7 @@ def main():
     
     # Parameter History tab
     with tabs[1]:
-        if st.session_state.reference_edge is None:
+        if not st.session_state.initialized or st.session_state.reference_edge is None:
             st.warning("Please initialize the system by clicking the 'Initialize System' button in the sidebar.")
         else:
             # Create parameter plots
@@ -1068,7 +1101,7 @@ def main():
                 st.info("Not enough data points yet for fee visualization.")
             
             # Show parameter history data
-            if st.checkbox("Show Raw History Data"):
+            if st.checkbox("Show Raw History Data", key="show_history_checkbox"):
                 # Create tabs for different history tables
                 history_tabs = st.tabs(["Edge History", "Buffer History", "Multiplier History", "Fee History"])
                 
@@ -1116,7 +1149,7 @@ def main():
     
     # Fee Analysis tab
     with tabs[2]:
-        if st.session_state.reference_edge is None:
+        if not st.session_state.initialized or st.session_state.reference_edge is None:
             st.warning("Please initialize the system by clicking the 'Initialize System' button in the sidebar.")
         else:
             st.markdown("### Fee Analysis")
@@ -1142,7 +1175,7 @@ def main():
             """)
     
     # Check if the system is already initialized
-    if st.session_state.reference_edge is not None:
+    if st.session_state.initialized and st.session_state.reference_edge is not None:
         # Update logic
         if update_button or (st.session_state.auto_update and st.session_state.last_update_time is not None):
             # Manual update button clicked or auto-update enabled
@@ -1165,19 +1198,7 @@ def main():
                 
                 # Force refresh
                 st.rerun()
-                
-                
-    # Add a heartbeat to prevent browser sleep (place this at the end of the main function)
-if st.session_state.auto_update:
-    # Hidden placeholder for a changing element to keep the page active
-    heartbeat_placeholder = st.empty()
-    # Display current time (invisible but changing)
-    current_time = datetime.now()
-    heartbeat_placeholder.markdown(f"""
-    <div style="display: none;">
-        Heartbeat: {current_time.timestamp()}
-    </div>
-    """, unsafe_allow_html=True)
+    
     # Prune history if too long
     if len(st.session_state.edge_history) > st.session_state.history_length:
         st.session_state.edge_history = st.session_state.edge_history[-st.session_state.history_length:]
@@ -1191,8 +1212,12 @@ if st.session_state.auto_update:
     if len(st.session_state.fee_history) > st.session_state.history_length:
         st.session_state.fee_history = st.session_state.fee_history[-st.session_state.history_length:]
     
+    # Add heartbeat to prevent browser sleep
+    if st.session_state.auto_update:
+        heartbeat()
+    
     # Auto-refresh if enabled
-    if st.session_state.auto_update and st.session_state.reference_edge is not None:
+    if st.session_state.auto_update and st.session_state.initialized:
         time.sleep(0.1)  # Brief pause to prevent excessive refreshing
         st.rerun()
 
