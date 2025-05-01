@@ -192,9 +192,9 @@ def fetch_current_parameters(pair_name):
             "buffer_rate": 0.001,
             "position_multiplier": 10000,
             "max_leverage": 100,
-            "base_fee_rate": 0.0005,
-            "pnl_base_rate": 0.02,
-            "rate_multiplier": 0.5
+            "rate_multiplier": 10000,
+            "rate_exponent": 1,
+            "base_fee_rate": 0.0005
         }
     
     try:
@@ -203,9 +203,9 @@ def fetch_current_parameters(pair_name):
             (leverage_config::jsonb->0->>'buffer_rate')::numeric AS buffer_rate,
             position_multiplier,
             max_leverage,
-            base_fee_rate,
-            pnl_base_rate,
-            rate_multiplier
+            rate_multiplier,
+            rate_exponent,
+            base_fee_rate
         FROM
             public.trade_pool_pairs
         WHERE
@@ -219,9 +219,9 @@ def fetch_current_parameters(pair_name):
                 "buffer_rate": 0.001,
                 "position_multiplier": 10000,
                 "max_leverage": 100,
-                "base_fee_rate": 0.0005,
-                "pnl_base_rate": 0.02,
-                "rate_multiplier": 0.5
+                "rate_multiplier": 10000,
+                "rate_exponent": 1,
+                "base_fee_rate": 0.0005
             }
         
         # Convert to dictionary
@@ -229,9 +229,9 @@ def fetch_current_parameters(pair_name):
             "buffer_rate": float(df['buffer_rate'].iloc[0]),
             "position_multiplier": float(df['position_multiplier'].iloc[0]),
             "max_leverage": float(df['max_leverage'].iloc[0]),
-            "base_fee_rate": float(df['base_fee_rate'].iloc[0]),
-            "pnl_base_rate": float(df['pnl_base_rate'].iloc[0]),
-            "rate_multiplier": float(df['rate_multiplier'].iloc[0])
+            "rate_multiplier": float(df['rate_multiplier'].iloc[0]),
+            "rate_exponent": float(df['rate_exponent'].iloc[0]),
+            "base_fee_rate": float(df['base_fee_rate'].iloc[0])
         }
         
         return params
@@ -241,9 +241,9 @@ def fetch_current_parameters(pair_name):
             "buffer_rate": 0.001,
             "position_multiplier": 10000,
             "max_leverage": 100,
-            "base_fee_rate": 0.0005,
-            "pnl_base_rate": 0.02,
-            "rate_multiplier": 0.5
+            "rate_multiplier": 10000,
+            "rate_exponent": 1,
+            "base_fee_rate": 0.0005
         }
 
 # Calculate edge for a specific pair
@@ -360,50 +360,111 @@ def calculate_edge(pair_name, lookback_minutes=10):
         return 0.001 + random.uniform(-0.0005, 0.0010)
 
 # Function to calculate fee for a percentage price move based on the Profit Share Model
-def calculate_fee_for_move(move_pct, buffer_rate, position_multiplier, rate_multiplier=0.5, 
-                           base_rate=0.02, bet=1.0, leverage=1.0):
+def calculate_fee_for_move(move_pct, buffer_rate, position_multiplier, rate_multiplier=10000, 
+                           rate_exponent=1, bet=1.0, leverage=1.0, debug=False):
     """
     Calculate fee for a percentage price move using the Profit Share Model formula.
     
-    For a price move from P(T) to P(t):
-    
-    Trading Fee = -1 * [1 + Rate_Multiplier * |P(t)/P(T) - 1|] / 
-                 [1 + 10^6 * Position_Multiplier * |P(t)/P(T) - 1|] * 
+    Trading Fee = -1 * [1 + Rate_Multiplier * |P(t)/P(T) - 1|^Rate_Exponent] / 
+                 [1 + 10^6 * Position_Multiplier * |P(t)/P(T) - 1|^Rate_Exponent] * 
                  [Bet_Amount * Position_Leverage / (1 - Buffer_Rate)] * (P(T) - P(t))
     
-    Positive move_pct means price increased (P(t) > P(T))
-    Negative move_pct means price decreased (P(t) < P(T))
+    Also calculates fee as a percentage of potential profit.
+    
+    Args:
+        move_pct: Price move percentage (positive for price increase, negative for decrease)
+        buffer_rate: The buffer rate parameter (equivalent to base_rate in some documentation)
+        position_multiplier: The position multiplier parameter
+        rate_multiplier: Rate multiplier (default 10000)
+        rate_exponent: Rate exponent (default 1)
+        bet: Bet amount (default 1.0)
+        leverage: Position leverage (default 1.0)
+        debug: Whether to return additional debug information
+        
+    Returns:
+        If debug=False: A tuple of (fee_amount, fee_percentage)
+        If debug=True: A tuple of (fee_amount, fee_percentage, debug_info)
     """
-    # Convert percentage move to decimal (positive = price increase, negative = price decrease)
+    # Set a standard starting price for calculations
+    p_initial = 100000
+    
+    # Convert percentage move to decimal
     move_decimal = move_pct / 100
     
-    # Initial price (P(T)) and final price (P(t))
-    PT = 1.0  # Starting price normalized to 1
-    Pt = PT * (1 + move_decimal)  # Price after move (note: using + for intuitive direction)
+    # Calculate initial price (P(T)) and final price (P(t))
+    p_t = p_initial  # Starting price
+    p_final = p_t * (1 + move_decimal)  # Price after move
     
-    # Calculate price difference 
-    price_diff = PT - Pt  # Negative for price increase, positive for price decrease
+    # Calculate price difference (negative for price increase)
+    price_diff = p_t - p_final
     
-    # Calculate absolute relative difference
-    abs_relative_diff = abs(Pt/PT - 1)
+    # Calculate absolute relative difference raised to power of rate exponent
+    abs_relative_diff = abs(p_final / p_t - 1)
+    abs_relative_diff_powered = abs_relative_diff ** rate_exponent
     
     # Calculate numerator of the fee formula
-    numerator = (1 + rate_multiplier * abs_relative_diff)
+    numerator = (1 + rate_multiplier * abs_relative_diff_powered)
     
     # Calculate denominator of the fee formula
-    denominator = (1 + 1000000 * position_multiplier * abs_relative_diff)
+    denominator = (1 + 1000000 * position_multiplier * abs_relative_diff_powered)
     
-    # Calculate the scaling factor (using buffer_rate as in the formula)
+    # Calculate the scaling factor
     scaling_factor = bet * leverage / (1 - buffer_rate)
     
-    # Calculate the fee (negative sign as per formula)
-    fee = -1 * (numerator / denominator) * scaling_factor * price_diff
+    # Calculate the fee amount
+    fee_amount = -1 * (numerator / denominator) * scaling_factor * price_diff
     
-    # Ensure we don't return exactly zero (for display purposes)
-    if abs(fee) < 1e-10:
-        return 1e-10 if fee >= 0 else -1e-10
-            
-    return fee
+    # Calculate hypothetical PnL without fee
+    hypothetical_pnl = p_final - p_t
+    
+    # Calculate closing price with fee
+    p_close = p_final - fee_amount
+    
+    # Calculate actual PnL with fee
+    actual_pnl = p_close - p_t
+    
+    # Calculate fee as percentage of potential profit
+    if hypothetical_pnl != 0:
+        fee_percentage = (fee_amount / abs(hypothetical_pnl)) * 100
+    else:
+        fee_percentage = 0
+    
+    # For negative price moves, fee should be zero as per spreadsheet
+    if move_pct < 0:
+        fee_amount = 0
+        fee_percentage = 0
+        p_close = p_final
+    
+    if debug:
+        debug_info = {
+            "inputs": {
+                "move_pct": move_pct,
+                "buffer_rate": buffer_rate,
+                "position_multiplier": position_multiplier,
+                "rate_multiplier": rate_multiplier,
+                "rate_exponent": rate_exponent,
+                "bet": bet,
+                "leverage": leverage
+            },
+            "calculations": {
+                "p_t": p_t,
+                "p_final": p_final,
+                "price_diff": price_diff,
+                "abs_relative_diff": abs_relative_diff,
+                "abs_relative_diff_powered": abs_relative_diff_powered,
+                "numerator": numerator,
+                "denominator": denominator,
+                "scaling_factor": scaling_factor,
+                "fee_amount": fee_amount,
+                "hypothetical_pnl": hypothetical_pnl,
+                "p_close": p_close,
+                "actual_pnl": actual_pnl,
+                "fee_percentage": fee_percentage
+            }
+        }
+        return fee_amount, fee_percentage, debug_info
+    
+    return fee_amount, fee_percentage
 
 # Function to update buffer rate based on edge comparison with improved scaling
 def update_buffer_rate(current_buffer, edge, edge_ref, max_leverage, alpha_up=0.1, alpha_down=0.02):
@@ -490,6 +551,8 @@ def init_pair_state(pair_name):
             'buffer_rate': 0.001,
             'position_multiplier': 10000,
             'max_leverage': 100,
+            'rate_multiplier': 10000,
+            'rate_exponent': 1,
             'edge_history': [],  # List of (timestamp, edge) tuples
             'buffer_history': [],  # List of (timestamp, buffer_rate) tuples
             'multiplier_history': [],  # List of (timestamp, position_multiplier) tuples
@@ -501,7 +564,9 @@ def init_pair_state(pair_name):
             'reference_buffer_rate': None,
             'reference_position_multiplier': None,
             'last_update_time': None,
-            'params_changed': False
+            'params_changed': False,
+            'current_fee_amount': None,
+            'current_fee_percentage': None
         }
 
 # Initialize session state variables if they don't exist already
@@ -603,6 +668,45 @@ def format_time_display(dt):
     except:
         return "N/A"
 
+# Function to calculate and record fee for a 0.1% price move
+def calculate_and_record_fee(pair_name, timestamp):
+    """Calculate and record the fee for a 0.1% price move for the given pair."""
+    # Get required parameters
+    buffer_rate = st.session_state.pair_data[pair_name]['buffer_rate']
+    position_multiplier = st.session_state.pair_data[pair_name]['position_multiplier']
+    
+    # Get rate parameters from session state or fetch them
+    if 'rate_multiplier' not in st.session_state.pair_data[pair_name]:
+        # Fetch these parameters if not already in session state
+        params = fetch_current_parameters(pair_name)
+        rate_multiplier = params.get('rate_multiplier', 10000)
+        rate_exponent = params.get('rate_exponent', 1)
+        
+        # Store in session state for future use
+        st.session_state.pair_data[pair_name]['rate_multiplier'] = rate_multiplier
+        st.session_state.pair_data[pair_name]['rate_exponent'] = rate_exponent
+    else:
+        rate_multiplier = st.session_state.pair_data[pair_name]['rate_multiplier']
+        rate_exponent = st.session_state.pair_data[pair_name]['rate_exponent']
+    
+    # Calculate fee and percentage
+    fee_amount, fee_pct = calculate_fee_for_move(
+        0.1, 
+        buffer_rate, 
+        position_multiplier,
+        rate_multiplier,
+        rate_exponent
+    )
+    
+    # Record in fee history
+    st.session_state.pair_data[pair_name]['fee_history'].append((timestamp, fee_amount))
+    
+    # Update current fee values in session state
+    st.session_state.pair_data[pair_name]['current_fee_amount'] = fee_amount
+    st.session_state.pair_data[pair_name]['current_fee_percentage'] = fee_pct
+    
+    return fee_amount, fee_pct
+
 # Function to process edge data and calculate parameter updates for a specific pair
 def process_edge_data(pair_name, timestamp=None):
     """
@@ -624,6 +728,10 @@ def process_edge_data(pair_name, timestamp=None):
     
     # Skip updates if edge calculation failed, but don't return yet to update timestamp
     if new_edge is not None:
+        # If new edge is zero, use a small positive value instead
+        if new_edge == 0:
+            new_edge = 0.001  # Use 0.1% as minimum edge
+            
         # Add to edge history
         st.session_state.pair_data[pair_name]['edge_history'].append((timestamp, new_edge))
         
@@ -636,6 +744,9 @@ def process_edge_data(pair_name, timestamp=None):
         
         # Get reference edge and current parameters
         edge_ref = st.session_state.pair_data[pair_name]['reference_edge']
+        if edge_ref == 0:
+            edge_ref = 0.001  # Use a small positive value if reference is zero
+            
         current_buffer = st.session_state.pair_data[pair_name]['buffer_rate']
         current_multiplier = st.session_state.pair_data[pair_name]['position_multiplier']
         max_leverage = st.session_state.pair_data[pair_name]['max_leverage']
@@ -698,15 +809,8 @@ def update_display_parameters(pair_name):
         st.session_state.pair_data[pair_name]['position_multiplier'] = st.session_state.pair_data[pair_name]['proposed_position_multiplier']
         st.session_state.pair_data[pair_name]['multiplier_history'].append((timestamp, st.session_state.pair_data[pair_name]['position_multiplier']))
         
-        # Modify the fee calculation call to use the fetched parameters
-        fee_for_01pct_move = calculate_fee_for_move(
-         0.1, 
-        st.session_state.pair_data[pair_name]['buffer_rate'], 
-        st.session_state.pair_data[pair_name]['position_multiplier'],
-        rate_multiplier=st.session_state.pair_data[pair_name]['rate_multiplier'],
-        base_rate=st.session_state.pair_data[pair_name]['pnl_base_rate']
-        )
-        st.session_state.pair_data[pair_name]['fee_history'].append((timestamp, fee_for_01pct_move))
+        # Calculate and record fee for 0.1% move with updated parameters
+        calculate_and_record_fee(pair_name, timestamp)
         
         # Mark that parameters have been changed
         st.session_state.pair_data[pair_name]['params_changed'] = False
@@ -742,12 +846,7 @@ def reset_to_reference_parameters(pair_name):
         st.session_state.pair_data[pair_name]['multiplier_history'].append((timestamp, st.session_state.pair_data[pair_name]['position_multiplier']))
         
         # Calculate and record fee for 0.1% move
-        fee_for_01pct_move = calculate_fee_for_move(
-            0.1, 
-            st.session_state.pair_data[pair_name]['buffer_rate'], 
-            st.session_state.pair_data[pair_name]['position_multiplier']
-        )
-        st.session_state.pair_data[pair_name]['fee_history'].append((timestamp, fee_for_01pct_move))
+        calculate_and_record_fee(pair_name, timestamp)
         
         # Mark that parameters have been changed
         st.session_state.pair_data[pair_name]['params_changed'] = False
@@ -905,7 +1004,7 @@ def create_fee_plot(pair_name):
     # Set title and labels
     ax.set_title(f'Fee for 0.1% Price Move - {pair_name}')
     ax.set_xlabel('Time')
-    ax.set_ylabel('Fee')
+    ax.set_ylabel('Fee Amount')
     
     # Add grid
     ax.grid(True, alpha=0.3)
@@ -920,87 +1019,180 @@ def create_fee_plot(pair_name):
 
 # Function to create fee curve plot for a specific pair
 def create_fee_curve_plot(pair_name):
-    """Create a plot of fee vs price move for a specific pair."""
+    """Create two plots: fee amount vs price move and fee percentage vs price move."""
     # Ensure pair state is initialized
     init_pair_state(pair_name)
     
-    # Calculate fee across a range of move sizes
-    move_sizes = np.linspace(-1, 1, 201)
-    current_fees = [calculate_fee_for_move(move, 
-                                        st.session_state.pair_data[pair_name]['buffer_rate'], 
-                                        st.session_state.pair_data[pair_name]['position_multiplier']) 
-                   for move in move_sizes]
+    # Get required parameters
+    buffer_rate = st.session_state.pair_data[pair_name]['buffer_rate']
+    position_multiplier = st.session_state.pair_data[pair_name]['position_multiplier']
+    rate_multiplier = st.session_state.pair_data[pair_name].get('rate_multiplier', 10000)
+    rate_exponent = st.session_state.pair_data[pair_name].get('rate_exponent', 1)
     
-    # Create figure and axis
-    fig, ax = plt.subplots(figsize=(10, 6))
+    # Calculate fee across a range of move sizes
+    move_sizes = np.linspace(0, 1, 101)  # Focus on positive moves only (where fees apply)
+    current_fees = []
+    current_fee_pcts = []
+    
+    for move in move_sizes:
+        fee_amount, fee_pct = calculate_fee_for_move(
+            move, 
+            buffer_rate, 
+            position_multiplier,
+            rate_multiplier,
+            rate_exponent
+        )
+        current_fees.append(fee_amount)
+        current_fee_pcts.append(fee_pct)
+    
+    # Create figure and axis for fee amount
+    fig1, ax1 = plt.subplots(figsize=(10, 6))
     
     # Plot current fee curve
-    ax.plot(move_sizes, current_fees, 'b-', label='Current Fee')
+    ax1.plot(move_sizes, current_fees, 'b-', label='Current Fee Amount')
     
     # Plot proposed fee curve if available
     if (st.session_state.pair_data[pair_name]['proposed_buffer_rate'] is not None and 
         st.session_state.pair_data[pair_name]['proposed_position_multiplier'] is not None):
-        proposed_fees = [calculate_fee_for_move(move, 
-                                              st.session_state.pair_data[pair_name]['proposed_buffer_rate'], 
-                                              st.session_state.pair_data[pair_name]['proposed_position_multiplier']) 
-                       for move in move_sizes]
-        ax.plot(move_sizes, proposed_fees, 'r--', label='Proposed Fee')
+        
+        proposed_buffer = st.session_state.pair_data[pair_name]['proposed_buffer_rate']
+        proposed_multiplier = st.session_state.pair_data[pair_name]['proposed_position_multiplier']
+        
+        proposed_fees = []
+        proposed_fee_pcts = []
+        
+        for move in move_sizes:
+            fee_amount, fee_pct = calculate_fee_for_move(
+                move, 
+                proposed_buffer, 
+                proposed_multiplier,
+                rate_multiplier,
+                rate_exponent
+            )
+            proposed_fees.append(fee_amount)
+            proposed_fee_pcts.append(fee_pct)
+        
+        ax1.plot(move_sizes, proposed_fees, 'r--', label='Proposed Fee Amount')
     
     # Set title and labels
-    ax.set_title(f'Fee vs. Price Move Size - {pair_name}')
-    ax.set_xlabel('Price Move (%)')
-    ax.set_ylabel('Fee')
+    ax1.set_title(f'Fee Amount vs. Price Move Size - {pair_name}')
+    ax1.set_xlabel('Price Move (%)')
+    ax1.set_ylabel('Fee Amount')
     
     # Add grid
-    ax.grid(True, alpha=0.3)
-    
-    # Add vertical and horizontal lines at 0
-    ax.axhline(y=0, color='k', linestyle='--', alpha=0.3)
-    ax.axvline(x=0, color='k', linestyle='--', alpha=0.3)
+    ax1.grid(True, alpha=0.3)
     
     # Add legend
-    ax.legend()
+    ax1.legend()
     
     # Tight layout
     plt.tight_layout()
     
-    return fig
+    # Create figure and axis for fee percentage
+    fig2, ax2 = plt.subplots(figsize=(10, 6))
+    
+    # Plot current fee percentage curve
+    ax2.plot(move_sizes, current_fee_pcts, 'g-', label='Current Fee Percentage')
+    
+    # Plot proposed fee percentage curve if available
+    if (st.session_state.pair_data[pair_name]['proposed_buffer_rate'] is not None and 
+        st.session_state.pair_data[pair_name]['proposed_position_multiplier'] is not None):
+        ax2.plot(move_sizes, proposed_fee_pcts, 'r--', label='Proposed Fee Percentage')
+    
+    # Set title and labels
+    ax2.set_title(f'Fee Percentage vs. Price Move Size - {pair_name}')
+    ax2.set_xlabel('Price Move (%)')
+    ax2.set_ylabel('Fee (% of Profit)')
+    
+    # Add grid
+    ax2.grid(True, alpha=0.3)
+    
+    # Add legend
+    ax2.legend()
+    
+    # Tight layout
+    plt.tight_layout()
+    
+    return fig1, fig2
 
 # Function to create fee comparison table for a specific pair
 def create_fee_comparison_table(pair_name):
-    """Create a table comparing fees for different move sizes with current and proposed parameters for a specific pair."""
+    """Create a table comparing fees for different move sizes with current and proposed parameters."""
     # Ensure pair state is initialized
     init_pair_state(pair_name)
     
     move_sizes = [0.01, 0.05, 0.1, 0.2, 0.5, 1.0]
     
+    # Get required parameters
+    current_buffer = st.session_state.pair_data[pair_name]['buffer_rate']
+    current_multiplier = st.session_state.pair_data[pair_name]['position_multiplier']
+    
+    # Get rate parameters
+    if 'rate_multiplier' not in st.session_state.pair_data[pair_name]:
+        # Fetch if not in session state
+        params = fetch_current_parameters(pair_name)
+        rate_multiplier = params.get('rate_multiplier', 10000)
+        rate_exponent = params.get('rate_exponent', 1)
+        
+        # Store in session state
+        st.session_state.pair_data[pair_name]['rate_multiplier'] = rate_multiplier
+        st.session_state.pair_data[pair_name]['rate_exponent'] = rate_exponent
+    else:
+        rate_multiplier = st.session_state.pair_data[pair_name]['rate_multiplier']
+        rate_exponent = st.session_state.pair_data[pair_name]['rate_exponent']
+    
     # Calculate fees with current parameters
-    current_fees = [calculate_fee_for_move(move, 
-                                        st.session_state.pair_data[pair_name]['buffer_rate'], 
-                                        st.session_state.pair_data[pair_name]['position_multiplier']) 
-                   for move in move_sizes]
+    current_fees = []
+    current_fee_pcts = []
+    
+    for move in move_sizes:
+        fee_amount, fee_pct = calculate_fee_for_move(
+            move, 
+            current_buffer, 
+            current_multiplier,
+            rate_multiplier,
+            rate_exponent
+        )
+        current_fees.append(fee_amount)
+        current_fee_pcts.append(fee_pct)
     
     # Calculate fees with proposed parameters if available
     if (st.session_state.pair_data[pair_name]['proposed_buffer_rate'] is not None and 
         st.session_state.pair_data[pair_name]['proposed_position_multiplier'] is not None):
-        proposed_fees = [calculate_fee_for_move(move, 
-                                              st.session_state.pair_data[pair_name]['proposed_buffer_rate'], 
-                                              st.session_state.pair_data[pair_name]['proposed_position_multiplier']) 
-                       for move in move_sizes]
+        
+        proposed_buffer = st.session_state.pair_data[pair_name]['proposed_buffer_rate']
+        proposed_multiplier = st.session_state.pair_data[pair_name]['proposed_position_multiplier']
+        
+        proposed_fees = []
+        proposed_fee_pcts = []
+        
+        for move in move_sizes:
+            fee_amount, fee_pct = calculate_fee_for_move(
+                move, 
+                proposed_buffer, 
+                proposed_multiplier,
+                rate_multiplier,
+                rate_exponent
+            )
+            proposed_fees.append(fee_amount)
+            proposed_fee_pcts.append(fee_pct)
         
         # Create dataframe for the table with both current and proposed
         fee_df = pd.DataFrame({
             'Move Size (%)': move_sizes,
-            'Current Fee': current_fees,
-            'Proposed Fee': proposed_fees,
-            'Difference (%)': [(new - old) / old * 100 if old != 0 else float('inf') 
-                              for new, old in zip(proposed_fees, current_fees)]
+            'Current Fee Amount': current_fees,
+            'Current Fee (%)': current_fee_pcts,
+            'Proposed Fee Amount': proposed_fees,
+            'Proposed Fee (%)': proposed_fee_pcts,
+            'Fee % Change': [(new - old) / old * 100 if old != 0 else float('inf') 
+                              for new, old in zip(proposed_fee_pcts, current_fee_pcts)]
         })
     else:
         # Create dataframe with just current fees
         fee_df = pd.DataFrame({
             'Move Size (%)': move_sizes,
-            'Current Fee': current_fees
+            'Current Fee Amount': current_fees,
+            'Current Fee (%)': current_fee_pcts
         })
     
     return fee_df
@@ -1030,6 +1222,7 @@ def render_pair_overview():
             reference_edge = pair_data.get('reference_edge')
             buffer_rate = pair_data.get('buffer_rate')
             position_multiplier = pair_data.get('position_multiplier')
+            fee_percentage = pair_data.get('current_fee_percentage')
             last_update = pair_data.get('last_update_time')
             params_changed = pair_data.get('params_changed', False)
             
@@ -1040,6 +1233,7 @@ def render_pair_overview():
             # Format edge values and last update time
             edge_display = f"{current_edge:.4%}" if current_edge is not None else "N/A"
             ref_display = f"{reference_edge:.4%}" if reference_edge is not None else "N/A"
+            fee_display = f"{fee_percentage:.2f}%" if fee_percentage is not None else "N/A"
             
             # Calculate edge delta
             if current_edge is not None and reference_edge is not None:
@@ -1100,6 +1294,10 @@ def render_pair_overview():
                         <span style="font-weight: 500;">{multiplier_display}</span>
                     </div>
                     <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
+                        <span style="color: #666;">Fee for 0.1% Move:</span>
+                        <span style="font-weight: 500;">{fee_display}</span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
                         <span style="color: #666;">Last Update:</span>
                         <span style="font-weight: 500;">{update_display}</span>
                     </div>
@@ -1158,7 +1356,7 @@ def render_pair_detail(pair_name):
     st.markdown(f"### Detailed Analytics: {pair_name}")
     
     # Create columns for key metrics
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     
     # Show current edge
     with col1:
@@ -1184,6 +1382,13 @@ def render_pair_detail(pair_name):
     # Show current position multiplier
     with col4:
         st.markdown(f"**Position Multiplier:** {st.session_state.pair_data[pair_name]['position_multiplier']:.1f}")
+    
+    # Show current fee for 0.1% move
+    with col5:
+        if st.session_state.pair_data[pair_name].get('current_fee_percentage') is not None:
+            st.markdown(f"**Fee for 0.1% Move:** {st.session_state.pair_data[pair_name]['current_fee_percentage']:.2f}%")
+        else:
+            st.markdown("**Fee for 0.1% Move:** N/A")
     
     # Create tabbed view for detailed analytics
     detail_tabs = st.tabs(["Edge History", "Parameter History", "Fee Analysis"])
@@ -1269,10 +1474,15 @@ def render_pair_detail(pair_name):
     with detail_tabs[2]:
         st.markdown("### Fee Analysis")
         
-        # Create fee curve plot
-        fee_curve_plot = create_fee_curve_plot(pair_name)
-        if fee_curve_plot is not None:
-            st.pyplot(fee_curve_plot)
+        # Create fee curve plots
+        fee_amount_fig, fee_percentage_fig = create_fee_curve_plot(pair_name)
+        if fee_amount_fig is not None:
+            st.markdown("#### Fee Amount vs Price Move")
+            st.pyplot(fee_amount_fig)
+        
+        if fee_percentage_fig is not None:
+            st.markdown("#### Fee Percentage vs Price Move")
+            st.pyplot(fee_percentage_fig)
         
         # Fee comparison table
         st.markdown("### Fee Comparison Table")
@@ -1286,7 +1496,14 @@ def render_pair_detail(pair_name):
         st.markdown("""
         The fee is calculated using the following equation:
         
-        $Fee = \\frac{-Bet \\times Leverage \\times (P_T-P_t) \\times (1 + Rate Multiplier \\cdot |\\frac{P_T-P_t}{P_T}|)}{(1-Base Rate) \\cdot (1 + 10^6 \\cdot Position Multiplier \\cdot |\\frac{P_T-P_t}{P_T}|)}$
+        $Fee = -1 \\times \\frac{1 + Rate\\_Multiplier \\cdot |\\frac{P_t}{P_T} - 1|^{Rate\\_Exponent}}{1 + 10^6 \\cdot Position\\_Multiplier \\cdot |\\frac{P_t}{P_T} - 1|^{Rate\\_Exponent}} \\times \\frac{Bet \\times Leverage}{1 - Buffer\\_Rate} \\times (P_T - P_t)$
+        
+        Where:
+        - $P_T$ is the initial price
+        - $P_t$ is the price after the move
+        - $Buffer\\_Rate$ is the buffer rate parameter
+        - $Position\\_Multiplier$ is the position multiplier parameter
+        - $Rate\\_Multiplier$ and $Rate\\_Exponent$ are additional parameters affecting the fee curve
         """)
     
     # Button to return to overview
@@ -1309,7 +1526,7 @@ def render_pair_monitor(pair_name):
     st.markdown(f"### Parameter Monitoring: {pair_name}")
     
     # Create columns for key metrics
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     
     # Show current edge
     with col1:
@@ -1318,7 +1535,6 @@ def render_pair_monitor(pair_name):
             delta_color = "down" if edge_delta and edge_delta < 0 else "up"
             delta_str = f"<span class='{delta_color}'>{edge_delta:.4%}</span>" if edge_delta is not None else ""
             st.markdown(f"**Current Edge:** {st.session_state.pair_data[pair_name]['current_edge']:.4%} {delta_str}", unsafe_allow_html=True)
-        # Continued from the previous part
         else:
             st.markdown("**Current Edge:** N/A")
     
@@ -1336,6 +1552,13 @@ def render_pair_monitor(pair_name):
     # Show current position multiplier
     with col4:
         st.markdown(f"**Position Multiplier:** {st.session_state.pair_data[pair_name]['position_multiplier']:.1f}")
+    
+    # Show current fee for 0.1% move
+    with col5:
+        if st.session_state.pair_data[pair_name].get('current_fee_percentage') is not None:
+            st.markdown(f"**Fee for 0.1% Move:** {st.session_state.pair_data[pair_name]['current_fee_percentage']:.2f}%")
+        else:
+            st.markdown("**Fee for 0.1% Move:** N/A")
     
     # Show edge plot
     edge_plot = create_edge_plot(pair_name)
@@ -1389,16 +1612,35 @@ def render_pair_monitor(pair_name):
             delta_buffer = st.session_state.pair_data[pair_name]['proposed_buffer_rate'] - st.session_state.pair_data[pair_name]['buffer_rate']
             delta_multiplier = st.session_state.pair_data[pair_name]['proposed_position_multiplier'] - st.session_state.pair_data[pair_name]['position_multiplier']
             
+            # Get rate parameters
+            rate_multiplier = st.session_state.pair_data[pair_name].get('rate_multiplier', 10000)
+            rate_exponent = st.session_state.pair_data[pair_name].get('rate_exponent', 1)
+            
             # Calculate current and new fees - ensure proper calculation
-            current_fee = calculate_fee_for_move(0.1, st.session_state.pair_data[pair_name]['buffer_rate'], st.session_state.pair_data[pair_name]['position_multiplier'])
-            new_fee = calculate_fee_for_move(0.1, st.session_state.pair_data[pair_name]['proposed_buffer_rate'], st.session_state.pair_data[pair_name]['proposed_position_multiplier'])
-            delta_fee = new_fee - current_fee
+            current_fee_amount, current_fee_pct = calculate_fee_for_move(
+                0.1, 
+                st.session_state.pair_data[pair_name]['buffer_rate'], 
+                st.session_state.pair_data[pair_name]['position_multiplier'],
+                rate_multiplier,
+                rate_exponent
+            )
+            
+            new_fee_amount, new_fee_pct = calculate_fee_for_move(
+                0.1, 
+                st.session_state.pair_data[pair_name]['proposed_buffer_rate'], 
+                st.session_state.pair_data[pair_name]['proposed_position_multiplier'],
+                rate_multiplier,
+                rate_exponent
+            )
+            
+            delta_fee_amount = new_fee_amount - current_fee_amount
+            delta_fee_pct = new_fee_pct - current_fee_pct
             
             # Calculate percentage change safely
-            if abs(current_fee) > 1e-10:
-                pct_fee_change = (delta_fee / abs(current_fee)) * 100
+            if abs(current_fee_pct) > 1e-10:
+                pct_fee_change = (delta_fee_pct / abs(current_fee_pct)) * 100
             else:
-                pct_fee_change = 0 if abs(delta_fee) < 1e-10 else float('inf')
+                pct_fee_change = 0 if abs(delta_fee_pct) < 1e-10 else float('inf')
             
             # Show proposed changes
             st.markdown("### Proposed Parameter Changes")
@@ -1427,15 +1669,15 @@ def render_pair_monitor(pair_name):
             
             with col3:
                 st.markdown("**Fee for 0.1% Move**")
-                st.markdown(f"Current: {current_fee:.8f}")
-                st.markdown(f"Proposed: {new_fee:.8f}")
+                st.markdown(f"Current: {current_fee_pct:.2f}%")
+                st.markdown(f"Proposed: {new_fee_pct:.2f}%")
                 
                 # Show change with proper color and format
-                change_color = "up" if delta_fee > 0 else "down"
+                change_color = "up" if delta_fee_pct > 0 else "down"
                 if abs(pct_fee_change) != float('inf'):
-                    st.markdown(f"Change: {delta_fee:.8f} (<span class='{change_color}'>{pct_fee_change:+.2f}%</span>)", unsafe_allow_html=True)
+                    st.markdown(f"Change: {delta_fee_pct:.2f}% (<span class='{change_color}'>{pct_fee_change:+.2f}%</span>)", unsafe_allow_html=True)
                 else:
-                    st.markdown(f"Change: {delta_fee:.8f}", unsafe_allow_html=True)
+                    st.markdown(f"Change: {delta_fee_pct:.2f}%", unsafe_allow_html=True)
             
             # Add a view of fee changes for different move sizes
             with st.expander("View Fee Comparison for Different Move Sizes"):
@@ -1459,6 +1701,11 @@ def render_pair_monitor(pair_name):
         st.markdown('<div class="button-row">', unsafe_allow_html=True)
         if st.button("Fetch New Data", key=f"fetch_data_{pair_name}"):
             process_edge_data(pair_name)
+            
+            # Calculate fee with updated edge data
+            timestamp = get_sg_time()
+            calculate_and_record_fee(pair_name, timestamp)
+            
             st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
     
@@ -1478,6 +1725,61 @@ def render_pair_monitor(pair_name):
         st.session_state.view_mode = "Pairs Overview"
         st.session_state.current_pair = None
         st.rerun()
+
+# Initialize a trading pair for monitoring
+def initialize_pair(pair_name):
+    """Initialize a trading pair for monitoring, including all required parameters."""
+    # Initialize pair state if it doesn't exist
+    init_pair_state(pair_name)
+    
+    # Fetch current parameters from database
+    params = fetch_current_parameters(pair_name)
+    
+    # Update session state with current parameters
+    st.session_state.pair_data[pair_name]['buffer_rate'] = params["buffer_rate"]
+    st.session_state.pair_data[pair_name]['position_multiplier'] = params["position_multiplier"]
+    st.session_state.pair_data[pair_name]['max_leverage'] = params["max_leverage"]
+    st.session_state.pair_data[pair_name]['rate_multiplier'] = params["rate_multiplier"]
+    st.session_state.pair_data[pair_name]['rate_exponent'] = params["rate_exponent"]
+    
+    # Save reference values
+    st.session_state.pair_data[pair_name]['reference_buffer_rate'] = params["buffer_rate"]
+    st.session_state.pair_data[pair_name]['reference_position_multiplier'] = params["position_multiplier"]
+    
+    # Reset history - use Singapore time
+    timestamp = get_sg_time()
+    st.session_state.pair_data[pair_name]['edge_history'] = []
+    st.session_state.pair_data[pair_name]['buffer_history'] = [(timestamp, st.session_state.pair_data[pair_name]['buffer_rate'])]
+    st.session_state.pair_data[pair_name]['multiplier_history'] = [(timestamp, st.session_state.pair_data[pair_name]['position_multiplier'])]
+    
+    # Calculate and record initial fee for 0.1% move
+    fee_amount, fee_pct = calculate_and_record_fee(pair_name, timestamp)
+    
+    # Fetch initial reference edge based on selected lookback period
+    initial_edge = calculate_edge(pair_name, st.session_state.lookback_minutes)
+    if initial_edge is not None:
+        # Use a small positive default if edge is zero
+        if initial_edge == 0:
+            initial_edge = 0.001  # Use 0.1% as minimum edge
+        
+        st.session_state.pair_data[pair_name]['reference_edge'] = initial_edge
+        st.session_state.pair_data[pair_name]['current_edge'] = initial_edge
+        st.session_state.pair_data[pair_name]['edge_history'] = [(timestamp, initial_edge)]
+    
+    # Reset proposed values
+    st.session_state.pair_data[pair_name]['proposed_buffer_rate'] = None
+    st.session_state.pair_data[pair_name]['proposed_position_multiplier'] = None
+    
+    # Reset params_changed flag
+    st.session_state.pair_data[pair_name]['params_changed'] = False
+    
+    # Set last update time
+    st.session_state.pair_data[pair_name]['last_update_time'] = timestamp
+    
+    # Mark pair as initialized
+    st.session_state.pair_data[pair_name]['initialized'] = True
+    
+    return True
 
 # Handle simulated data mode for testing without database
 def enable_simulated_data_mode():
@@ -1529,6 +1831,12 @@ def update_pairs_on_load():
         # Update timing information
         st.session_state.last_update_time = current_time
         st.session_state.next_update_time = current_time + timedelta(minutes=current_lookback_mins)
+        
+        # Update fee calculations for all pairs
+        timestamp = get_sg_time()
+        for pair_name in st.session_state.monitored_pairs:
+            if st.session_state.pair_data[pair_name].get('initialized', False):
+                calculate_and_record_fee(pair_name, timestamp)
         
         # Update successful
         return True
@@ -1639,6 +1947,12 @@ def main():
                     st.session_state.last_update_time = new_time
                     st.session_state.next_update_time = new_time + timedelta(minutes=current_lookback_mins)
                     
+                    # Update fee calculations
+                    timestamp = get_sg_time()
+                    for pair_name in st.session_state.monitored_pairs:
+                        if st.session_state.pair_data[pair_name].get('initialized', False):
+                            calculate_and_record_fee(pair_name, timestamp)
+                    
                     # Record update information
                     st.session_state['last_update_info'] = {
                         'time': new_time,
@@ -1715,75 +2029,33 @@ def main():
     # Handle button actions
     if initialize_button:
         try:
-            # Initialize pair directly inside this block instead of calling function
+            # Initialize pair directly inside this block
             pair_name = selected_pair
             
-            # Initialize pair state if it doesn't exist
-            init_pair_state(pair_name)
+            # Initialize the pair with all parameters
+            success = initialize_pair(pair_name)
             
-            # Fetch current parameters from database
-            params = fetch_current_parameters(pair_name)
-            
-            # Update session state with current parameters
-            st.session_state.pair_data[pair_name]['buffer_rate'] = params["buffer_rate"]
-            st.session_state.pair_data[pair_name]['position_multiplier'] = params["position_multiplier"]
-            st.session_state.pair_data[pair_name]['max_leverage'] = params["max_leverage"]
-            
-            # Save reference values
-            st.session_state.pair_data[pair_name]['reference_buffer_rate'] = params["buffer_rate"]
-            st.session_state.pair_data[pair_name]['reference_position_multiplier'] = params["position_multiplier"]
-            
-            # Reset history - use Singapore time
-            timestamp = get_sg_time()
-            st.session_state.pair_data[pair_name]['edge_history'] = []
-            st.session_state.pair_data[pair_name]['buffer_history'] = [(timestamp, st.session_state.pair_data[pair_name]['buffer_rate'])]
-            st.session_state.pair_data[pair_name]['multiplier_history'] = [(timestamp, st.session_state.pair_data[pair_name]['position_multiplier'])]
-            
-            # Calculate and record initial fee for 0.1% move
-            initial_fee = calculate_fee_for_move(
-                0.1, 
-                st.session_state.pair_data[pair_name]['buffer_rate'], 
-                st.session_state.pair_data[pair_name]['position_multiplier']
-            )
-            st.session_state.pair_data[pair_name]['fee_history'] = [(timestamp, initial_fee)]
-            
-            # Fetch initial reference edge based on selected lookback period
-            initial_edge = calculate_edge(pair_name, st.session_state.lookback_minutes)
-            if initial_edge is not None:
-                st.session_state.pair_data[pair_name]['reference_edge'] = initial_edge
-                st.session_state.pair_data[pair_name]['current_edge'] = initial_edge
-                st.session_state.pair_data[pair_name]['edge_history'] = [(timestamp, initial_edge)]
-            
-            # Reset proposed values
-            st.session_state.pair_data[pair_name]['proposed_buffer_rate'] = None
-            st.session_state.pair_data[pair_name]['proposed_position_multiplier'] = None
-            
-            # Reset params_changed flag
-            st.session_state.pair_data[pair_name]['params_changed'] = False
-            
-            # Set last update time
-            st.session_state.pair_data[pair_name]['last_update_time'] = timestamp
-            
-            # Mark pair as initialized
-            st.session_state.pair_data[pair_name]['initialized'] = True
-            
-            # Add to monitored pairs if not already there
-            if pair_name not in st.session_state.monitored_pairs:
-                st.session_state.monitored_pairs.append(pair_name)
-            
-            # Set as current pair
-            st.session_state.current_pair = pair_name
-            
-            # Success message and reset timers
-            st.sidebar.success(f"Started monitoring for {pair_name}")
-            st.session_state.view_mode = "Pairs Overview"
-            
-            # Reset auto-update timer when adding a new pair
-            current_time = datetime.now(pytz.utc)
-            st.session_state.last_update_time = current_time
-            st.session_state.next_update_time = current_time + timedelta(minutes=st.session_state.lookback_minutes)
-            
-            st.rerun()
+            if success:
+                # Add to monitored pairs if not already there
+                if pair_name not in st.session_state.monitored_pairs:
+                    st.session_state.monitored_pairs.append(pair_name)
+                
+                # Set as current pair
+                st.session_state.current_pair = pair_name
+                
+                # Success message and reset timers
+                st.sidebar.success(f"Started monitoring for {pair_name}")
+                st.session_state.view_mode = "Pairs Overview"
+                
+                # Reset auto-update timer when adding a new pair
+                current_time = datetime.now(pytz.utc)
+                st.session_state.last_update_time = current_time
+                st.session_state.next_update_time = current_time + timedelta(minutes=st.session_state.lookback_minutes)
+                
+                st.rerun()
+            else:
+                st.sidebar.error(f"Failed to initialize {pair_name}")
+                
         except Exception as e:
             st.sidebar.error(f"Error adding pair: {str(e)}")
             import traceback
@@ -1809,64 +2081,15 @@ def main():
                             progress = (i+1) / total_pairs
                             progress_bar.progress(progress, text=f"Initializing {p}...")
                             
-                            # Initialize pair directly inline
-                            pair_name = p
+                            # Initialize the pair
+                            success = initialize_pair(p)
                             
-                            # Initialize pair state if it doesn't exist
-                            init_pair_state(pair_name)
-                            
-                            # Fetch current parameters from database
-                            params = fetch_current_parameters(pair_name)
-                            
-                            # Update session state with current parameters
-                            st.session_state.pair_data[pair_name]['buffer_rate'] = params["buffer_rate"]
-                            st.session_state.pair_data[pair_name]['position_multiplier'] = params["position_multiplier"]
-                            st.session_state.pair_data[pair_name]['max_leverage'] = params["max_leverage"]
-                            
-                            # Save reference values
-                            st.session_state.pair_data[pair_name]['reference_buffer_rate'] = params["buffer_rate"]
-                            st.session_state.pair_data[pair_name]['reference_position_multiplier'] = params["position_multiplier"]
-                            
-                            # Reset history - use Singapore time
-                            timestamp = get_sg_time()
-                            st.session_state.pair_data[pair_name]['edge_history'] = []
-                            st.session_state.pair_data[pair_name]['buffer_history'] = [(timestamp, st.session_state.pair_data[pair_name]['buffer_rate'])]
-                            st.session_state.pair_data[pair_name]['multiplier_history'] = [(timestamp, st.session_state.pair_data[pair_name]['position_multiplier'])]
-                            
-                            # Calculate and record initial fee for 0.1% move
-                            initial_fee = calculate_fee_for_move(
-                                0.1, 
-                                st.session_state.pair_data[pair_name]['buffer_rate'], 
-                                st.session_state.pair_data[pair_name]['position_multiplier']
-                            )
-                            st.session_state.pair_data[pair_name]['fee_history'] = [(timestamp, initial_fee)]
-                            
-                            # Fetch initial reference edge based on selected lookback period
-                            initial_edge = calculate_edge(pair_name, st.session_state.lookback_minutes)
-                            if initial_edge is not None:
-                                st.session_state.pair_data[pair_name]['reference_edge'] = initial_edge
-                                st.session_state.pair_data[pair_name]['current_edge'] = initial_edge
-                                st.session_state.pair_data[pair_name]['edge_history'] = [(timestamp, initial_edge)]
-                            
-                            # Reset proposed values
-                            st.session_state.pair_data[pair_name]['proposed_buffer_rate'] = None
-                            st.session_state.pair_data[pair_name]['proposed_position_multiplier'] = None
-                            
-                            # Reset params_changed flag
-                            st.session_state.pair_data[pair_name]['params_changed'] = False
-                            
-                            # Set last update time
-                            st.session_state.pair_data[pair_name]['last_update_time'] = timestamp
-                            
-                            # Mark pair as initialized
-                            st.session_state.pair_data[pair_name]['initialized'] = True
-                            
-                            # Add to monitored pairs if not already there
-                            if pair_name not in st.session_state.monitored_pairs:
-                                st.session_state.monitored_pairs.append(pair_name)
+                            if success:
+                                # Add to monitored pairs
+                                if p not in st.session_state.monitored_pairs:
+                                    st.session_state.monitored_pairs.append(p)
+                                pairs_added += 1
                                 
-                            pairs_added += 1
-                            
                         except Exception as e:
                             st.error(f"Error initializing {p}: {str(e)}")
                     
@@ -1904,6 +2127,12 @@ def main():
             # Update timestamps
             st.session_state.last_update_time = current_time
             st.session_state.next_update_time = current_time + timedelta(minutes=st.session_state.lookback_minutes)
+            
+            # Update fee calculations
+            timestamp = get_sg_time()
+            for pair_name in st.session_state.monitored_pairs:
+                if st.session_state.pair_data[pair_name].get('initialized', False):
+                    calculate_and_record_fee(pair_name, timestamp)
             
             if pairs_updated:
                 st.sidebar.warning(f"Parameter updates available for {len(pairs_updated)} pairs")
