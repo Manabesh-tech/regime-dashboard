@@ -955,6 +955,10 @@ def render_pair_overview():
             else:
                 update_display = "Never"
             
+            # Safely format values with proper error handling
+            buffer_display = f"{buffer_rate:.6f}" if buffer_rate is not None else "N/A"
+            multiplier_display = f"{position_multiplier:.1f}" if position_multiplier is not None else "N/A"
+            
             # Render the card
             st.markdown(f"""
             <div class="pair-card">
@@ -976,11 +980,11 @@ def render_pair_overview():
                 </div>
                 <div class="metric-row">
                     <span class="metric-label">Buffer Rate:</span>
-                    <span class="metric-value">{buffer_rate:.6f}</span>
+                    <span class="metric-value">{buffer_display}</span>
                 </div>
                 <div class="metric-row">
                     <span class="metric-label">Position Multiplier:</span>
-                    <span class="metric-value">{position_multiplier:.1f}</span>
+                    <span class="metric-value">{multiplier_display}</span>
                 </div>
                 <div class="metric-row">
                     <span class="metric-label">Last Update:</span>
