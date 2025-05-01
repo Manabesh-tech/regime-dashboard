@@ -528,9 +528,9 @@ def init_pair_state(pair_name):
         st.session_state.pair_data[pair_name] = {
             'initialized': False,
             'buffer_rate': 0.001,
-            'position_multiplier': 10000,
+            'position_multiplier': 1000,
             'max_leverage': 100,
-            'rate_multiplier': 10000,
+            'rate_multiplier': 15000,
             'rate_exponent': 1,
             'edge_history': [],  # List of (timestamp, edge) tuples
             'buffer_history': [],  # List of (timestamp, buffer_rate) tuples
