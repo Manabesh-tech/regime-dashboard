@@ -1122,6 +1122,17 @@ def render_pair_detail(pair_name):
             st.pyplot(edge_plot)
         else:
             st.info("Not enough data points yet for edge visualization.")
+            
+        # Add raw edge history data display
+        if st.checkbox("Show Raw Edge History Data", key=f"show_edge_history_{pair_name}"):
+            if len(st.session_state.pair_data[pair_name]['edge_history']) > 0:
+                edge_df = pd.DataFrame({
+                    'Timestamp': [t for t, _ in st.session_state.pair_data[pair_name]['edge_history']],
+                    'Edge': [f"{e:.6f}" for _, e in st.session_state.pair_data[pair_name]['edge_history']]
+                })
+                st.dataframe(edge_df, hide_index=True, use_container_width=True)
+            else:
+                st.info("No edge history data yet.")
     
     # Parameter History tab
     with detail_tabs[1]:
@@ -1144,6 +1155,41 @@ def render_pair_detail(pair_name):
             st.pyplot(fee_fig)
         else:
             st.info("Not enough data points yet for fee visualization.")
+            
+        # Show raw parameter history data
+        if st.checkbox("Show Raw Parameter History Data", key=f"show_param_history_{pair_name}"):
+            # Create tabs for different history tables
+            history_tabs = st.tabs(["Buffer History", "Multiplier History", "Fee History"])
+            
+            with history_tabs[0]:
+                if len(st.session_state.pair_data[pair_name]['buffer_history']) > 0:
+                    buffer_df = pd.DataFrame({
+                        'Timestamp': [t for t, _ in st.session_state.pair_data[pair_name]['buffer_history']],
+                        'Buffer Rate': [f"{r:.6f}" for _, r in st.session_state.pair_data[pair_name]['buffer_history']]
+                    })
+                    st.dataframe(buffer_df, hide_index=True, use_container_width=True)
+                else:
+                    st.info("No buffer rate history data yet.")
+            
+            with history_tabs[1]:
+                if len(st.session_state.pair_data[pair_name]['multiplier_history']) > 0:
+                    multiplier_df = pd.DataFrame({
+                        'Timestamp': [t for t, _ in st.session_state.pair_data[pair_name]['multiplier_history']],
+                        'Position Multiplier': [f"{m:.1f}" for _, m in st.session_state.pair_data[pair_name]['multiplier_history']]
+                    })
+                    st.dataframe(multiplier_df, hide_index=True, use_container_width=True)
+                else:
+                    st.info("No position multiplier history data yet.")
+            
+            with history_tabs[2]:
+                if len(st.session_state.pair_data[pair_name]['fee_history']) > 0:
+                    fee_df = pd.DataFrame({
+                        'Timestamp': [t for t, _ in st.session_state.pair_data[pair_name]['fee_history']],
+                        'Fee for 0.1% Move': [f"{f:.8f}" for _, f in st.session_state.pair_data[pair_name]['fee_history']]
+                    })
+                    st.dataframe(fee_df, hide_index=True, use_container_width=True)
+                else:
+                    st.info("No fee history data yet.")
     
     # Fee Analysis tab
     with detail_tabs[2]:
@@ -1166,7 +1212,7 @@ def render_pair_detail(pair_name):
         st.markdown("""
         The fee is calculated using the following equation:
         
-        $$Fee = \\frac{-Bet \\times Leverage \\times (P_T-P_t) \\times (1 + Rate Multiplier \\cdot |\\frac{P_T-P_t}{P_T}|)}{(1-Base Rate) \\cdot (1 + 10^6 \\cdot Position Multiplier \\cdot |\\frac{P_T-P_t}{P_T}|)}$$
+        $Fee = \\frac{-Bet \\times Leverage \\times (P_T-P_t) \\times (1 + Rate Multiplier \\cdot |\\frac{P_T-P_t}{P_T}|)}{(1-Base Rate) \\cdot (1 + 10^6 \\cdot Position Multiplier \\cdot |\\frac{P_T-P_t}{P_T}|)}$
         """)
     
     # Button to return to overview
