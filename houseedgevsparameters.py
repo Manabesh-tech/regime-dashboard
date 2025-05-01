@@ -673,7 +673,7 @@ def calculate_and_record_fee(pair_name, timestamp):
     # Calculate fee and percentage
     fee_amount, fee_pct = calculate_fee_for_move(
         0.1, 
-        buffer_rate, 
+        pnl_base_rate, 
         position_multiplier,
         rate_multiplier,
         rate_exponent, 
