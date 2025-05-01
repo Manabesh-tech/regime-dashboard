@@ -360,16 +360,22 @@ def calculate_edge(pair_name, lookback_minutes=10):
         return 0.001 + random.uniform(-0.0005, 0.0010)
 
 # Function to calculate fee for a percentage price move based on the Profit Share Model
-def calculate_fee_for_move(move_pct, buffer_rate, position_multiplier, rate_multiplier=10000, 
+def calculate_fee_for_move(move_pct, buffer_rate, position_multiplier, rate_multiplier=15000, 
                            rate_exponent=1, bet=1.0, leverage=1.0, debug=False):
     """
     Calculate fee for a percentage price move using the Profit Share Model formula.
+    
+    The formula calculates P_close as:
+    P_close = initial_price + ((1 - buffer_rate) / (1 + (1/(abs(price_ratio - 1) * rate_multiplier))^rate_exponent 
+                + (bet*leverage)/(10^6 * abs(price_ratio - 1) * position_multiplier))) * (price_after_move - initial_price)
+    
+    Where price_ratio = price_after_move/initial_price
     
     Args:
         move_pct: Price move percentage (positive for price increase, negative for decrease)
         buffer_rate: The buffer rate parameter (equivalent to base_rate in some documentation)
         position_multiplier: The position multiplier parameter
-        rate_multiplier: Rate multiplier (default 10000)
+        rate_multiplier: Rate multiplier (default 15000)
         rate_exponent: Rate exponent (default 1)
         bet: Bet amount (default 1.0)
         leverage: Position leverage (default 1.0)
@@ -379,39 +385,37 @@ def calculate_fee_for_move(move_pct, buffer_rate, position_multiplier, rate_mult
         If debug=False: A tuple of (fee_amount, fee_percentage)
         If debug=True: A tuple of (fee_amount, fee_percentage, debug_info)
     """
-    # Set a standard starting price for calculations
-    p_initial = 100000
-    
-    # Convert percentage move to decimal
-    move_decimal = move_pct / 100
-    
-    # Calculate prices
-    p_t = p_initial  # Starting price
-    p_final = p_t * (1 + move_decimal)  # Price after move
-    
-    # Calculate price difference
-    price_diff = p_final - p_t
-    
-    # Calculate absolute relative difference raised to power of rate exponent
-    abs_relative_diff = abs(p_final / p_t - 1)
-    abs_relative_diff_powered = abs_relative_diff ** rate_exponent
-    
-    # Calculate fee percentage based on the spreadsheet model
+    # For negative or zero price moves, no fee is charged
     if move_pct <= 0:
-        # No fee for negative price moves
-        fee_percentage = 0
-        fee_amount = 0
-    else:
-        # For positive moves, calculate fee percentage from rate_multiplier and position_multiplier
-        numerator = 1 + (rate_multiplier * abs_relative_diff_powered)
-        denominator = 1 + (1000000 * position_multiplier * abs_relative_diff_powered)
-        
-        # Calculate fee percentage relative to price move
-        fee_percentage = 100 * (numerator / denominator)
-        
-        # Calculate fee amount based on percentage
-        hypothetical_pnl = price_diff
-        fee_amount = (fee_percentage / 100) * abs(hypothetical_pnl)
+        return 0, 0
+    
+    # Set initial price (fixed at 100000 as in spreadsheet)
+    initial_price = 100000
+    
+    # Calculate price after move
+    price_after_move = initial_price * (1 + move_pct/100)
+    
+    # Calculate price ratio
+    price_ratio = price_after_move / initial_price
+    
+    # Calculate relative price change 
+    relative_change = abs(price_ratio - 1)
+    
+    # Calculate the terms in the denominator
+    term1 = (1 + 1/(relative_change * rate_multiplier)) ** rate_exponent
+    term2 = (bet * leverage) / (1000000 * relative_change * position_multiplier)
+    
+    # Calculate P_close
+    p_close = initial_price + (1 - buffer_rate) * (price_after_move - initial_price) / (term1 + term2)
+    
+    # Calculate hypothetical PnL
+    hypothetical_pnl = relative_change * initial_price
+    
+    # Calculate fee amount
+    fee_amount = price_after_move - p_close
+    
+    # Calculate fee as percentage of profit
+    fee_percentage = (fee_amount / hypothetical_pnl) * 100 if hypothetical_pnl != 0 else 0
     
     if debug:
         debug_info = {
@@ -425,15 +429,16 @@ def calculate_fee_for_move(move_pct, buffer_rate, position_multiplier, rate_mult
                 "leverage": leverage
             },
             "calculations": {
-                "p_t": p_t,
-                "p_final": p_final,
-                "price_diff": price_diff,
-                "abs_relative_diff": abs_relative_diff,
-                "abs_relative_diff_powered": abs_relative_diff_powered,
-                "numerator": numerator if move_pct > 0 else 0,
-                "denominator": denominator if move_pct > 0 else 0,
-                "fee_percentage": fee_percentage,
-                "fee_amount": fee_amount
+                "initial_price": initial_price,
+                "price_after_move": price_after_move,
+                "price_ratio": price_ratio,
+                "relative_change": relative_change,
+                "term1": term1,
+                "term2": term2,
+                "p_close": p_close,
+                "hypothetical_pnl": hypothetical_pnl,
+                "fee_amount": fee_amount,
+                "fee_percentage": fee_percentage
             }
         }
         return fee_amount, fee_percentage, debug_info
