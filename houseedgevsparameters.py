@@ -529,50 +529,58 @@ def process_edge_data(pair_name, timestamp=None):
     
     # Fetch new edge
     new_edge = calculate_edge(pair_name, st.session_state.lookback_minutes)
-    if new_edge is None:
-        return False  # Can't update without a valid edge
     
-    # Add to edge history
-    st.session_state.pair_data[pair_name]['edge_history'].append((timestamp, new_edge))
-    st.session_state.pair_data[pair_name]['current_edge'] = new_edge
+    # Skip updates if edge calculation failed, but don't return yet to update timestamp
+    if new_edge is not None:
+        # Add to edge history
+        st.session_state.pair_data[pair_name]['edge_history'].append((timestamp, new_edge))
+        
+        # Log the edge update to aid debugging
+        old_edge = st.session_state.pair_data[pair_name]['current_edge']
+        edge_change = 0 if old_edge is None else ((new_edge - old_edge) / old_edge * 100 if old_edge != 0 else 0)
+        
+        # Update current edge
+        st.session_state.pair_data[pair_name]['current_edge'] = new_edge
+        
+        # Get reference edge and current parameters
+        edge_ref = st.session_state.pair_data[pair_name]['reference_edge']
+        current_buffer = st.session_state.pair_data[pair_name]['buffer_rate']
+        current_multiplier = st.session_state.pair_data[pair_name]['position_multiplier']
+        max_leverage = st.session_state.pair_data[pair_name]['max_leverage']
+        
+        # Get sensitivity parameters
+        buffer_alpha_up = st.session_state.buffer_alpha_up
+        buffer_alpha_down = st.session_state.buffer_alpha_down
+        multiplier_alpha_up = st.session_state.multiplier_alpha_up
+        multiplier_alpha_down = st.session_state.multiplier_alpha_down
+        
+        # Calculate proposed parameter updates
+        new_buffer_rate = update_buffer_rate(
+            current_buffer, new_edge, edge_ref, max_leverage,
+            buffer_alpha_up, buffer_alpha_down
+        )
+        
+        new_position_multiplier = update_position_multiplier(
+            current_multiplier, new_edge, edge_ref,
+            multiplier_alpha_up, multiplier_alpha_down
+        )
+        
+        # Check if parameters would change significantly
+        parameters_changed = (
+            abs(new_buffer_rate - current_buffer) / current_buffer > 0.001 or 
+            abs(new_position_multiplier - current_multiplier) / current_multiplier > 0.001
+        )
+        
+        # Store proposed values if changes are needed
+        if parameters_changed:
+            st.session_state.pair_data[pair_name]['proposed_buffer_rate'] = new_buffer_rate
+            st.session_state.pair_data[pair_name]['proposed_position_multiplier'] = new_position_multiplier
+            st.session_state.pair_data[pair_name]['params_changed'] = True
+    else:
+        parameters_changed = False
     
-    # Update last update time
+    # Update last update time regardless of whether edge calculation succeeded
     st.session_state.pair_data[pair_name]['last_update_time'] = timestamp
-    
-    # Get reference edge and current parameters
-    edge_ref = st.session_state.pair_data[pair_name]['reference_edge']
-    current_buffer = st.session_state.pair_data[pair_name]['buffer_rate']
-    current_multiplier = st.session_state.pair_data[pair_name]['position_multiplier']
-    max_leverage = st.session_state.pair_data[pair_name]['max_leverage']
-    
-    # Get sensitivity parameters
-    buffer_alpha_up = st.session_state.buffer_alpha_up
-    buffer_alpha_down = st.session_state.buffer_alpha_down
-    multiplier_alpha_up = st.session_state.multiplier_alpha_up
-    multiplier_alpha_down = st.session_state.multiplier_alpha_down
-    
-    # Calculate proposed parameter updates
-    new_buffer_rate = update_buffer_rate(
-        current_buffer, new_edge, edge_ref, max_leverage,
-        buffer_alpha_up, buffer_alpha_down
-    )
-    
-    new_position_multiplier = update_position_multiplier(
-        current_multiplier, new_edge, edge_ref,
-        multiplier_alpha_up, multiplier_alpha_down
-    )
-    
-    # Check if parameters would change significantly
-    parameters_changed = (
-        abs(new_buffer_rate - current_buffer) / current_buffer > 0.001 or 
-        abs(new_position_multiplier - current_multiplier) / current_multiplier > 0.001
-    )
-    
-    # Store proposed values if changes are needed
-    if parameters_changed:
-        st.session_state.pair_data[pair_name]['proposed_buffer_rate'] = new_buffer_rate
-        st.session_state.pair_data[pair_name]['proposed_position_multiplier'] = new_position_multiplier
-        st.session_state.pair_data[pair_name]['params_changed'] = True
     
     return parameters_changed
 
@@ -1357,25 +1365,62 @@ def main():
     
     # Batch update button
     if st.sidebar.button(
-        "Update All Pairs", 
-        help="Fetch new edge data for all monitored pairs",
+        "Update All Pairs Now", 
+        help="Immediately fetch new edge data for all monitored pairs",
         key="batch_update_button",
         disabled=len(st.session_state.monitored_pairs) == 0
     ):
-        pairs_updated = batch_update_all_pairs()
-        if pairs_updated:
-            st.sidebar.warning(f"Parameter updates available for {len(pairs_updated)} pairs")
-        else:
-            st.sidebar.success("All pairs updated, no parameter changes needed")
+        # Set a flag to force an update regardless of timer
+        st.session_state.update_clicked = True
+        
+        # Perform the immediate update
+        with st.spinner("Updating all pairs..."):
+            pairs_updated = batch_update_all_pairs()
+            st.session_state.last_global_update = datetime.now()
+            
+            if pairs_updated:
+                st.sidebar.warning(f"Parameter updates available for {len(pairs_updated)} pairs")
+            else:
+                st.sidebar.success("All pairs updated, no parameter changes needed")
+        
         st.rerun()
     
-    # Auto-update toggle
-    st.session_state.auto_update = st.sidebar.checkbox(
-        "Auto-update", 
-        value=st.session_state.auto_update,
-        help="Automatically fetch new edge data at the specified interval",
-        key="auto_update_checkbox"
-    )
+    # Add a timestamp to track the last global update
+    if 'last_global_update' not in st.session_state:
+        st.session_state.last_global_update = datetime.now()
+        
+    # Show auto-update status and last update time
+    current_time = datetime.now()
+    time_since_update = (current_time - st.session_state.last_global_update).total_seconds()
+    
+    # Auto-update toggle with more visible status
+    auto_update_col1, auto_update_col2 = st.sidebar.columns([3, 2])
+    
+    with auto_update_col1:
+        st.session_state.auto_update = st.checkbox(
+            "Auto-update data", 
+            value=st.session_state.auto_update,
+            help="Automatically fetch new edge data at the specified interval",
+            key="auto_update_checkbox"
+        )
+    
+    with auto_update_col2:
+        if st.session_state.auto_update:
+            next_update = max(0, lookback_minutes * 60 - time_since_update)
+            if next_update < 60:
+                st.info(f"Next update in {int(next_update)} sec")
+            else:
+                st.info(f"Next update in {int(next_update/60)} min")
+    
+    # Show last update time
+    if st.session_state.last_global_update:
+        if time_since_update < 60:
+            update_text = f"Last update: {int(time_since_update)} seconds ago"
+        elif time_since_update < 3600:
+            update_text = f"Last update: {int(time_since_update/60)} minutes ago"
+        else:
+            update_text = f"Last update: {int(time_since_update/3600)} hours ago"
+        st.sidebar.text(update_text)
     
     # Sensitivity parameters section
     st.sidebar.markdown('<div class="subheader-style">Sensitivity Parameters</div>', unsafe_allow_html=True)
@@ -1450,28 +1495,33 @@ def main():
     # Auto-update logic
     if st.session_state.auto_update and len(st.session_state.monitored_pairs) > 0:
         current_time = datetime.now()
-        should_update = False
+        update_interval_seconds = lookback_minutes * 60
+        time_since_update = (current_time - st.session_state.last_global_update).total_seconds()
         
-        # Find the earliest last update time among all monitored pairs
-        earliest_update = None
-        for pair_name in st.session_state.monitored_pairs:
-            pair_last_update = st.session_state.pair_data.get(pair_name, {}).get('last_update_time')
-            if pair_last_update is not None:
-                if earliest_update is None or pair_last_update < earliest_update:
-                    earliest_update = pair_last_update
+        # Check if it's time for an update
+        should_update = time_since_update >= update_interval_seconds
         
-        # Determine if it's time to update based on the earliest last update
-        if earliest_update is not None:
-            time_since_update = (current_time - earliest_update).total_seconds()
-            update_interval_seconds = lookback_minutes * 60
-            should_update = time_since_update >= update_interval_seconds
+        # Force an update if the button was clicked
+        if "update_clicked" in st.session_state and st.session_state.update_clicked:
+            should_update = True
+            st.session_state.update_clicked = False
         
         if should_update:
             # Update all pairs
-            pairs_updated = batch_update_all_pairs()
-            # Force refresh if any pairs were updated
-            if pairs_updated:
-                st.rerun()
+            with st.spinner("Updating all pairs..."):
+                pairs_updated = batch_update_all_pairs()
+                # Update the global update timestamp
+                st.session_state.last_global_update = current_time
+                
+                # Show notification if pairs were updated
+                if pairs_updated:
+                    st.warning(f"Parameter updates available for {len(pairs_updated)} pairs")
+                
+                # Log the update to help with debugging
+                st.sidebar.success(f"Data updated at {current_time.strftime('%H:%M:%S')}")
+                
+            # Force refresh
+            st.rerun()
     
     # Prune history for all pairs if needed
     for pair_name in st.session_state.monitored_pairs:
