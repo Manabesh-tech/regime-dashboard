@@ -1301,6 +1301,36 @@ def heartbeat():
     </div>
     """, unsafe_allow_html=True)
 
+# Function to add auto-update capability with time-based updates
+def auto_update_timer():
+    """Force updates based on time interval regardless of other conditions."""
+    if 'last_auto_refresh' not in st.session_state:
+        st.session_state.last_auto_refresh = datetime.now()
+    
+    # Get current time and calculate time since last refresh
+    current_time = datetime.now()
+    time_since_refresh = (current_time - st.session_state.last_auto_refresh).total_seconds()
+    
+    # If auto-update is on and enough time has passed, update the pairs and rerun
+    if st.session_state.auto_update and len(st.session_state.monitored_pairs) > 0:
+        # Get the update interval in seconds
+        update_interval_seconds = st.session_state.lookback_minutes * 60
+        
+        # Check if enough time has passed for an update
+        if time_since_refresh >= update_interval_seconds:
+            # Update all pairs
+            pairs_updated = batch_update_all_pairs()
+            
+            # Update the last refresh time
+            st.session_state.last_auto_refresh = current_time
+            st.session_state.last_global_update = current_time
+            
+            # Log the update
+            st.sidebar.success(f"Auto-updated at {current_time.strftime('%H:%M:%S')}")
+            
+            # Force page refresh
+            st.rerun()
+
 def main():
     # Initialize all session state variables to prevent duplicates
     init_session_state()
@@ -1320,6 +1350,9 @@ def main():
     now_utc = datetime.now(pytz.utc)
     now_sg = now_utc.astimezone(singapore_tz)
     st.markdown(f"**Current Singapore Time:** {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    # Force auto-update if needed (must be at the beginning to ensure it runs)
+    auto_update_timer()
     
     # Sidebar controls
     st.sidebar.markdown('<div class="subheader-style">Trading Pair Configuration</div>', unsafe_allow_html=True)
@@ -1346,7 +1379,7 @@ def main():
     update_interval_selection = st.sidebar.radio(
         "Update Interval",
         options=list(update_interval_options.keys()),
-        index=0,  # Default to 1 minute for more frequent updates
+        index=0,  # Default to 1 minute for faster testing
         key="interval_radio"
     )
     
@@ -1367,7 +1400,11 @@ def main():
         st.session_state.view_mode = "Pairs Overview"
         
         # Reset the timer for auto-update
-        st.session_state.last_global_update = datetime.now()
+        if 'last_auto_refresh' not in st.session_state:
+            st.session_state.last_auto_refresh = datetime.now()
+        if 'last_global_update' not in st.session_state:
+            st.session_state.last_global_update = datetime.now()
+            
         st.rerun()
     
     # Add a timestamp to track the last global update
@@ -1384,13 +1421,12 @@ def main():
         key="batch_update_button",
         disabled=len(st.session_state.monitored_pairs) == 0
     ):
-        # Set a flag to force an update regardless of timer
-        st.session_state.update_clicked = True
-        
         # Perform the immediate update
         with st.spinner("Updating all pairs..."):
             pairs_updated = batch_update_all_pairs()
+            # Update both timestamps
             st.session_state.last_global_update = datetime.now()
+            st.session_state.last_auto_refresh = datetime.now() 
             
             if pairs_updated:
                 st.sidebar.warning(f"Parameter updates available for {len(pairs_updated)} pairs")
@@ -1401,7 +1437,6 @@ def main():
         
     # Show auto-update status and last update time
     current_time = datetime.now()
-    time_since_update = (current_time - st.session_state.last_global_update).total_seconds()
     
     # Auto-update toggle with more visible status
     auto_update_col1, auto_update_col2 = st.sidebar.columns([3, 2])
@@ -1409,14 +1444,18 @@ def main():
     with auto_update_col1:
         st.session_state.auto_update = st.checkbox(
             "Auto-update data", 
-            value=st.session_state.auto_update,
+            value=True,  # Default to ON
             help="Automatically fetch new edge data at the specified interval",
             key="auto_update_checkbox"
         )
     
-    # Calculate next update time and display
+    # Calculate time to next update
+    if 'last_auto_refresh' not in st.session_state:
+        st.session_state.last_auto_refresh = datetime.now()
+    
+    time_since_refresh = (current_time - st.session_state.last_auto_refresh).total_seconds()
     update_interval_seconds = lookback_minutes * 60
-    time_to_next_update = max(0, update_interval_seconds - time_since_update)
+    time_to_next_update = max(0, update_interval_seconds - time_since_refresh)
     
     with auto_update_col2:
         if st.session_state.auto_update:
@@ -1426,7 +1465,8 @@ def main():
                 st.info(f"Next update in {int(time_to_next_update/60)} min")
     
     # Show last update time
-    if st.session_state.last_global_update:
+    if 'last_auto_refresh' in st.session_state:
+        time_since_update = (current_time - st.session_state.last_auto_refresh).total_seconds()
         if time_since_update < 60:
             update_text = f"Last update: {int(time_since_update)} seconds ago"
         elif time_since_update < 3600:
@@ -1434,6 +1474,10 @@ def main():
         else:
             update_text = f"Last update: {int(time_since_update/3600)} hours ago"
         st.sidebar.text(update_text)
+    
+    # Add a manual debug refresh button (only for debugging)
+    if st.sidebar.button("Force Refresh (Debug)", key="debug_refresh"):
+        st.rerun()
     
     # Sensitivity parameters section
     st.sidebar.markdown('<div class="subheader-style">Sensitivity Parameters</div>', unsafe_allow_html=True)
@@ -1504,22 +1548,6 @@ def main():
         # Default to overview if mode is invalid
         st.session_state.view_mode = "Pairs Overview"
         render_pair_overview()
-    
-    # Auto-update logic - check if it's time for an update
-    if st.session_state.auto_update and len(st.session_state.monitored_pairs) > 0:
-        # Check if it's time for an update
-        if time_since_update >= update_interval_seconds:
-            # Update all pairs
-            with st.spinner("Updating all pairs..."):
-                pairs_updated = batch_update_all_pairs()
-                # Update the global update timestamp
-                st.session_state.last_global_update = current_time
-                
-            # Log the update to help with debugging
-            st.sidebar.success(f"Auto-updated at {current_time.strftime('%H:%M:%S')}")
-            
-            # Force refresh
-            st.rerun()
     
     # Prune history for all pairs if needed
     for pair_name in st.session_state.monitored_pairs:
