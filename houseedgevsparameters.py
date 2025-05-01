@@ -348,32 +348,43 @@ def calculate_fee_for_move(move_pct, buffer_rate, position_multiplier, rate_mult
 
 # Function to update buffer rate based on edge comparison
 def update_buffer_rate(current_buffer, edge, edge_ref, max_leverage, alpha_up=0.1, alpha_down=0.02):
-    """
-    Update buffer_rate based on edge comparison.
-    Increases sharply when edge declines, decreases slowly when edge increases.
-    """
     delta = edge - edge_ref
     upper_bound = 0.7 / max_leverage
     lower_bound = 0.0001
     
+    # Calculate a normalized delta relative to the reference edge
+    # This scales the adjustment to the magnitude of the reference edge
+    if edge_ref != 0:
+        normalized_delta = delta / abs(edge_ref)  # Scale relative to reference
+    else:
+        normalized_delta = delta  # Fallback if reference is zero
+    
+    # Apply caps to avoid extreme adjustments
+    normalized_delta = max(min(normalized_delta, 1.0), -1.0)
+    
     # Asymmetric adjustment: fast up, slow down
-    adjustment = alpha_up * abs(delta) if delta < 0 else -alpha_down * delta
+    adjustment = alpha_up * abs(normalized_delta) * current_buffer if normalized_delta < 0 else -alpha_down * normalized_delta * current_buffer
     
     return max(lower_bound, min(upper_bound, current_buffer + adjustment))
 
 # Function to update position multiplier based on edge comparison
 def update_position_multiplier(current_multiplier, edge, edge_ref, alpha_up=0.02, alpha_down=0.1):
-    """
-    Update position_multiplier based on edge comparison.
-    Decreases sharply when edge declines, increases slowly when edge increases.
-    """
     delta = edge - edge_ref
     upper_bound = 14000
     lower_bound = 1
     
+    # Calculate a normalized delta relative to the reference edge
+    # This scales the adjustment to the magnitude of the reference edge
+    if edge_ref != 0:
+        normalized_delta = delta / abs(edge_ref)  # Scale relative to reference
+    else:
+        normalized_delta = delta  # Fallback if reference is zero
+    
+    # Apply caps to avoid extreme adjustments
+    normalized_delta = max(min(normalized_delta, 1.0), -1.0)
+    
     # Asymmetric adjustment: fast down, slow up
-    adjustment = -alpha_down * abs(delta) * current_multiplier if delta < 0 else \
-                  alpha_up * delta * current_multiplier
+    adjustment = -alpha_down * abs(normalized_delta) * current_multiplier if normalized_delta < 0 else alpha_up * normalized_delta * current_multiplier
     
     return max(lower_bound, min(upper_bound, current_multiplier + adjustment))
 
