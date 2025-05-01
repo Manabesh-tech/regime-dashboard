@@ -450,7 +450,7 @@ def init_session_state():
         st.session_state.current_pair = None
     
     if 'lookback_minutes' not in st.session_state:
-        st.session_state.lookback_minutes = 10  # Default to 10 minutes
+        st.session_state.lookback_minutes = 5  # Default to 5 minutes for better testing
     
     if 'buffer_alpha_up' not in st.session_state:
         st.session_state.buffer_alpha_up = 0.1
@@ -468,23 +468,31 @@ def init_session_state():
         st.session_state.history_length = 100  # Default history length
     
     if 'auto_update' not in st.session_state:
-        st.session_state.auto_update = False
+        st.session_state.auto_update = True  # Enable auto-update by default
     
     if 'view_mode' not in st.session_state:
         st.session_state.view_mode = "Pairs Overview"  # Default view mode
     
     # Ensure next_update_time and last_update_time are aware of timezone
     if 'next_update_time' not in st.session_state:
-        st.session_state.next_update_time = datetime.now(pytz.utc) + timedelta(minutes=1)
+        st.session_state.next_update_time = datetime.now(pytz.utc) + timedelta(minutes=5)
+    elif st.session_state.next_update_time.tzinfo is None:
+        st.session_state.next_update_time = st.session_state.next_update_time.replace(tzinfo=pytz.utc)
     
     if 'last_update_time' not in st.session_state:
         st.session_state.last_update_time = datetime.now(pytz.utc)
+    elif st.session_state.last_update_time.tzinfo is None:
+        st.session_state.last_update_time = st.session_state.last_update_time.replace(tzinfo=pytz.utc)
     
     if 'last_auto_refresh' not in st.session_state:
         st.session_state.last_auto_refresh = datetime.now(pytz.utc)
+    elif st.session_state.last_auto_refresh.tzinfo is None:
+        st.session_state.last_auto_refresh = st.session_state.last_auto_refresh.replace(tzinfo=pytz.utc)
     
     if 'last_global_update' not in st.session_state:
         st.session_state.last_global_update = datetime.now(pytz.utc)
+    elif st.session_state.last_global_update.tzinfo is None:
+        st.session_state.last_global_update = st.session_state.last_global_update.replace(tzinfo=pytz.utc)
 
 # Function to get current time in Singapore timezone
 def get_sg_time():
@@ -1395,18 +1403,6 @@ def render_pair_monitor(pair_name):
         st.session_state.current_pair = None
         st.rerun()
 
-# Add a heartbeat function to prevent browser sleep
-def heartbeat():
-    """Add a hidden heartbeat to prevent browser sleep."""
-    current_time = datetime.now(pytz.utc)
-    
-    # Create a hidden element that changes every second
-    st.markdown(f"""
-    <div style="display: none;">
-        Heartbeat: {current_time.timestamp()}
-    </div>
-    """, unsafe_allow_html=True)
-
 # Function to add auto-update capability with time-based updates
 def auto_update_timer():
     """Force updates based on time interval regardless of other conditions."""
@@ -1423,29 +1419,43 @@ def auto_update_timer():
         
     time_since_refresh = (current_time - st.session_state.last_auto_refresh).total_seconds()
     
-    # If auto-update is on and enough time has passed, update the pairs and rerun
-    if st.session_state.auto_update and len(st.session_state.monitored_pairs) > 0:
-        # Get the update interval in seconds
-        update_interval_seconds = st.session_state.lookback_minutes * 60
+    # Get the update interval in seconds
+    update_interval_seconds = st.session_state.lookback_minutes * 60
+    
+    # If enough time has passed, update the pairs and rerun
+    if len(st.session_state.monitored_pairs) > 0 and time_since_refresh >= update_interval_seconds:
+        # Update all pairs
+        pairs_updated = batch_update_all_pairs()
         
-        # Check if enough time has passed for an update
-        if time_since_refresh >= update_interval_seconds:
-            # Update all pairs
-            pairs_updated = batch_update_all_pairs()
-            
-            # Update the last refresh time
-            st.session_state.last_auto_refresh = current_time
-            st.session_state.last_global_update = current_time
-            
-            # Log the update
-            st.sidebar.success(f"Auto-updated at {current_time.strftime('%H:%M:%S')}")
-            
-            # Force page refresh
-            st.rerun()
+        # Update the last refresh time
+        st.session_state.last_auto_refresh = current_time
+        st.session_state.last_update_time = current_time
+        st.session_state.next_update_time = current_time + timedelta(minutes=st.session_state.lookback_minutes)
+        
+        # Log the update
+        print(f"Auto-update triggered at {current_time.strftime('%H:%M:%S')} (UTC)")
+        
+        # Force page refresh
+        st.rerun()
+
+# Add a heartbeat function to prevent browser sleep
+def heartbeat():
+    """Add a hidden heartbeat to prevent browser sleep."""
+    current_time = datetime.now(pytz.utc)
+    
+    # Create a hidden element that changes every second
+    st.markdown(f"""
+    <div style="display: none;">
+        Heartbeat: {current_time.timestamp()}
+    </div>
+    """, unsafe_allow_html=True)
 
 def main():
     # Initialize all session state variables to prevent duplicates
     init_session_state()
+    
+    # Run auto-update check at the very beginning
+    auto_update_timer()
     
     # Title and description
     st.markdown('<div class="header-style">House Edge Parameter Adjustment Dashboard</div>', unsafe_allow_html=True)
@@ -1491,42 +1501,21 @@ def main():
     update_interval_selection = st.sidebar.radio(
         "Update Interval",
         options=list(update_interval_options.keys()),
-        index=0,  # Default to 1 minute for faster testing
+        index=1,  # Default to 5 minutes
         key="interval_radio"
     )
     
-    lookback_minutes = update_interval_options[update_interval_selection]
-    st.session_state.lookback_minutes = lookback_minutes
-    
-    # Check if it's time for an update (directly in the main flow)
-    current_time = datetime.now(pytz.utc)
-    
-    # Ensure next_update_time is timezone-aware
-    if st.session_state.next_update_time.tzinfo is None:
-        st.session_state.next_update_time = st.session_state.next_update_time.replace(tzinfo=pytz.utc)
-    
-    if current_time >= st.session_state.next_update_time and st.session_state.monitored_pairs:
-        # It's time for an update
-        with update_metrics_container:
-            st.info(f"Updating data... ({current_time.strftime('%H:%M:%S')})")
-            
-        # Update all monitored pairs
-        pairs_updated = batch_update_all_pairs()
-        
-        # Update timestamps
+    # Update the lookback minutes - if changed, reset the timer
+    new_lookback_minutes = update_interval_options[update_interval_selection]
+    if 'lookback_minutes' in st.session_state and st.session_state.lookback_minutes != new_lookback_minutes:
+        # Reset the update timers when interval changes
+        current_time = datetime.now(pytz.utc)
         st.session_state.last_update_time = current_time
-        st.session_state.next_update_time = current_time + timedelta(minutes=lookback_minutes)
-        
-        with update_metrics_container:
-            st.success(f"Data updated at {current_time.strftime('%H:%M:%S')}!")
-            
-            # If any pairs need parameter updates, show a warning
-            if pairs_updated:
-                st.warning(f"Parameter updates available for {len(pairs_updated)} pairs")
-        
-        # Force a rerun to refresh the UI
-        time.sleep(1)  # Small delay to ensure the message is seen
-        st.rerun()
+        st.session_state.next_update_time = current_time + timedelta(minutes=new_lookback_minutes)
+        st.session_state.last_auto_refresh = current_time
+    
+    # Set the lookback minutes
+    st.session_state.lookback_minutes = new_lookback_minutes
     
     # Display update status in the container with debug info
     with update_metrics_container:
@@ -1538,18 +1527,25 @@ def main():
                 display_last_update = st.session_state.last_update_time.replace(tzinfo=pytz.utc)
             else:
                 display_last_update = st.session_state.last_update_time
-                # Convert to Singapore time for display
-            singapore_tz = pytz.timezone('Asia/Singapore')
-            display_last_update = display_last_update.astimezone(singapore_tz)    
                 
-            st.markdown(f"**Last Update:** {display_last_update.strftime('%H:%M:%S')}")
+            # Convert to Singapore time for display
+            singapore_tz = pytz.timezone('Asia/Singapore')
+            display_last_update_sg = display_last_update.astimezone(singapore_tz)
+                
+            st.markdown(f"**Last Update:** {display_last_update_sg.strftime('%H:%M:%S')}")
             
         with col2:
+            # Get current time for comparison
+            current_time = datetime.now(pytz.utc)
+            
             # Ensure next_update_time is timezone-aware for comparison
             if st.session_state.next_update_time.tzinfo is None:
                 next_update_time = st.session_state.next_update_time.replace(tzinfo=pytz.utc)
             else:
                 next_update_time = st.session_state.next_update_time
+            
+            # Convert to Singapore time for display
+            next_update_time_sg = next_update_time.astimezone(singapore_tz)
                 
             if next_update_time > current_time:
                 time_to_next = (next_update_time - current_time).total_seconds()
@@ -1557,8 +1553,12 @@ def main():
                     st.markdown(f"**Next Update:** {int(time_to_next)} seconds")
                 else:
                     st.markdown(f"**Next Update:** {int(time_to_next/60)} minutes")
+                    
+                # Show actual next update time
+                st.markdown(f"**Next Update Time:** {next_update_time_sg.strftime('%H:%M:%S')} (SG)")
             else:
                 st.markdown("**Next Update:** Due now")
+                st.markdown(f"**Next Update Time:** {next_update_time_sg.strftime('%H:%M:%S')} (SG)")
                 
         with col3:
             if st.button("Update Now", key="force_update"):
@@ -1570,18 +1570,30 @@ def main():
                 pairs_updated = batch_update_all_pairs()
                 
                 # Update timestamps
+                current_time = datetime.now(pytz.utc)
                 st.session_state.last_update_time = current_time
-                st.session_state.next_update_time = current_time + timedelta(minutes=lookback_minutes)
+                st.session_state.next_update_time = current_time + timedelta(minutes=st.session_state.lookback_minutes)
+                st.session_state.last_auto_refresh = current_time
                 
                 # Rerun to refresh
                 st.rerun()
                 
         # Add debug info about auto-update status
-        st.info("""
+        update_debug_info = f"""
         **Auto-Update Status:** The dashboard will automatically update at the interval 
-        selected in the sidebar (1, 5, or 10 minutes). The next update will happen at the 
+        selected in the sidebar ({st.session_state.lookback_minutes} minutes). The next update will happen at the 
         time shown above without any manual action needed.
-        """)
+        
+        **Debug Info:**
+        - Current Time (UTC): {current_time.strftime('%H:%M:%S')}
+        - Current Time (SG): {current_time.astimezone(singapore_tz).strftime('%H:%M:%S')}
+        - Last Update (UTC): {display_last_update.strftime('%H:%M:%S')}
+        - Last Update (SG): {display_last_update_sg.strftime('%H:%M:%S')}
+        - Next Update (UTC): {next_update_time.strftime('%H:%M:%S')}
+        - Next Update (SG): {next_update_time_sg.strftime('%H:%M:%S')}
+        - Time Until Next Update: {int((next_update_time - current_time).total_seconds())} seconds
+        """
+        st.info(update_debug_info)
         
         # Debug section to verify edge data
         if st.session_state.monitored_pairs:
@@ -1649,7 +1661,7 @@ def main():
             st.session_state.pair_data[pair_name]['fee_history'] = [(timestamp, initial_fee)]
             
             # Fetch initial reference edge based on selected lookback period
-            initial_edge = calculate_edge(pair_name, lookback_minutes)
+            initial_edge = calculate_edge(pair_name, st.session_state.lookback_minutes)
             if initial_edge is not None:
                 st.session_state.pair_data[pair_name]['reference_edge'] = initial_edge
                 st.session_state.pair_data[pair_name]['current_edge'] = initial_edge
@@ -1680,9 +1692,10 @@ def main():
             st.session_state.view_mode = "Pairs Overview"
             
             # Reset auto-update timer when adding a new pair
-            current_time = get_sg_time()
+            current_time = datetime.now(pytz.utc)
             st.session_state.last_update_time = current_time
-            st.session_state.next_update_time = current_time + timedelta(minutes=lookback_minutes)
+            st.session_state.next_update_time = current_time + timedelta(minutes=st.session_state.lookback_minutes)
+            st.session_state.last_auto_refresh = current_time
             
             st.rerun()
         except Exception as e:
@@ -1743,7 +1756,7 @@ def main():
                             st.session_state.pair_data[pair_name]['fee_history'] = [(timestamp, initial_fee)]
                             
                             # Fetch initial reference edge based on selected lookback period
-                            initial_edge = calculate_edge(pair_name, lookback_minutes)
+                            initial_edge = calculate_edge(pair_name, st.session_state.lookback_minutes)
                             if initial_edge is not None:
                                 st.session_state.pair_data[pair_name]['reference_edge'] = initial_edge
                                 st.session_state.pair_data[pair_name]['current_edge'] = initial_edge
@@ -1775,9 +1788,10 @@ def main():
                     progress_bar.progress(1.0, text="All pairs initialized!")
                     
                 # Reset auto-update timer after adding all pairs
-                current_time = get_sg_time()
+                current_time = datetime.now(pytz.utc)
                 st.session_state.last_update_time = current_time
-                st.session_state.next_update_time = current_time + timedelta(minutes=lookback_minutes)
+                st.session_state.next_update_time = current_time + timedelta(minutes=st.session_state.lookback_minutes)
+                st.session_state.last_auto_refresh = current_time
                 
                 st.sidebar.success(f"Added {pairs_added} new pairs to monitoring")
                 st.session_state.view_mode = "Pairs Overview"
@@ -1799,11 +1813,13 @@ def main():
     ):
         # Perform the immediate update
         with st.spinner("Updating all pairs..."):
+            current_time = datetime.now(pytz.utc)
             pairs_updated = batch_update_all_pairs()
             
             # Update timestamps
             st.session_state.last_update_time = current_time
-            st.session_state.next_update_time = current_time + timedelta(minutes=lookback_minutes)
+            st.session_state.next_update_time = current_time + timedelta(minutes=st.session_state.lookback_minutes)
+            st.session_state.last_auto_refresh = current_time
             
             if pairs_updated:
                 st.sidebar.warning(f"Parameter updates available for {len(pairs_updated)} pairs")
@@ -1869,6 +1885,14 @@ def main():
         key="history_length_slider"
     )
     
+    # Auto-update toggle
+    st.session_state.auto_update = st.sidebar.checkbox(
+        "Enable Auto-Update", 
+        value=st.session_state.auto_update,
+        help="Automatically update data at the selected interval",
+        key="auto_update_checkbox"
+    )
+    
     # Main content area
     # Render different views based on current mode
     if st.session_state.view_mode == "Pairs Overview":
@@ -1901,9 +1925,6 @@ def main():
     
     # Add heartbeat to prevent browser sleep
     heartbeat()
-    
-    # Check for auto-update
-    auto_update_timer()
 
 if __name__ == "__main__":
     main()
