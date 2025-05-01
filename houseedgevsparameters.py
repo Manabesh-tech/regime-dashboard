@@ -274,7 +274,7 @@ def calculate_edge(pair_name, lookback_minutes=10):
         """
         
         # Add a debug log
-        st.session_state.last_query_time = datetime.now()
+        st.session_state.last_query_time = datetime.now(pytz.utc)
         
         df = pd.read_sql(edge_query, engine)
         
@@ -472,14 +472,42 @@ def init_session_state():
     
     if 'view_mode' not in st.session_state:
         st.session_state.view_mode = "Pairs Overview"  # Default view mode
+    
+    # Ensure next_update_time and last_update_time are aware of timezone
+    if 'next_update_time' not in st.session_state:
+        st.session_state.next_update_time = datetime.now(pytz.utc) + timedelta(minutes=1)
+    
+    if 'last_update_time' not in st.session_state:
+        st.session_state.last_update_time = datetime.now(pytz.utc)
+    
+    if 'last_auto_refresh' not in st.session_state:
+        st.session_state.last_auto_refresh = datetime.now(pytz.utc)
+    
+    if 'last_global_update' not in st.session_state:
+        st.session_state.last_global_update = datetime.now(pytz.utc)
 
 # Function to get current time in Singapore timezone
 def get_sg_time():
     """Get current time in Singapore timezone."""
     singapore_tz = pytz.timezone('Asia/Singapore')
-    now_utc = datetime.now(pytz.UTC)
+    now_utc = datetime.now(pytz.utc)
     now_sg = now_utc.astimezone(singapore_tz)
     return now_sg
+
+# Function to convert naive datetime to Singapore timezone
+def to_singapore_time(dt):
+    """Convert naive datetime to Singapore timezone datetime."""
+    if dt is None:
+        return None
+    
+    # Check if datetime is already timezone-aware
+    if dt.tzinfo is None:
+        # Make it timezone-aware by assuming it's UTC
+        dt = dt.replace(tzinfo=pytz.utc)
+    
+    # Convert to Singapore time
+    singapore_tz = pytz.timezone('Asia/Singapore')
+    return dt.astimezone(singapore_tz)
 
 # Function to format time display consistently
 def format_time_display(dt):
@@ -504,7 +532,11 @@ def process_edge_data(pair_name, timestamp=None):
     init_pair_state(pair_name)
     
     if timestamp is None:
-        timestamp = get_singapore_time()
+        timestamp = get_sg_time()
+    elif timestamp.tzinfo is None:
+        # Ensure timestamp is timezone-aware
+        timestamp = timestamp.replace(tzinfo=pytz.utc)
+        timestamp = to_singapore_time(timestamp)
     
     # Fetch new edge
     new_edge = calculate_edge(pair_name, st.session_state.lookback_minutes)
@@ -573,7 +605,7 @@ def update_display_parameters(pair_name):
         st.session_state.pair_data[pair_name]['proposed_position_multiplier'] is not None):
         
         # Update parameters
-        timestamp = get_singapore_time()
+        timestamp = get_sg_time()
         
         # Update buffer rate
         old_buffer = st.session_state.pair_data[pair_name]['buffer_rate']
@@ -614,7 +646,7 @@ def reset_to_reference_parameters(pair_name):
         st.session_state.pair_data[pair_name]['reference_position_multiplier'] is not None):
         
         # Update parameters
-        timestamp = get_singapore_time()
+        timestamp = get_sg_time()
         
         # Update buffer rate
         old_buffer = st.session_state.pair_data[pair_name]['buffer_rate']
@@ -903,6 +935,9 @@ def render_pair_overview():
     # Create a grid layout for pair cards (3 columns)
     columns = st.columns(3)
     
+    # Get current time in Singapore timezone for comparison
+    current_time = get_sg_time()
+    
     # Render a card for each monitored pair
     for i, pair_name in enumerate(st.session_state.monitored_pairs):
         with columns[i % 3]:
@@ -933,9 +968,12 @@ def render_pair_overview():
                 delta_display = "N/A"
                 delta_color = "gray"
             
-            # Calculate last update time - format in Singapore time
+            # Calculate last update time - ensure it's in Singapore time for comparison
             if last_update:
-                sg_last_update = to_singapore_time(last_update)
+                sg_last_update = last_update
+                if sg_last_update.tzinfo is None:
+                    sg_last_update = to_singapore_time(sg_last_update)
+                    
                 time_since_update = current_time - sg_last_update
                 if time_since_update.total_seconds() < 60:
                     update_display = f"{int(time_since_update.total_seconds())} seconds ago"
@@ -1003,9 +1041,9 @@ def render_pair_overview():
 def batch_update_all_pairs():
     """Process edge data for all monitored pairs."""
     if not st.session_state.monitored_pairs:
-        return
+        return []
     
-    timestamp = datetime.now()
+    timestamp = datetime.now(pytz.utc)
     pairs_updated = []
     
     for pair_name in st.session_state.monitored_pairs:
@@ -1360,7 +1398,7 @@ def render_pair_monitor(pair_name):
 # Add a heartbeat function to prevent browser sleep
 def heartbeat():
     """Add a hidden heartbeat to prevent browser sleep."""
-    current_time = datetime.now()
+    current_time = datetime.now(pytz.utc)
     
     # Create a hidden element that changes every second
     st.markdown(f"""
@@ -1372,11 +1410,17 @@ def heartbeat():
 # Function to add auto-update capability with time-based updates
 def auto_update_timer():
     """Force updates based on time interval regardless of other conditions."""
+    # Make sure last_auto_refresh is timezone-aware
     if 'last_auto_refresh' not in st.session_state:
-        st.session_state.last_auto_refresh = datetime.now()
+        st.session_state.last_auto_refresh = datetime.now(pytz.utc)
     
     # Get current time and calculate time since last refresh
-    current_time = datetime.now()
+    current_time = datetime.now(pytz.utc)
+    
+    # Ensure last_auto_refresh is timezone-aware
+    if st.session_state.last_auto_refresh.tzinfo is None:
+        st.session_state.last_auto_refresh = st.session_state.last_auto_refresh.replace(tzinfo=pytz.utc)
+        
     time_since_refresh = (current_time - st.session_state.last_auto_refresh).total_seconds()
     
     # If auto-update is on and enough time has passed, update the pairs and rerun
@@ -1454,15 +1498,13 @@ def main():
     lookback_minutes = update_interval_options[update_interval_selection]
     st.session_state.lookback_minutes = lookback_minutes
     
-    # Initialize session state for auto-updates if not already done
-    if 'next_update_time' not in st.session_state:
-        st.session_state.next_update_time = datetime.now() + timedelta(minutes=1)
-        
-    if 'last_update_time' not in st.session_state:
-        st.session_state.last_update_time = datetime.now()
-        
     # Check if it's time for an update (directly in the main flow)
-    current_time = datetime.now()
+    current_time = datetime.now(pytz.utc)
+    
+    # Ensure next_update_time is timezone-aware
+    if st.session_state.next_update_time.tzinfo is None:
+        st.session_state.next_update_time = st.session_state.next_update_time.replace(tzinfo=pytz.utc)
+    
     if current_time >= st.session_state.next_update_time and st.session_state.monitored_pairs:
         # It's time for an update
         with update_metrics_container:
@@ -1491,11 +1533,23 @@ def main():
         col1, col2, col3 = st.columns(3)
         
         with col1:
-            st.markdown(f"**Last Update:** {st.session_state.last_update_time.strftime('%H:%M:%S')}")
+            # Ensure last_update_time is timezone-aware for display
+            if st.session_state.last_update_time.tzinfo is None:
+                display_last_update = st.session_state.last_update_time.replace(tzinfo=pytz.utc)
+            else:
+                display_last_update = st.session_state.last_update_time
+                
+            st.markdown(f"**Last Update:** {display_last_update.strftime('%H:%M:%S')}")
             
         with col2:
-            if st.session_state.next_update_time > current_time:
-                time_to_next = (st.session_state.next_update_time - current_time).total_seconds()
+            # Ensure next_update_time is timezone-aware for comparison
+            if st.session_state.next_update_time.tzinfo is None:
+                next_update_time = st.session_state.next_update_time.replace(tzinfo=pytz.utc)
+            else:
+                next_update_time = st.session_state.next_update_time
+                
+            if next_update_time > current_time:
+                time_to_next = (next_update_time - current_time).total_seconds()
                 if time_to_next < 60:
                     st.markdown(f"**Next Update:** {int(time_to_next)} seconds")
                 else:
@@ -1841,6 +1895,12 @@ def main():
             
             if len(pair_data.get('fee_history', [])) > st.session_state.history_length:
                 pair_data['fee_history'] = pair_data['fee_history'][-st.session_state.history_length:]
+    
+    # Add heartbeat to prevent browser sleep
+    heartbeat()
+    
+    # Check for auto-update
+    auto_update_timer()
 
 if __name__ == "__main__":
     main()
