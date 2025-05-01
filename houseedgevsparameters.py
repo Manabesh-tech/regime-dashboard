@@ -1605,7 +1605,7 @@ def render_pair_monitor(pair_name):
             # Calculate current and new fees - ensure proper calculation
             current_fee_amount, current_fee_pct = calculate_fee_for_move(
                 0.1, 
-                st.session_state.pair_data[pair_name]['buffer_rate'], 
+                st.session_state.pair_data[pair_name]['pnl_base_rate'], 
                 st.session_state.pair_data[pair_name]['position_multiplier'],
                 rate_multiplier,
                 rate_exponent
