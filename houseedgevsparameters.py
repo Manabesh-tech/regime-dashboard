@@ -1309,6 +1309,7 @@ def render_pair_monitor(pair_name):
             delta_color = "down" if edge_delta and edge_delta < 0 else "up"
             delta_str = f"<span class='{delta_color}'>{edge_delta:.4%}</span>" if edge_delta is not None else ""
             st.markdown(f"**Current Edge:** {st.session_state.pair_data[pair_name]['current_edge']:.4%} {delta_str}", unsafe_allow_html=True)
+        # Continued from the previous part
         else:
             st.markdown("**Current Edge:** N/A")
     
@@ -1468,28 +1469,64 @@ def render_pair_monitor(pair_name):
         st.session_state.view_mode = "Pairs Overview"
         st.session_state.current_pair = None
         st.rerun()
+
 # Handle simulated data mode for testing without database
 def enable_simulated_data_mode():
     """Enable simulated data mode for testing without database connection"""
     st.session_state['simulated_data_mode'] = True
     print("Simulated data mode enabled")
 
-# Main entry point
-if __name__ == "__main__":
-    # Check if we're in debug mode (no database connection)
-    try:
-        engine = init_connection()
-        if engine is None:
-            # No database connection, enable simulated data mode
-            if 'simulated_data_mode' not in st.session_state:
-                enable_simulated_data_mode()
-    except:
-        # Error connecting to database, enable simulated data mode
-        if 'simulated_data_mode' not in st.session_state:
-            enable_simulated_data_mode()
+# Function to update all monitored pairs on each page load
+def update_pairs_on_load():
+    """
+    Updates all monitored pairs on each page load when needed.
+    This ensures edge data is always fresh.
+    """
+    # Only update if we have monitored pairs
+    if not st.session_state.get('monitored_pairs', []):
+        return False
     
-    # Run the main application
-    main()def main():
+    # Get current time in UTC
+    current_time = datetime.now(pytz.utc)
+    
+    # Initialize or fix last_update_time if needed
+    if 'last_update_time' not in st.session_state:
+        st.session_state.last_update_time = current_time
+    elif st.session_state.last_update_time.tzinfo is None:
+        st.session_state.last_update_time = st.session_state.last_update_time.replace(tzinfo=pytz.utc)
+    
+    # Calculate time since last update in minutes
+    minutes_since_last_update = (current_time - st.session_state.last_update_time).total_seconds() / 60
+    
+    # Get current selected interval (always use current value, not stored value)
+    selected_interval = st.session_state.get('interval_radio', "1 minute")
+    interval_mapping = {"1 minute": 1, "5 minutes": 5, "10 minutes": 10}
+    current_lookback_mins = interval_mapping.get(selected_interval, 1)
+    
+    # Check if enough time has passed since last update
+    # Also force update if the interval has changed
+    needs_update = (minutes_since_last_update >= current_lookback_mins) or \
+                    (st.session_state.get('lookback_minutes') != current_lookback_mins)
+    
+    if needs_update:
+        print(f"Updating pairs on page load. Last update was {minutes_since_last_update:.2f} minutes ago.")
+        
+        # Update the session state with the current interval
+        st.session_state.lookback_minutes = current_lookback_mins
+        
+        # Update all pairs
+        pairs_updated = batch_update_all_pairs()
+        
+        # Update timing information
+        st.session_state.last_update_time = current_time
+        st.session_state.next_update_time = current_time + timedelta(minutes=current_lookback_mins)
+        
+        # Update successful
+        return True
+    
+    return False
+
+def main():
     # Initialize all session state variables to prevent duplicates
     init_session_state()
     
@@ -1959,52 +1996,21 @@ if __name__ == "__main__":
                 pair_data['multiplier_history'] = pair_data['multiplier_history'][-st.session_state.history_length:]
             
             if len(pair_data.get('fee_history', [])) > st.session_state.history_length:
-                pair_data['fee_history'] = pair_data['fee_history'][-st.session_state.history_length:]# Function to update all monitored pairs on each page load
-def update_pairs_on_load():
-    """
-    Updates all monitored pairs on each page load when needed.
-    This ensures edge data is always fresh.
-    """
-    # Only update if we have monitored pairs
-    if not st.session_state.get('monitored_pairs', []):
-        return False
+                pair_data['fee_history'] = pair_data['fee_history'][-st.session_state.history_length:]
+
+# Main entry point
+if __name__ == "__main__":
+    # Check if we're in debug mode (no database connection)
+    try:
+        engine = init_connection()
+        if engine is None:
+            # No database connection, enable simulated data mode
+            if 'simulated_data_mode' not in st.session_state:
+                enable_simulated_data_mode()
+    except:
+        # Error connecting to database, enable simulated data mode
+        if 'simulated_data_mode' not in st.session_state:
+            enable_simulated_data_mode()
     
-    # Get current time in UTC
-    current_time = datetime.now(pytz.utc)
-    
-    # Initialize or fix last_update_time if needed
-    if 'last_update_time' not in st.session_state:
-        st.session_state.last_update_time = current_time
-    elif st.session_state.last_update_time.tzinfo is None:
-        st.session_state.last_update_time = st.session_state.last_update_time.replace(tzinfo=pytz.utc)
-    
-    # Calculate time since last update in minutes
-    minutes_since_last_update = (current_time - st.session_state.last_update_time).total_seconds() / 60
-    
-    # Get current selected interval (always use current value, not stored value)
-    selected_interval = st.session_state.get('interval_radio', "1 minute")
-    interval_mapping = {"1 minute": 1, "5 minutes": 5, "10 minutes": 10}
-    current_lookback_mins = interval_mapping.get(selected_interval, 1)
-    
-    # Check if enough time has passed since last update
-    # Also force update if the interval has changed
-    needs_update = (minutes_since_last_update >= current_lookback_mins) or \
-                    (st.session_state.get('lookback_minutes') != current_lookback_mins)
-    
-    if needs_update:
-        print(f"Updating pairs on page load. Last update was {minutes_since_last_update:.2f} minutes ago.")
-        
-        # Update the session state with the current interval
-        st.session_state.lookback_minutes = current_lookback_mins
-        
-        # Update all pairs
-        pairs_updated = batch_update_all_pairs()
-        
-        # Update timing information
-        st.session_state.last_update_time = current_time
-        st.session_state.next_update_time = current_time + timedelta(minutes=current_lookback_mins)
-        
-        # Update successful
-        return True
-    
-    return Falseimport streamlit as st        
+    # Run the main application
+    main()
