@@ -199,7 +199,7 @@ def fetch_current_parameters(pair_name):
         }
 
 # Calculate edge for a specific pair
-@st.cache_data(ttl=30)  # Cache for 30 seconds to avoid repeated identical queries
+# Removing the cache to ensure fresh data every time
 def calculate_edge(pair_name, lookback_minutes=10):
     """
     Calculate house edge for a specific pair using the SQL query from the first file.
@@ -221,6 +221,9 @@ def calculate_edge(pair_name, lookback_minutes=10):
         # Convert to UTC for database query
         start_time_utc = start_time_sg.astimezone(pytz.utc)
         end_time_utc = now_sg.astimezone(pytz.utc)
+        
+        # Add debug logging
+        print(f"Calculating edge for {pair_name} from {start_time_utc} to {end_time_utc}")
         
         # Query for house edge calculation
         edge_query = f"""
@@ -285,11 +288,12 @@ def calculate_edge(pair_name, lookback_minutes=10):
         # This avoids issues with initial reference being zero
         if edge_value == 0:
             return 0.001
-        
-        # Add random small variation for testing if needed
+            
+        # For testing - uncomment this to add variation for testing
         # import random
-        # edge_value += random.uniform(-0.001, 0.001)
+        # edge_value += random.uniform(-0.002, 0.002)
         
+        print(f"Edge value for {pair_name}: {edge_value}")
         return edge_value
     
     except Exception as e:
@@ -1351,8 +1355,8 @@ def main():
     now_sg = now_utc.astimezone(singapore_tz)
     st.markdown(f"**Current Singapore Time:** {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
     
-    # Force auto-update if needed (must be at the beginning to ensure it runs)
-    auto_update_timer()
+    # Create a container that will be shown on every run at the top
+    update_metrics_container = st.container()
     
     # Sidebar controls
     st.sidebar.markdown('<div class="subheader-style">Trading Pair Configuration</div>', unsafe_allow_html=True)
@@ -1386,6 +1390,71 @@ def main():
     lookback_minutes = update_interval_options[update_interval_selection]
     st.session_state.lookback_minutes = lookback_minutes
     
+    # Initialize session state for auto-updates if not already done
+    if 'next_update_time' not in st.session_state:
+        st.session_state.next_update_time = datetime.now() + timedelta(minutes=1)
+        
+    if 'last_update_time' not in st.session_state:
+        st.session_state.last_update_time = datetime.now()
+        
+    # Check if it's time for an update (directly in the main flow)
+    current_time = datetime.now()
+    if current_time >= st.session_state.next_update_time and st.session_state.monitored_pairs:
+        # It's time for an update
+        with update_metrics_container:
+            st.info(f"Updating data... ({current_time.strftime('%H:%M:%S')})")
+            
+        # Update all monitored pairs
+        pairs_updated = batch_update_all_pairs()
+        
+        # Update timestamps
+        st.session_state.last_update_time = current_time
+        st.session_state.next_update_time = current_time + timedelta(minutes=lookback_minutes)
+        
+        with update_metrics_container:
+            st.success(f"Data updated at {current_time.strftime('%H:%M:%S')}!")
+            
+            # If any pairs need parameter updates, show a warning
+            if pairs_updated:
+                st.warning(f"Parameter updates available for {len(pairs_updated)} pairs")
+        
+        # Force a rerun to refresh the UI
+        time.sleep(1)  # Small delay to ensure the message is seen
+        st.rerun()
+    
+    # Display update status in the container
+    with update_metrics_container:
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.markdown(f"**Last Update:** {st.session_state.last_update_time.strftime('%H:%M:%S')}")
+            
+        with col2:
+            if st.session_state.next_update_time > current_time:
+                time_to_next = (st.session_state.next_update_time - current_time).total_seconds()
+                if time_to_next < 60:
+                    st.markdown(f"**Next Update:** {int(time_to_next)} seconds")
+                else:
+                    st.markdown(f"**Next Update:** {int(time_to_next/60)} minutes")
+            else:
+                st.markdown("**Next Update:** Due now")
+                
+        with col3:
+            if st.button("Update Now", key="force_update"):
+                # Force an immediate update
+                with update_metrics_container:
+                    st.info("Forcing immediate update...")
+                    
+                # Update all monitored pairs
+                pairs_updated = batch_update_all_pairs()
+                
+                # Update timestamps
+                st.session_state.last_update_time = current_time
+                st.session_state.next_update_time = current_time + timedelta(minutes=lookback_minutes)
+                
+                # Rerun to refresh
+                st.rerun()
+    
     # Initialize button
     initialize_button = st.sidebar.button(
         "Initialize Pair and Start Monitoring", 
@@ -1398,18 +1467,7 @@ def main():
         initialize_system(selected_pair, lookback_minutes)
         st.sidebar.success(f"Started monitoring for {selected_pair}")
         st.session_state.view_mode = "Pairs Overview"
-        
-        # Reset the timer for auto-update
-        if 'last_auto_refresh' not in st.session_state:
-            st.session_state.last_auto_refresh = datetime.now()
-        if 'last_global_update' not in st.session_state:
-            st.session_state.last_global_update = datetime.now()
-            
         st.rerun()
-    
-    # Add a timestamp to track the last global update
-    if 'last_global_update' not in st.session_state:
-        st.session_state.last_global_update = datetime.now()
     
     # Batch operations section
     st.sidebar.markdown('<div class="subheader-style">Batch Operations</div>', unsafe_allow_html=True)
@@ -1424,59 +1482,16 @@ def main():
         # Perform the immediate update
         with st.spinner("Updating all pairs..."):
             pairs_updated = batch_update_all_pairs()
-            # Update both timestamps
-            st.session_state.last_global_update = datetime.now()
-            st.session_state.last_auto_refresh = datetime.now() 
+            
+            # Update timestamps
+            st.session_state.last_update_time = current_time
+            st.session_state.next_update_time = current_time + timedelta(minutes=lookback_minutes)
             
             if pairs_updated:
                 st.sidebar.warning(f"Parameter updates available for {len(pairs_updated)} pairs")
             else:
                 st.sidebar.success("All pairs updated, no parameter changes needed")
         
-        st.rerun()
-        
-    # Show auto-update status and last update time
-    current_time = datetime.now()
-    
-    # Auto-update toggle with more visible status
-    auto_update_col1, auto_update_col2 = st.sidebar.columns([3, 2])
-    
-    with auto_update_col1:
-        st.session_state.auto_update = st.checkbox(
-            "Auto-update data", 
-            value=True,  # Default to ON
-            help="Automatically fetch new edge data at the specified interval",
-            key="auto_update_checkbox"
-        )
-    
-    # Calculate time to next update
-    if 'last_auto_refresh' not in st.session_state:
-        st.session_state.last_auto_refresh = datetime.now()
-    
-    time_since_refresh = (current_time - st.session_state.last_auto_refresh).total_seconds()
-    update_interval_seconds = lookback_minutes * 60
-    time_to_next_update = max(0, update_interval_seconds - time_since_refresh)
-    
-    with auto_update_col2:
-        if st.session_state.auto_update:
-            if time_to_next_update < 60:
-                st.info(f"Next update in {int(time_to_next_update)} sec")
-            else:
-                st.info(f"Next update in {int(time_to_next_update/60)} min")
-    
-    # Show last update time
-    if 'last_auto_refresh' in st.session_state:
-        time_since_update = (current_time - st.session_state.last_auto_refresh).total_seconds()
-        if time_since_update < 60:
-            update_text = f"Last update: {int(time_since_update)} seconds ago"
-        elif time_since_update < 3600:
-            update_text = f"Last update: {int(time_since_update/60)} minutes ago"
-        else:
-            update_text = f"Last update: {int(time_since_update/3600)} hours ago"
-        st.sidebar.text(update_text)
-    
-    # Add a manual debug refresh button (only for debugging)
-    if st.sidebar.button("Force Refresh (Debug)", key="debug_refresh"):
         st.rerun()
     
     # Sensitivity parameters section
@@ -1565,10 +1580,6 @@ def main():
             
             if len(pair_data.get('fee_history', [])) > st.session_state.history_length:
                 pair_data['fee_history'] = pair_data['fee_history'][-st.session_state.history_length:]
-    
-    # Add heartbeat to prevent browser sleep
-    if st.session_state.auto_update:
-        heartbeat()
 
 if __name__ == "__main__":
     main()
