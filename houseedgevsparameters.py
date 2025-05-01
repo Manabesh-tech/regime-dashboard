@@ -1010,7 +1010,7 @@ def create_fee_curve_plot(pair_name):
     init_pair_state(pair_name)
     
     # Get required parameters
-    buffer_rate = st.session_state.pair_data[pair_name]['buffer_rate']
+    base_rate = st.session_state.pair_data[pair_name]['buffer_rate']
     position_multiplier = st.session_state.pair_data[pair_name]['position_multiplier']
     rate_multiplier = st.session_state.pair_data[pair_name].get('rate_multiplier', 10000)
     rate_exponent = st.session_state.pair_data[pair_name].get('rate_exponent', 1)
@@ -1613,7 +1613,7 @@ def render_pair_monitor(pair_name):
             
             new_fee_amount, new_fee_pct = calculate_fee_for_move(
                 0.1, 
-                st.session_state.pair_data[pair_name]['proposed_buffer_rate'], 
+                st.session_state.pair_data[pair_name]['pnl_base_rate'], 
                 st.session_state.pair_data[pair_name]['proposed_position_multiplier'],
                 rate_multiplier,
                 rate_exponent
