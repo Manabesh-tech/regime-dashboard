@@ -1565,17 +1565,18 @@ def main():
     # Handle button actions
     if initialize_button:
         try:
-            initialize_system(selected_pair, lookback_minutes)
+            add_pair(selected_pair, lookback_minutes)
             st.sidebar.success(f"Started monitoring for {selected_pair}")
             st.session_state.view_mode = "Pairs Overview"
             
             # Reset auto-update timer when adding a new pair
-            st.session_state.last_update_time = get_singapore_time()
-            st.session_state.next_update_time = get_singapore_time() + timedelta(minutes=lookback_minutes)
+            current_time = datetime.now()
+            st.session_state.last_update_time = current_time
+            st.session_state.next_update_time = current_time + timedelta(minutes=lookback_minutes)
             
             st.rerun()
         except Exception as e:
-            st.sidebar.error(f"Error initializing pair: {str(e)}")
+            st.sidebar.error(f"Error adding pair: {str(e)}")
     
     if add_all_button:
         try:
@@ -1598,7 +1599,7 @@ def main():
                             progress_bar.progress(progress, text=f"Initializing {current_pair}...")
                             
                             # Initialize this pair
-                            initialize_system(current_pair, lookback_minutes)
+                            add_pair(current_pair, lookback_minutes)
                             pairs_added += 1
                         except Exception as e:
                             st.error(f"Error initializing {current_pair}: {str(e)}")
@@ -1607,8 +1608,9 @@ def main():
                     progress_bar.progress(1.0, text="All pairs initialized!")
                     
                 # Reset auto-update timer after adding all pairs
-                st.session_state.last_update_time = get_singapore_time()
-                st.session_state.next_update_time = get_singapore_time() + timedelta(minutes=lookback_minutes)
+                current_time = datetime.now()
+                st.session_state.last_update_time = current_time
+                st.session_state.next_update_time = current_time + timedelta(minutes=lookback_minutes)
                 
                 st.sidebar.success(f"Added {pairs_added} new pairs to monitoring")
                 st.session_state.view_mode = "Pairs Overview"
