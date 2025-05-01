@@ -365,12 +365,6 @@ def calculate_fee_for_move(move_pct, buffer_rate, position_multiplier, rate_mult
     """
     Calculate fee for a percentage price move using the Profit Share Model formula.
     
-    Trading Fee = -1 * [1 + Rate_Multiplier * |P(t)/P(T) - 1|^Rate_Exponent] / 
-                 [1 + 10^6 * Position_Multiplier * |P(t)/P(T) - 1|^Rate_Exponent] * 
-                 [Bet_Amount * Position_Leverage / (1 - Buffer_Rate)] * (P(T) - P(t))
-    
-    Also calculates fee as a percentage of potential profit.
-    
     Args:
         move_pct: Price move percentage (positive for price increase, negative for decrease)
         buffer_rate: The buffer rate parameter (equivalent to base_rate in some documentation)
@@ -391,49 +385,33 @@ def calculate_fee_for_move(move_pct, buffer_rate, position_multiplier, rate_mult
     # Convert percentage move to decimal
     move_decimal = move_pct / 100
     
-    # Calculate initial price (P(T)) and final price (P(t))
+    # Calculate prices
     p_t = p_initial  # Starting price
     p_final = p_t * (1 + move_decimal)  # Price after move
     
-    # Calculate price difference (negative for price increase)
-    price_diff = p_t - p_final
+    # Calculate price difference
+    price_diff = p_final - p_t
     
     # Calculate absolute relative difference raised to power of rate exponent
     abs_relative_diff = abs(p_final / p_t - 1)
     abs_relative_diff_powered = abs_relative_diff ** rate_exponent
     
-    # Calculate numerator of the fee formula
-    numerator = (1 + rate_multiplier * abs_relative_diff_powered)
-    
-    # Calculate denominator of the fee formula
-    denominator = (1 + 1000000 * position_multiplier * abs_relative_diff_powered)
-    
-    # Calculate the scaling factor
-    scaling_factor = bet * leverage / (1 - buffer_rate)
-    
-    # Calculate the fee amount
-    fee_amount = -1 * (numerator / denominator) * scaling_factor * price_diff
-    
-    # Calculate hypothetical PnL without fee
-    hypothetical_pnl = p_final - p_t
-    
-    # Calculate closing price with fee
-    p_close = p_final - fee_amount
-    
-    # Calculate actual PnL with fee
-    actual_pnl = p_close - p_t
-    
-    # Calculate fee as percentage of potential profit
-    if hypothetical_pnl != 0:
-        fee_percentage = (fee_amount / abs(hypothetical_pnl)) * 100
-    else:
+    # Calculate fee percentage based on the spreadsheet model
+    if move_pct <= 0:
+        # No fee for negative price moves
         fee_percentage = 0
-    
-    # For negative price moves, fee should be zero as per spreadsheet
-    if move_pct < 0:
         fee_amount = 0
-        fee_percentage = 0
-        p_close = p_final
+    else:
+        # For positive moves, calculate fee percentage from rate_multiplier and position_multiplier
+        numerator = 1 + (rate_multiplier * abs_relative_diff_powered)
+        denominator = 1 + (1000000 * position_multiplier * abs_relative_diff_powered)
+        
+        # Calculate fee percentage relative to price move
+        fee_percentage = 100 * (numerator / denominator)
+        
+        # Calculate fee amount based on percentage
+        hypothetical_pnl = price_diff
+        fee_amount = (fee_percentage / 100) * abs(hypothetical_pnl)
     
     if debug:
         debug_info = {
@@ -452,14 +430,10 @@ def calculate_fee_for_move(move_pct, buffer_rate, position_multiplier, rate_mult
                 "price_diff": price_diff,
                 "abs_relative_diff": abs_relative_diff,
                 "abs_relative_diff_powered": abs_relative_diff_powered,
-                "numerator": numerator,
-                "denominator": denominator,
-                "scaling_factor": scaling_factor,
-                "fee_amount": fee_amount,
-                "hypothetical_pnl": hypothetical_pnl,
-                "p_close": p_close,
-                "actual_pnl": actual_pnl,
-                "fee_percentage": fee_percentage
+                "numerator": numerator if move_pct > 0 else 0,
+                "denominator": denominator if move_pct > 0 else 0,
+                "fee_percentage": fee_percentage,
+                "fee_amount": fee_amount
             }
         }
         return fee_amount, fee_percentage, debug_info
