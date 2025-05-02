@@ -583,10 +583,10 @@ def update_position_multiplier(current_multiplier, edge, edge_ref, alpha_up=0.02
     """
     # Handle edge cases safely
     if edge_ref == 0 or current_multiplier <= 0:
-        return max(1, min(14000, current_multiplier))
+        return max(1, min(1400, current_multiplier))
     
     delta = edge - edge_ref
-    upper_bound = 14000
+    upper_bound = 1400
     lower_bound = 1
     
     # Calculate normalized delta relative to reference edge
