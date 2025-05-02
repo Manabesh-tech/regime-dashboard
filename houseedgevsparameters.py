@@ -3,8 +3,6 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
-import time
-import math
 import pytz
 from sqlalchemy import create_engine, text
 
@@ -172,75 +170,256 @@ def init_connection():
 # Fetch available trading pairs
 def fetch_pairs():
     """
-    Fetch all active trading pairs.
-    Returns a list of pair names or default list.
+    Fetch all active trading pairs from the database.
+    Returns a list of pair names.
     """
-    # Always return a fixed list for now
-    return ["BTC/USDT", "ETH/USDT", "SOL/USDT", "DOGE/USDT", "XRP/USDT"]
+    engine = init_connection()
+    if not engine:
+        st.error("Failed to connect to database. Check your connection settings.")
+        return []
+    
+    try:
+        query = """
+        SELECT DISTINCT pair_name 
+        FROM public.trade_fill_fresh 
+        WHERE created_at > NOW() - INTERVAL '1 day'
+        ORDER BY pair_name
+        """
+        
+        df = pd.read_sql(query, engine)
+        if df.empty:
+            st.warning("No active trading pairs found in the database.")
+            return []
+        return df['pair_name'].tolist()
+    except Exception as e:
+        st.error(f"Error fetching pairs: {e}")
+        return []
 
 # Fetch current parameters for a specific pair
 def fetch_current_parameters(pair_name):
     """
-    Fetch current parameters for a specific pair.
+    Fetch current parameters for a specific pair from the database.
     Returns a dictionary with all parameter values needed for fee calculation.
     """
-    # Return fixed values for simulated data
-    return {
-        "buffer_rate": 0.001,
-        "position_multiplier": 1000,
-        "max_leverage": 100,
-        "rate_multiplier": 10000,
-        "rate_exponent": 1,
-        "pnl_base_rate": 0.0005
-    }
+    engine = init_connection()
+    if not engine:
+        st.error("Failed to connect to database. Check your connection settings.")
+        return {
+            "buffer_rate": 0.001,
+            "position_multiplier": 1000,
+            "max_leverage": 100,
+            "rate_multiplier": 10000,
+            "rate_exponent": 1,
+            "pnl_base_rate": 0.0005
+        }
+    
+    try:
+        query = f"""
+        SELECT
+            (leverage_config::jsonb->0->>'buffer_rate')::numeric AS buffer_rate,
+            position_multiplier,
+            max_leverage,
+            rate_multiplier,
+            rate_exponent,
+            pnl_base_rate
+        FROM
+            public.trade_pool_pairs
+        WHERE
+            pair_name = '{pair_name}'
+            AND status = 1
+        """
+        
+        df = pd.read_sql(query, engine)
+        if df.empty:
+            st.warning(f"No parameter data found for {pair_name}. Using default values.")
+            return {
+                "buffer_rate": 0.001,
+                "position_multiplier": 1000,
+                "max_leverage": 100,
+                "rate_multiplier": 10000,
+                "rate_exponent": 1,
+                "pnl_base_rate": 0.0005
+            }
+        
+        # Convert to dictionary
+        params = {
+            "buffer_rate": float(df['buffer_rate'].iloc[0]),
+            "position_multiplier": float(df['position_multiplier'].iloc[0]),
+            "max_leverage": float(df['max_leverage'].iloc[0]),
+            "rate_multiplier": float(df['rate_multiplier'].iloc[0]),
+            "rate_exponent": float(df['rate_exponent'].iloc[0]),
+            "pnl_base_rate": float(df['pnl_base_rate'].iloc[0])
+        }
+        
+        return params
+    except Exception as e:
+        st.error(f"Error fetching parameters for {pair_name}: {e}")
+        return {
+            "buffer_rate": 0.001,
+            "position_multiplier": 1000,
+            "max_leverage": 100,
+            "rate_multiplier": 10000,
+            "rate_exponent": 1,
+            "pnl_base_rate": 0.0005
+        }
 
-# Calculate edge for a specific pair
-def calculate_edge(pair_name, lookback_minutes=10):
+# Calculate edge for a specific pair using real data
+def calculate_edge_for_period(pair_name, start_time_utc, end_time_utc):
     """
-    Calculate house edge for a specific pair.
-    Returns edge value or None if calculation fails.
+    Calculate house edge for a specific pair for a given time period.
+    This function queries actual trading data from the database.
     """
-    # Generate random edge values for testing with time component
-    import random
+    engine = init_connection()
+    if not engine:
+        st.error("Failed to connect to database. Check your connection settings.")
+        return None
     
-    # Base edge value
-    base_edge = 0.001
+    try:
+        # Query for house edge calculation
+        edge_query = f"""
+        WITH pnl_data AS (
+          SELECT
+            SUM(-1 * taker_pnl * collateral_price) AS trading_pnl,
+            SUM(CASE WHEN taker_fee_mode = 1 AND taker_way IN (1, 3) THEN taker_fee * collateral_price ELSE 0 END) AS taker_fee,
+            SUM(CASE WHEN taker_way = 0 THEN -1 * funding_fee * collateral_price ELSE 0 END) AS funding_pnl,
+            SUM(taker_sl_fee * collateral_price + maker_sl_fee) AS sl_fee
+          FROM public.trade_fill_fresh
+          WHERE created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
+            AND pair_name = '{pair_name}'
+        ),
+        collateral_data AS (
+          SELECT
+            SUM(deal_vol * collateral_price) AS open_collateral
+          FROM public.trade_fill_fresh
+          WHERE taker_fee_mode = 2 AND taker_way IN (1, 3)
+            AND created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
+            AND pair_name = '{pair_name}'
+        ),
+        rebate_data AS (
+          SELECT
+            SUM(amount * coin_price) AS rebate_amount
+          FROM public.user_cashbooks
+          WHERE remark = '给邀请人返佣'
+            AND created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
+        )
+        SELECT
+          CASE
+            WHEN COALESCE(cd.open_collateral, 0) = 0 THEN 0
+            ELSE (COALESCE(pd.trading_pnl, 0) + 
+                  COALESCE(pd.taker_fee, 0) + 
+                  COALESCE(pd.funding_pnl, 0) + 
+                  COALESCE(pd.sl_fee, 0) - 
+                  COALESCE(rd.rebate_amount, 0)) / 
+                 cd.open_collateral
+          END AS house_edge,
+          COALESCE(pd.trading_pnl, 0) + 
+            COALESCE(pd.taker_fee, 0) + 
+            COALESCE(pd.funding_pnl, 0) + 
+            COALESCE(pd.sl_fee, 0) - 
+            COALESCE(rd.rebate_amount, 0) AS pnl,
+          COALESCE(cd.open_collateral, 0) AS open_collateral
+        FROM pnl_data pd
+        CROSS JOIN collateral_data cd
+        CROSS JOIN rebate_data rd
+        """
+        
+        df = pd.read_sql(edge_query, engine)
+        
+        if df.empty or pd.isna(df['house_edge'].iloc[0]):
+            st.warning(f"No trade data found for {pair_name} in the specified time period.")
+            return 0.001  # Default value when no data
+        
+        edge_value = float(df['house_edge'].iloc[0])
+        
+        # If the edge is exactly 0, set a small positive value
+        # This avoids issues with initial reference being zero
+        if edge_value == 0:
+            edge_value = 0.001
+            
+        return edge_value
     
-    # Add variation that scales with lookback period
-    # Longer periods have less variation as they average out more
-    variation_scale = 1.0 / math.sqrt(max(1, lookback_minutes))
-    variation = random.uniform(-0.0005, 0.0010) * variation_scale
-    
-    # Add time-dependent component to simulate trends
-    time_component = 0.0002 * math.sin(time.time() / 3600)  # Gentle sine wave over hours
-    
-    return base_edge + variation + time_component
+    except Exception as e:
+        st.error(f"Error calculating edge for {pair_name}: {e}")
+        return None
 
 # Calculate average edge between last update and now
 def calculate_average_edge(pair_name):
     """
     Calculate the average edge for a specific pair between the last update and now.
+    This function breaks the time period into 5-minute chunks and averages the edge values.
     """
     # Get the last update time for this pair
     last_update = st.session_state.pair_data[pair_name].get('last_update_time')
     if last_update is None:
         # If no previous update, use a default 5-minute lookback
-        return calculate_edge(pair_name, 5), 5
+        # Get current time in Singapore timezone
+        singapore_tz = pytz.timezone('Asia/Singapore')
+        now_utc = datetime.now(pytz.utc)
+        now_sg = now_utc.astimezone(singapore_tz)
+        
+        # Calculate 5 minutes ago
+        start_time_sg = now_sg - timedelta(minutes=5)
+        
+        # Convert to UTC for database query
+        start_time_utc = start_time_sg.astimezone(pytz.utc)
+        end_time_utc = now_sg.astimezone(pytz.utc)
+        
+        # Calculate edge using real data
+        edge = calculate_edge_for_period(pair_name, start_time_utc, end_time_utc)
+        return edge, 5
     
     # Ensure last_update is timezone-aware
     if last_update.tzinfo is None:
         last_update = last_update.replace(tzinfo=pytz.utc)
     
     # Get current time
-    current_time = get_sg_time()
+    singapore_tz = pytz.timezone('Asia/Singapore')
+    now_utc = datetime.now(pytz.utc)
+    now_sg = now_utc.astimezone(singapore_tz)
+    
+    # Convert last_update to Singapore time
+    last_update_sg = last_update.astimezone(singapore_tz)
     
     # Calculate time difference in minutes
-    time_diff_minutes = max(1, (current_time - last_update).total_seconds() / 60)
+    time_diff_minutes = max(1, (now_sg - last_update_sg).total_seconds() / 60)
     
-    # Calculate edge using the entire time difference
-    edge = calculate_edge(pair_name, int(time_diff_minutes))
+    # If less than 5 minutes have passed, just use the entire period
+    if time_diff_minutes < 5:
+        start_time_utc = last_update_sg.astimezone(pytz.utc)
+        end_time_utc = now_sg.astimezone(pytz.utc)
+        edge = calculate_edge_for_period(pair_name, start_time_utc, end_time_utc)
+        return edge, int(time_diff_minutes)
     
-    return edge, int(time_diff_minutes)
+    # Otherwise, divide into 5-minute chunks and average
+    num_chunks = int(time_diff_minutes / 5) + (1 if time_diff_minutes % 5 > 0 else 0)
+    edge_values = []
+    
+    for i in range(num_chunks):
+        # Calculate start and end time for this chunk
+        chunk_start = last_update_sg + timedelta(minutes=i*5)
+        chunk_end = min(chunk_start + timedelta(minutes=5), now_sg)
+        
+        # Skip chunks that haven't started yet
+        if chunk_start > now_sg:
+            continue
+        
+        # Convert to UTC for database query
+        chunk_start_utc = chunk_start.astimezone(pytz.utc)
+        chunk_end_utc = chunk_end.astimezone(pytz.utc)
+        
+        # Calculate edge for this chunk
+        chunk_edge = calculate_edge_for_period(pair_name, chunk_start_utc, chunk_end_utc)
+        
+        if chunk_edge is not None:
+            edge_values.append(chunk_edge)
+    
+    # If we have edge values, average them
+    if edge_values:
+        avg_edge = sum(edge_values) / len(edge_values)
+        return avg_edge, int(time_diff_minutes)
+    
+    # If no edge values, return a default
+    return 0.001, int(time_diff_minutes)
 
 # Calculate fee percentage for a price move based on the Profit Share Model
 def calculate_fee_for_move(move_pct, pnl_base_rate, position_multiplier, rate_multiplier=15000, 
@@ -457,10 +636,6 @@ def init_session_state():
     if 'last_refresh_time' not in st.session_state:
         st.session_state.last_refresh_time = datetime.now(pytz.utc)
     
-    # Set the simulated data mode to true by default
-    if 'simulated_data_mode' not in st.session_state:
-        st.session_state.simulated_data_mode = True
-        
     if 'pairs_with_changes' not in st.session_state:
         st.session_state.pairs_with_changes = []
     
@@ -1197,9 +1372,24 @@ def initialize_pair(pair_name):
     # Calculate and record initial fee for 0.1% move
     fee_pct = calculate_and_record_fee(pair_name, timestamp)
     
-    # Fetch initial reference edge using the default 5-minute lookback
-    initial_edge, minutes_used = calculate_average_edge(pair_name)
-    st.session_state.pair_data[pair_name]['last_edge_minutes'] = minutes_used
+    # Fetch initial reference edge using the default 5-minute period
+    # Get current time in Singapore timezone
+    singapore_tz = pytz.timezone('Asia/Singapore')
+    now_utc = datetime.now(pytz.utc)
+    now_sg = now_utc.astimezone(singapore_tz)
+    
+    # Calculate 5 minutes ago
+    start_time_sg = now_sg - timedelta(minutes=5)
+    
+    # Convert to UTC for database query
+    start_time_utc = start_time_sg.astimezone(pytz.utc)
+    end_time_utc = now_sg.astimezone(pytz.utc)
+    
+    # Calculate initial edge
+    initial_edge = calculate_edge_for_period(pair_name, start_time_utc, end_time_utc)
+    
+    # Store minutes used for edge calculation
+    st.session_state.pair_data[pair_name]['last_edge_minutes'] = 5
     
     if initial_edge is not None:
         # Use a small positive default if edge is zero
@@ -1845,14 +2035,11 @@ def main():
     # Sidebar configuration
     st.sidebar.title("House Edge Control")
     
-    # Add a note about refresh rates having been turned off
+    # Add a note about edge calculation approach
     st.sidebar.info("Edge calculations automatically use all data since the last update.")
     
     # Parameter control section in sidebar
     st.sidebar.markdown("### Parameter Controls")
-    
-    # Always use simulated data for now
-    st.session_state.simulated_data_mode = True
     
     # Pair selection
     st.sidebar.markdown("#### Trading Pair Selection")
