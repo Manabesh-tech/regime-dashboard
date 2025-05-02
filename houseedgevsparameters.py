@@ -1115,6 +1115,8 @@ def create_pm_fee_sensitivity_plot(pair_name):
         rate_exponent
     )
     ax.scatter([current_pm], [current_fee], color='red', s=100, zorder=5, label='Current PM')
+    print(f"current_pm: {current_pm}, type: {type(current_pm)}")
+    print(f"current_fee: {current_fee}, type: {type(current_fee)}")
     
     # Add proposed PM if available
     if st.session_state.pair_data[pair_name]['proposed_position_multiplier'] is not None:
