@@ -136,9 +136,22 @@ st.markdown("""
         margin-top: 10px !important;
         margin-bottom: 10px !important;
     }
+    .stButton > button {
+        width: 100%;
+    }
 </style>
 """, unsafe_allow_html=True)
 
+# Function to handle navigation
+def navigate_to(view, pair=None):
+    """Handle navigation between views with rerun"""
+    st.session_state.view_mode = view
+    if pair:
+        st.session_state.current_pair = pair
+    if not st.session_state.get('navigating', False):
+        st.session_state.navigating = True
+        st.rerun()
+    
 # Initialize database connection
 def init_connection():
     """
@@ -633,9 +646,9 @@ def init_session_state():
     if 'pairs_with_changes' not in st.session_state:
         st.session_state.pairs_with_changes = []
     
-    # Set a flag to avoid rerun loops
-    if 'rerun_counter' not in st.session_state:
-        st.session_state.rerun_counter = 0
+    # Navigation tracker to prevent multiple reruns
+    if 'navigating' not in st.session_state:
+        st.session_state.navigating = False
 
 # Function to get current time in Singapore timezone
 def get_sg_time():
@@ -1513,6 +1526,9 @@ def render_pair_overview():
                             applied_count += 1
                 
                 st.success(f"Successfully applied updates to {applied_count} pairs.")
+                # Reset navigation state and rerun
+                st.session_state.navigating = False
+                st.rerun()
     
     # Create a grid layout for pair cards (3 columns)
     columns = st.columns(3)
@@ -1618,15 +1634,12 @@ def render_pair_overview():
                 # Use standard Streamlit buttons instead of HTML buttons
                 col1, col2 = st.columns(2)
                 with col1:
-                    if st.button(f"View Details", key=f"view_{pair_name}"):
-                        st.session_state.view_mode = "Pair Detail"
-                        st.session_state.current_pair = pair_name
-                
+                    if st.button(f"View Details", key=f"view_{pair_name}", on_click=navigate_to, args=("Pair Detail", pair_name)):
+                        pass  # Navigation is handled by the on_click callback
                 with col2:
                     button_label = f"Monitor{' ⚠️' if params_changed else ''}"
-                    if st.button(button_label, key=f"monitor_{pair_name}"):
-                        st.session_state.view_mode = "Pair Monitor"
-                        st.session_state.current_pair = pair_name
+                    if st.button(button_label, key=f"monitor_{pair_name}", on_click=navigate_to, args=("Pair Monitor", pair_name)):
+                        pass  # Navigation is handled by the on_click callback
 
 # Function to render the detailed pair view
 def render_pair_detail(pair_name):
@@ -1839,9 +1852,8 @@ def render_pair_detail(pair_name):
             st.info(f"Recommended PM: {recommended_pm:.1f} ({change_text})")
     
     # Button to return to overview
-    if st.button("Return to Pairs Overview", type="secondary"):
-        st.session_state.view_mode = "Pairs Overview"
-        st.session_state.current_pair = None
+    if st.button("Return to Pairs Overview", type="secondary", on_click=navigate_to, args=("Pairs Overview",)):
+        pass  # Navigation is handled by the on_click callback
 
 # Function to render the parameter adjustment view
 def render_pair_monitor(pair_name):
@@ -1909,6 +1921,10 @@ def render_pair_monitor(pair_name):
             # Calculate fee with updated edge data
             timestamp = get_sg_time()
             calculate_and_record_fee(pair_name, timestamp)
+            
+            # Reset navigation state and rerun
+            st.session_state.navigating = False
+            st.rerun()
     
     with param_col2:
         # Reset to reference parameters button
@@ -1919,6 +1935,9 @@ def render_pair_monitor(pair_name):
             success, old_buffer, new_buffer, old_multiplier, new_multiplier = reset_to_reference_parameters(pair_name)
             if success:
                 st.success("Parameters reset to reference values")
+                # Reset navigation state and rerun
+                st.session_state.navigating = False
+                st.rerun()
             else:
                 st.error("No reference parameters available")
     
@@ -2020,14 +2039,15 @@ def render_pair_monitor(pair_name):
                 st.info("Review the proposed changes carefully. If you apply these changes, they will become the new baseline parameters for this pair.")
                 
             with update_col2:
-                update_button = st.button("Apply Changes", type="primary", key=f"update_params_{pair_name}", help="Apply proposed parameter updates and set them as the new baseline")
-            
-            if update_button:
-                # Apply the updates to display (not database)
-                success, old_buffer, new_buffer, old_multiplier, new_multiplier = update_display_parameters(pair_name)
-                
-                if success:
-                    st.markdown('<div class="success">Parameters updated successfully! New baseline established.</div>', unsafe_allow_html=True)
+                if st.button("Apply Changes", type="primary", key=f"update_params_{pair_name}", help="Apply proposed parameter updates and set them as the new baseline"):
+                    # Apply the updates to display (not database)
+                    success, old_buffer, new_buffer, old_multiplier, new_multiplier = update_display_parameters(pair_name)
+                    
+                    if success:
+                        st.markdown('<div class="success">Parameters updated successfully! New baseline established.</div>', unsafe_allow_html=True)
+                        # Reset navigation state and rerun
+                        st.session_state.navigating = False
+                        st.rerun()
     else:
         # No parameter changes to show
         st.info("No parameter changes needed at this time. The current edge is within acceptable bounds of the reference edge.")
@@ -2042,447 +2062,5 @@ def render_pair_monitor(pair_name):
     st.markdown("---")
     
     # Button to return to overview - at the bottom for consistent placement
-    if st.button("Return to Pairs Overview", type="secondary", key=f"return_from_monitor_{pair_name}"):
-        st.session_state.view_mode = "Pairs Overview"
-        st.session_state.current_pair = None
-
-def main():
-    # Initialize all session state variables to prevent duplicates
-    init_session_state()
-    
-    # Title and description
-    st.markdown('<div class="header-style">House Edge Parameter Adjustment Dashboard</div>', unsafe_allow_html=True)
-    st.markdown("""
-    This dashboard monitors house edge and dynamically adjusts parameters to maintain exchange profitability.
-    
-    Parameters respond asymmetrically: buffer rate increases quickly when edge declines, while position multiplier
-    uses logarithmic scaling for more balanced fee control across different parameter ranges.
-    """)
-    
-    # Singapore time display
-    singapore_tz = pytz.timezone('Asia/Singapore')
-    now_utc = datetime.now(pytz.utc)
-    now_sg = now_utc.astimezone(singapore_tz)
-    st.markdown(f"**Current Singapore Time:** {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
-    
-    # Create a container that will be shown on every run at the top
-    update_metrics_container = st.container()
-    
-    # Get current time for consistent use throughout
-    current_time = datetime.now(pytz.utc)
-    current_time_sg = current_time.astimezone(singapore_tz)
-    
-    # Get current selected interval
-    selected_interval = st.session_state.get('interval_radio', "1 minute")
-    interval_mapping = {"1 minute": 1, "5 minutes": 5, "10 minutes": 10}
-    current_lookback_mins = interval_mapping.get(selected_interval, 1)
-    
-    # Update session state with current interval
-    st.session_state.lookback_minutes = current_lookback_mins
-    
-    # Ensure next_update_time is timezone-aware for comparison
-    if 'next_update_time' not in st.session_state:
-        next_update_time = current_time + timedelta(minutes=current_lookback_mins)
-        st.session_state.next_update_time = next_update_time
-    elif st.session_state.next_update_time.tzinfo is None:
-        st.session_state.next_update_time = st.session_state.next_update_time.replace(tzinfo=pytz.utc)
-    
-    next_update_time = st.session_state.next_update_time
-    next_update_time_sg = next_update_time.astimezone(singapore_tz)
-    
-    # Ensure last_update_time is timezone-aware for display
-    if 'last_update_time' not in st.session_state:
-        st.session_state.last_update_time = current_time
-    elif st.session_state.last_update_time.tzinfo is None:
-        st.session_state.last_update_time = st.session_state.last_update_time.replace(tzinfo=pytz.utc)
-        
-    last_update_time = st.session_state.last_update_time
-    last_update_time_sg = last_update_time.astimezone(singapore_tz)
-    
-    # Display update status in the container with debug info
-    with update_metrics_container:
-        # Create a clean and clear status display
-        st.markdown('<div class="timer-container">', unsafe_allow_html=True)
-        
-        # Create a more effective timer display
-        st.markdown("### Update Status")
-        
-        status_col1, status_col2 = st.columns(2)
-        
-        with status_col1:
-            st.markdown(f"**Last Update:** {last_update_time_sg.strftime('%H:%M:%S')} (SG)")
-            st.markdown(f"**Next Update:** {next_update_time_sg.strftime('%H:%M:%S')} (SG)")
-            
-            # Show auto-update status with toggle
-            auto_status = "Enabled" if st.session_state.get('auto_update', True) else "Disabled"
-            status_color = "green" if st.session_state.get('auto_update', True) else "red"
-            st.markdown(f"**Auto Update:** <span style='color:{status_color};'>{auto_status}</span>", unsafe_allow_html=True)
-            
-            # Show update interval
-            st.markdown(f"**Update Interval:** {selected_interval}")
-            
-            # Show monitored pairs count with pending changes count
-            pair_count = len(st.session_state.get('monitored_pairs', []))
-            changes_count = len(st.session_state.get('pairs_with_changes', []))
-            changes_text = f" ({changes_count} with changes)" if changes_count > 0 else ""
-            st.markdown(f"**Monitored Pairs:** {pair_count}{changes_text}")
-        
-        with status_col2:
-            # Calculate time to next update
-            time_to_next = max(0, (next_update_time - current_time).total_seconds())
-            minutes_to_next = int(time_to_next // 60)
-            seconds_to_next = int(time_to_next % 60)
-            
-            # Show countdown with visual indicator
-            if st.session_state.get('auto_update', True):
-                st.markdown(f"**Next Auto-Update In:**")
-                # Add a visual countdown progress bar
-                progress_value = 1.0 - (time_to_next / (current_lookback_mins * 60))
-                progress_value = max(0.0, min(1.0, progress_value))  # Ensure value is between 0 and 1
-                st.progress(progress_value, text=f"{minutes_to_next}m {seconds_to_next}s")
-            else:
-                st.markdown(f"**Auto-Updates Disabled**")
-                st.markdown("Use manual update button below")
-            
-            # Manual update button - always available
-            if st.button("Update Now", key="force_update", type="primary"):
-                # Force an immediate update
-                with st.spinner("Forcing immediate update..."):
-                    pairs_updated = batch_update_all_pairs()
-                    
-                    # Update timestamps
-                    new_time = datetime.now(pytz.utc)
-                    st.session_state.last_update_time = new_time
-                    st.session_state.next_update_time = new_time + timedelta(minutes=current_lookback_mins)
-                    
-                    # Update fee calculations
-                    timestamp = get_sg_time()
-                    for pair_name in st.session_state.monitored_pairs:
-                        if st.session_state.pair_data[pair_name].get('initialized', False):
-                            calculate_and_record_fee(pair_name, timestamp)
-                    
-                    # Record update information
-                    st.session_state['last_update_info'] = {
-                        'time': new_time,
-                        'pairs_updated': len(pairs_updated),
-                        'trigger': 'manual'
-                    }
-        
-        # Close timer container
-        st.markdown('</div>', unsafe_allow_html=True)
-        
-        # Status message based on auto-update
-        if st.session_state.get('auto_update', True) and pair_count > 0:
-            st.success(f"Auto-update is enabled with {selected_interval} interval. Next update at {next_update_time_sg.strftime('%H:%M:%S')} (SG time).")
-        elif not st.session_state.get('auto_update', True):
-            st.warning("Auto-update is disabled. Use the 'Update Now' button for manual updates.")
-        elif pair_count == 0:
-            st.info("Add trading pairs to begin monitoring.")
-            
-    # Run auto-update check if needed
-    # This should run after the metrics are displayed
-    if st.session_state.get('auto_update', True):
-        update_pairs_on_load()
-    
-    # Sidebar controls
-    st.sidebar.markdown('<div class="subheader-style">Trading Pair Configuration</div>', unsafe_allow_html=True)
-    
-    # Fetch available pairs (simplified for stability)
-    pairs = fetch_pairs()
-    
-    # Select pair for initialization
-    selected_pair = st.sidebar.selectbox(
-        "Select Trading Pair",
-        options=pairs,
-        index=0,
-        key="pair_selector"
-    )
-    
-    # Update interval options
-    update_interval_options = {
-        "1 minute": 1,
-        "5 minutes": 5,
-        "10 minutes": 10
-    }
-    
-    # Select update interval
-    update_interval_selection = st.sidebar.radio(
-        "Update Interval",
-        options=list(update_interval_options.keys()),
-        index=0,  # Default to 1 minute
-        key="interval_radio"
-    )
-    
-    # Initialize button and Add All Pairs button in a row
-    init_col1, init_col2 = st.sidebar.columns(2)
-    
-    with init_col1:
-        initialize_button = st.button(
-            "Add Pair", 
-            help=f"Add the selected pair {selected_pair} to monitoring",
-            type="primary",
-            key="init_button"
-        )
-    
-    with init_col2:
-        add_all_button = st.button(
-            "Add All Pairs",
-            help="Initialize and monitor all available trading pairs",
-            type="secondary",
-            key="add_all_button"
-        )
-    
-    # Handle button actions
-    if initialize_button:
-        try:
-            # Initialize pair directly inside this block
-            pair_name = selected_pair
-            
-            # Initialize the pair with all parameters
-            success = initialize_pair(pair_name)
-            
-            if success:
-                # Add to monitored pairs if not already there
-                if pair_name not in st.session_state.monitored_pairs:
-                    st.session_state.monitored_pairs.append(pair_name)
-                
-                # Set as current pair
-                st.session_state.current_pair = pair_name
-                
-                # Success message and reset timers
-                st.sidebar.success(f"Started monitoring for {pair_name}")
-                st.session_state.view_mode = "Pairs Overview"
-                
-                # Reset auto-update timer when adding a new pair
-                current_time = datetime.now(pytz.utc)
-                st.session_state.last_update_time = current_time
-                st.session_state.next_update_time = current_time + timedelta(minutes=st.session_state.lookback_minutes)
-            else:
-                st.sidebar.error(f"Failed to initialize {pair_name}")
-                
-        except Exception as e:
-            st.sidebar.error(f"Error adding pair: {str(e)}")
-    
-    if add_all_button:
-        try:
-            # Filter out pairs that are already being monitored
-            unmonitored_pairs = [pair for pair in pairs if pair not in st.session_state.monitored_pairs]
-            
-            if not unmonitored_pairs:
-                st.sidebar.info("All available pairs are already being monitored.")
-            else:
-                # Show a progress bar during initialization
-                with st.sidebar:
-                    progress_bar = st.progress(0)
-                    total_pairs = len(unmonitored_pairs)
-                    pairs_added = 0
-                    
-                    for i, p in enumerate(unmonitored_pairs):
-                        try:
-                            # Update progress
-                            progress = (i+1) / total_pairs
-                            progress_bar.progress(progress, text=f"Initializing {p}...")
-                            
-                            # Initialize the pair
-                            success = initialize_pair(p)
-                            
-                            if success:
-                                # Add to monitored pairs
-                                if p not in st.session_state.monitored_pairs:
-                                    st.session_state.monitored_pairs.append(p)
-                                pairs_added += 1
-                                
-                        except Exception as e:
-                            st.error(f"Error initializing {p}: {str(e)}")
-                    
-                    # Complete progress
-                    progress_bar.progress(1.0, text="All pairs initialized!")
-                    
-                # Reset auto-update timer after adding all pairs
-                current_time = datetime.now(pytz.utc)
-                st.session_state.last_update_time = current_time
-                st.session_state.next_update_time = current_time + timedelta(minutes=st.session_state.lookback_minutes)
-                
-                st.sidebar.success(f"Added {pairs_added} new pairs to monitoring")
-                st.session_state.view_mode = "Pairs Overview"
-        except Exception as e:
-            st.sidebar.error(f"Error adding pairs: {str(e)}")
-    
-    # Batch operations section
-    st.sidebar.markdown('<div class="subheader-style">Batch Operations</div>', unsafe_allow_html=True)
-    
-    # Batch update button
-    if st.sidebar.button(
-        "Update All Pairs Now", 
-        help="Immediately fetch new edge data for all monitored pairs",
-        key="batch_update_button",
-        disabled=len(st.session_state.monitored_pairs) == 0
-    ):
-        # Perform the immediate update
-        with st.spinner("Updating all pairs..."):
-            current_time = datetime.now(pytz.utc)
-            pairs_updated = batch_update_all_pairs()
-            
-            # Update timestamps
-            st.session_state.last_update_time = current_time
-            st.session_state.next_update_time = current_time + timedelta(minutes=st.session_state.lookback_minutes)
-            
-            # Update fee calculations
-            timestamp = get_sg_time()
-            for pair_name in st.session_state.monitored_pairs:
-                if st.session_state.pair_data[pair_name].get('initialized', False):
-                    calculate_and_record_fee(pair_name, timestamp)
-            
-            if pairs_updated:
-                st.sidebar.warning(f"Parameter updates available for {len(pairs_updated)} pairs")
-            else:
-                st.sidebar.success("All pairs updated, no parameter changes needed")
-    
-    # Global apply changes button (only shown if changes are available)
-    if st.session_state.pairs_with_changes:
-        if st.sidebar.button(
-            f"Apply All Changes ({len(st.session_state.pairs_with_changes)})", 
-            help="Apply all recommended parameter changes across all pairs",
-            key="global_apply_button",
-            type="primary",
-            disabled=len(st.session_state.pairs_with_changes) == 0
-        ):
-            with st.spinner("Applying parameter updates to all pairs..."):
-                applied_count = 0
-                for pair_with_changes in st.session_state.pairs_with_changes.copy():
-                    success, old_buffer, new_buffer, old_multiplier, new_multiplier = update_display_parameters(pair_with_changes)
-                    if success:
-                        applied_count += 1
-            
-            if applied_count > 0:
-                st.sidebar.success(f"Successfully applied updates to {applied_count} pairs")
-            else:
-                st.sidebar.info("No changes were applied")
-    
-    # Auto-update toggle with immediate effect
-    auto_update_value = st.sidebar.checkbox(
-        "Enable Auto-Update", 
-        value=st.session_state.get('auto_update', False),
-        help="Automatically update data at the selected interval",
-        key="auto_update_checkbox"
-    )
-    
-    # Update the session state value after the checkbox interaction
-    st.session_state.auto_update = auto_update_value
-    
-    # Check for changes to auto-update state
-    if auto_update_value != st.session_state.get('previous_auto_update_state', False):
-        st.session_state.previous_auto_update_state = auto_update_value
-        if auto_update_value:
-            # Reset timer if auto-update was just enabled
-            current_time = datetime.now(pytz.utc)
-            st.session_state.last_update_time = current_time
-            st.session_state.next_update_time = current_time + timedelta(minutes=st.session_state.lookback_minutes)
-            st.sidebar.success("Auto-update enabled. Next update in 1 minute.")
-        else:
-            st.sidebar.info("Auto-update disabled. Use manual update buttons.")
-    
-    # Sensitivity parameters section
-    st.sidebar.markdown('<div class="subheader-style">Sensitivity Parameters</div>', unsafe_allow_html=True)
-    
-    # Buffer rate increase sensitivity
-    st.session_state.buffer_alpha_up = st.sidebar.slider(
-        "Buffer Rate Increase Sensitivity",
-        min_value=0.01, 
-        max_value=0.5, 
-        value=st.session_state.buffer_alpha_up,
-        step=0.01,
-        help="How quickly buffer rate increases when edge declines",
-        key="buffer_up_slider"
-    )
-    
-    # Buffer rate decrease sensitivity
-    st.session_state.buffer_alpha_down = st.sidebar.slider(
-        "Buffer Rate Decrease Sensitivity",
-        min_value=0.001, 
-        max_value=0.1, 
-        value=st.session_state.buffer_alpha_down,
-        step=0.001,
-        help="How quickly buffer rate decreases when edge improves",
-        key="buffer_down_slider"
-    )
-    
-    # Position multiplier increase sensitivity
-    st.session_state.multiplier_alpha_up = st.sidebar.slider(
-        "Position Multiplier Increase Sensitivity",
-        min_value=0.001, 
-        max_value=0.1, 
-        value=st.session_state.multiplier_alpha_up,
-        step=0.001,
-        help="How quickly position multiplier increases when edge improves",
-        key="multiplier_up_slider"
-    )
-    
-    # Position multiplier decrease sensitivity
-    st.session_state.multiplier_alpha_down = st.sidebar.slider(
-        "Position Multiplier Decrease Sensitivity",
-        min_value=0.01, 
-        max_value=0.5, 
-        value=st.session_state.multiplier_alpha_down,
-        step=0.01,
-        help="How quickly position multiplier decreases when edge declines",
-        key="multiplier_down_slider"
-    )
-    
-    # History length slider
-    st.session_state.history_length = st.sidebar.slider(
-        "History Length (points)", 
-        min_value=10, 
-        max_value=1000, 
-        value=st.session_state.history_length,
-        help="Number of data points to keep in history",
-        key="history_length_slider"
-    )
-    
-    # Debug section for advanced users
-    with st.sidebar.expander("Debug", expanded=False):
-        st.write("Simulated data mode:", st.session_state.simulated_data_mode)
-        st.write("Last update time:", format_time_display(st.session_state.last_update_time))
-        st.write("Next update time:", format_time_display(st.session_state.next_update_time))
-        st.write("View mode:", st.session_state.view_mode)
-        st.write("Pairs with changes:", len(st.session_state.pairs_with_changes))
-        
-        # Force simulated data mode button
-        if st.button("Toggle Simulated Data Mode", key="toggle_sim_mode"):
-            st.session_state.simulated_data_mode = not st.session_state.simulated_data_mode
-            st.write("Simulated data mode:", st.session_state.simulated_data_mode)
-    
-    # Main content area
-    # Render different views based on current mode
-    if st.session_state.view_mode == "Pairs Overview":
-        render_pair_overview()
-    elif st.session_state.view_mode == "Pair Detail" and st.session_state.current_pair is not None:
-        render_pair_detail(st.session_state.current_pair)
-    elif st.session_state.view_mode == "Pair Monitor" and st.session_state.current_pair is not None:
-        render_pair_monitor(st.session_state.current_pair)
-    else:
-        # Default to overview if mode is invalid
-        st.session_state.view_mode = "Pairs Overview"
-        render_pair_overview()
-    
-    # Prune history for all pairs if needed
-    for pair_name in st.session_state.monitored_pairs:
-        if pair_name in st.session_state.pair_data:
-            pair_data = st.session_state.pair_data[pair_name]
-            
-            if len(pair_data.get('edge_history', [])) > st.session_state.history_length:
-                pair_data['edge_history'] = pair_data['edge_history'][-st.session_state.history_length:]
-            
-            if len(pair_data.get('buffer_history', [])) > st.session_state.history_length:
-                pair_data['buffer_history'] = pair_data['buffer_history'][-st.session_state.history_length:]
-            
-            if len(pair_data.get('multiplier_history', [])) > st.session_state.history_length:
-                pair_data['multiplier_history'] = pair_data['multiplier_history'][-st.session_state.history_length:]
-            
-            if len(pair_data.get('fee_history', [])) > st.session_state.history_length:
-                pair_data['fee_history'] = pair_data['fee_history'][-st.session_state.history_length:]
-
-# Main entry point
-if __name__ == "__main__":
-    # Run the main application
-    main()
+    if st.button("Return to Pairs Overview", type="secondary", key=f"return_from_monitor_{pair_name}", on_click=navigate_to, args=("Pairs Overview",)):
+        pass  # Navigation is handled by the on_click callback
