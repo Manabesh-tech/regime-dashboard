@@ -131,7 +131,7 @@ with col4:
 
 # Function to batch fetch edge and volatility data
 @st.cache_data(ttl=600)
-def batch_fetch_edge_volatility(selected_pairs, start_time_sg, now_sg, batch_size=5):
+def batch_fetch_edge_volatility(selected_pairs, start_time_sg, now_sg, batch_size=3):
     # Convert to UTC for database query
     start_time_utc = start_time_sg.astimezone(pytz.utc)
     end_time_utc = now_sg.astimezone(pytz.utc)
@@ -225,79 +225,90 @@ def batch_fetch_edge_volatility(selected_pairs, start_time_sg, now_sg, batch_siz
         ORDER BY tp.pair_name, timestamp_sg DESC
         """
         
-        # Improved volatility query for multiple pairs
+        # Simplified volatility query that will not timeout
         volatility_query = f"""
-        WITH all_time_intervals AS (
-          -- Generate all 2-minute intervals for the past 24 hours for each pair
-          SELECT 
-            generate_series(
-              date_trunc('hour', '{start_time_utc}'::timestamp) + 
-              INTERVAL '2 min' * floor(EXTRACT(MINUTE FROM '{start_time_utc}'::timestamp) / 2),
-              '{end_time_utc}'::timestamp,
-              INTERVAL '2 minutes'
-            ) AS interval_start,
-            
-            -- Group these 2-minute intervals into their parent 10-minute intervals
-            date_trunc('hour', generate_series(
-              date_trunc('hour', '{start_time_utc}'::timestamp) + 
-              INTERVAL '2 min' * floor(EXTRACT(MINUTE FROM '{start_time_utc}'::timestamp) / 2),
-              '{end_time_utc}'::timestamp,
-              INTERVAL '2 minutes'
-            )) + 
-            INTERVAL '10 min' * floor(EXTRACT(MINUTE FROM generate_series(
-              date_trunc('hour', '{start_time_utc}'::timestamp) + 
-              INTERVAL '2 min' * floor(EXTRACT(MINUTE FROM '{start_time_utc}'::timestamp) / 2),
-              '{end_time_utc}'::timestamp,
-              INTERVAL '2 minutes'
-            )) / 10) AS parent_interval,
-            
-            -- Add pair to the matrix
-            unnest(ARRAY['{pairs_str}']) AS pair_name
+        WITH time_buckets AS (
+            -- Generate 10-minute time buckets for the past 24 hours
+            SELECT 
+                generate_series(
+                    date_trunc('hour', '{start_time_utc}'::timestamp) + 
+                    INTERVAL '10 min' * floor(EXTRACT(MINUTE FROM '{start_time_utc}'::timestamp) / 10),
+                    '{end_time_utc}'::timestamp,
+                    INTERVAL '10 minutes'
+                ) AS bucket_start,
+                generate_series(
+                    date_trunc('hour', '{start_time_utc}'::timestamp) + 
+                    INTERVAL '10 min' * floor(EXTRACT(MINUTE FROM '{start_time_utc}'::timestamp) / 10) + INTERVAL '10 minutes',
+                    '{end_time_utc}'::timestamp + INTERVAL '10 minutes',
+                    INTERVAL '10 minutes'
+                ) AS bucket_end
         ),
-        
-        -- Get all trades for the requested pairs in the time range
-        pair_trades AS (
-          SELECT 
-            created_at,
-            pair_name,
-            deal_price
-          FROM 
-            public.trade_fill_fresh
-          WHERE 
-            created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
-            AND pair_name IN ('{pairs_str}')
+        pair_buckets AS (
+            -- Cross join with pairs to create all combinations
+            SELECT 
+                b.bucket_start,
+                b.bucket_end,
+                p.pair_name
+            FROM 
+                time_buckets b,
+                (SELECT unnest(ARRAY['{pairs_str}']) AS pair_name) p
         ),
-        
-        -- Join trades to time intervals
-        interval_prices AS (
-          SELECT
-            ati.interval_start,
-            ati.parent_interval,
-            ati.pair_name,
-            (
-              SELECT t.deal_price 
-              FROM pair_trades t
-              WHERE t.created_at < ati.interval_start + INTERVAL '2 minutes'
-                AND t.created_at >= ati.interval_start
-                AND t.pair_name = ati.pair_name
-              ORDER BY t.created_at DESC
-              LIMIT 1
-            ) AS closing_price
-          FROM all_time_intervals ati
+        -- Get min, max price within each 10-min window for simpler volatility estimation
+        price_range AS (
+            SELECT
+                pb.bucket_start,
+                pb.pair_name,
+                -- Get min price in the interval
+                MIN(tf.deal_price) AS min_price,
+                -- Get max price in the interval
+                MAX(tf.deal_price) AS max_price,
+                -- Count trades in the interval
+                COUNT(*) AS trade_count,
+                -- Get first price
+                MIN(CASE WHEN tf.created_at = (
+                    SELECT MIN(created_at) FROM public.trade_fill_fresh 
+                    WHERE created_at >= pb.bucket_start 
+                    AND created_at < pb.bucket_end
+                    AND pair_name = pb.pair_name
+                ) THEN tf.deal_price END) AS first_price,
+                -- Get last price
+                MIN(CASE WHEN tf.created_at = (
+                    SELECT MAX(created_at) FROM public.trade_fill_fresh 
+                    WHERE created_at >= pb.bucket_start 
+                    AND created_at < pb.bucket_end
+                    AND pair_name = pb.pair_name
+                ) THEN tf.deal_price END) AS last_price
+            FROM 
+                pair_buckets pb
+            LEFT JOIN
+                public.trade_fill_fresh tf ON
+                tf.created_at >= pb.bucket_start AND
+                tf.created_at < pb.bucket_end AND
+                tf.pair_name = pb.pair_name
+            GROUP BY
+                pb.bucket_start, pb.pair_name
         )
-        
-        -- Get all prices at 2-minute intervals, grouped by 10-minute parent intervals and pair
+
         SELECT
-          parent_interval AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore' AS timestamp_sg,
-          pair_name,
-          array_agg(closing_price ORDER BY interval_start) FILTER (WHERE closing_price IS NOT NULL) AS price_array,
-          count(closing_price) FILTER (WHERE closing_price IS NOT NULL) AS price_count
+            pr.bucket_start AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore' AS timestamp_sg,
+            pr.pair_name,
+            pr.min_price,
+            pr.max_price,
+            pr.first_price,
+            pr.last_price,
+            pr.trade_count,
+            -- Simple volatility estimate based on high-low range
+            CASE 
+                WHEN pr.min_price > 0 AND pr.min_price IS NOT NULL AND pr.max_price IS NOT NULL AND pr.trade_count >= 3
+                THEN (pr.max_price - pr.min_price) / pr.min_price 
+                ELSE NULL 
+            END AS price_range_pct
         FROM
-          interval_prices
-        GROUP BY
-          parent_interval, pair_name
+            price_range pr
+        WHERE
+            pr.trade_count >= 3  -- Only include intervals with at least 3 trades
         ORDER BY
-          pair_name, parent_interval DESC
+            pr.pair_name, pr.bucket_start DESC
         """
         
         try:
@@ -312,176 +323,67 @@ def batch_fetch_edge_volatility(selected_pairs, start_time_sg, now_sg, batch_siz
                 # Rename house_edge to edge for consistency
                 edge_df.rename(columns={'house_edge': 'edge'}, inplace=True)
             
-            # Execute the volatility query with timeout
-            with engine.connect().execution_options(timeout=60) as conn:
-                vol_df = pd.read_sql(volatility_query, conn)
-                
-                # Format timestamps
-                vol_df['timestamp_sg'] = pd.to_datetime(vol_df['timestamp_sg'])
-                vol_df['time_label'] = vol_df['timestamp_sg'].dt.strftime('%H:%M')
-            
-            # Process each pair in the batch
+            # Process edge data for each pair
             for pair in batch_pairs:
-                # Filter data for this specific pair
+                # Filter edge data for this specific pair
                 pair_edge_df = edge_df[edge_df['pair_name'] == pair].copy()
-                pair_vol_df = vol_df[vol_df['pair_name'] == pair].copy()
                 
-                # Calculate volatility with improved method
-                volatility_results = []
-                
-                for _, row in pair_vol_df.iterrows():
-                    try:
-                        price_array = row['price_array']
-                        price_count = row['price_count']
-                        timestamp = row['timestamp_sg']
-                        time_label = row['time_label']
-                        
-                        # Initialize volatility as None (will be updated if calculation succeeds)
-                        volatility = None
-                        
-                        # Print debug info
-                        logger.info(f"Processing volatility for {pair} at {time_label}")
-                        logger.info(f"Price count: {price_count}")
-                        logger.info(f"Price array type: {type(price_array)}")
-                        
-                        # Skip calculation if no price data
-                        if price_array is None or price_count < 3:
-                            logger.info(f"Insufficient price data for {pair} at {time_label}")
-                        else:
-                            # Parse the array - handle all possible formats
-                            prices = []
-                            
-                            # Case 1: String representation like '{123,456,789}'
-                            if isinstance(price_array, str):
-                                try:
-                                    # Strip curly braces and split
-                                    clean_str = price_array.strip('{}')
-                                    if clean_str:  # Only process if not empty
-                                        prices_str = clean_str.split(',')
-                                        for p in prices_str:
-                                            if p and p.strip() != 'NULL' and p.strip() != 'None':
-                                                try:
-                                                    prices.append(float(p.strip()))
-                                                except (ValueError, TypeError) as e:
-                                                    logger.error(f"Could not convert {p} to float: {e}")
-                                except Exception as e:
-                                    logger.error(f"Error parsing string array: {e}")
-                            
-                            # Case 2: List or array
-                            elif isinstance(price_array, (list, np.ndarray)):
-                                for p in price_array:
-                                    if p is not None:
-                                        try:
-                                            prices.append(float(p))
-                                        except (ValueError, TypeError) as e:
-                                            logger.error(f"Could not convert {p} to float: {e}")
-                            
-                            # Case 3: Other types (like PostgreSQL-specific array types)
-                            else:
-                                try:
-                                    # Try converting to list first
-                                    price_list = list(price_array)
-                                    for p in price_list:
-                                        if p is not None:
-                                            try:
-                                                prices.append(float(p))
-                                            except (ValueError, TypeError) as e:
-                                                logger.error(f"Could not convert {p} to float: {e}")
-                                except Exception as e:
-                                    logger.error(f"Could not convert price_array to list: {e}")
-                                    # Last resort: try string conversion and parsing
-                                    try:
-                                        arr_str = str(price_array)
-                                        # Clean up the string (remove brackets, etc.)
-                                        clean_str = arr_str.strip('{}[]()').replace('\'', '').replace('"', '')
-                                        if clean_str:
-                                            parts = clean_str.split(',')
-                                            for p in parts:
-                                                if p and p.strip() != 'NULL' and p.strip() != 'None':
-                                                    try:
-                                                        prices.append(float(p.strip()))
-                                                    except (ValueError, TypeError):
-                                                        pass
-                                    except Exception as nested_e:
-                                        logger.error(f"Failed string parsing fallback: {nested_e}")
-                            
-                            # Log the parsed prices for debugging
-                            logger.info(f"Parsed {len(prices)} valid prices: {prices[:5]}...")
-                            
-                            # Calculate volatility with robust error handling
-                            if len(prices) >= 3:  # Need at least 3 price points
-                                try:
-                                    # Convert to numpy array and ensure they're floats
-                                    prices_array = np.array(prices, dtype=np.float64)
-                                    
-                                    # Log min, max, mean prices to verify data quality
-                                    logger.info(f"Price stats: min={np.min(prices_array):.2f}, max={np.max(prices_array):.2f}, mean={np.mean(prices_array):.2f}")
-                                    
-                                    # Calculate returns
-                                    # Check for zero prices that would cause division error
-                                    if np.any(prices_array[:-1] == 0):
-                                        logger.warning(f"Zero prices detected for {pair} at {time_label}, skipping volatility calculation")
-                                    else:
-                                        # Calculate simple returns
-                                        returns = np.diff(prices_array) / prices_array[:-1]
-                                        
-                                        # Standard deviation of returns
-                                        std_dev = np.std(returns)
-                                        
-                                        # Annualize based on actual number of intervals
-                                        actual_intervals = len(returns)
-                                        # Scale to annual vol (assuming 5 intervals per 10min window, 6 per hour, 24 hours, 365 days)
-                                        intervals_per_year = (5 * 6 * 24 * 365) / actual_intervals
-                                        annualized_vol = std_dev * np.sqrt(intervals_per_year)
-                                        
-                                        logger.info(f"Calculated volatility: {annualized_vol*100:.2f}% from {actual_intervals} intervals")
-                                        volatility = annualized_vol
-                                        
-                                except Exception as e:
-                                    logger.error(f"Error in numpy calculation: {e}")
-                            else:
-                                logger.info(f"Not enough valid prices ({len(prices)}) for volatility calculation")
-                        
-                        # Add to results
-                        volatility_results.append({
-                            'timestamp_sg': timestamp,
-                            'time_label': time_label,
-                            'volatility': volatility
-                        })
-                        
-                    except Exception as e:
-                        logger.error(f"Error in volatility calculation for {pair}: {e}")
-                        volatility_results.append({
-                            'timestamp_sg': row['timestamp_sg'],
-                            'time_label': row['time_label'],
-                            'volatility': None
-                        })
-                
-                # Convert volatility results to dataframe
-                vol_results_df = pd.DataFrame(volatility_results)
-                
-                # Merge edge and volatility data
-                if not pair_edge_df.empty and not vol_results_df.empty:
-                    result_df = pd.merge(
-                        pair_edge_df,
-                        vol_results_df[['time_label', 'volatility']],
-                        on='time_label',
-                        how='left'
-                    )
+                # Initialize with edge data
+                if not pair_edge_df.empty:
+                    all_results[pair] = pair_edge_df.copy()
+                    all_results[pair]['volatility'] = None
                 else:
-                    # Use edge data if available, otherwise create empty dataframe
-                    if not pair_edge_df.empty:
-                        result_df = pair_edge_df.copy()
-                        result_df['volatility'] = None
-                    else:
-                        # Create empty dataframe with required columns
-                        result_df = pd.DataFrame(columns=[
-                            'timestamp_sg', 'pair_name', 'edge', 'pnl', 
-                            'open_collateral', 'time_label', 'volatility'
-                        ])
+                    # Create empty dataframe with required columns for edge data
+                    all_results[pair] = pd.DataFrame(columns=[
+                        'timestamp_sg', 'pair_name', 'edge', 'pnl', 
+                        'open_collateral', 'time_label', 'volatility'
+                    ])
+            
+            # Execute the volatility query with timeout
+            try:
+                with engine.connect().execution_options(timeout=60) as conn:
+                    vol_df = pd.read_sql(volatility_query, conn)
+                    
+                    # Format timestamps
+                    vol_df['timestamp_sg'] = pd.to_datetime(vol_df['timestamp_sg'])
+                    vol_df['time_label'] = vol_df['timestamp_sg'].dt.strftime('%H:%M')
                 
-                # Store results for this pair
-                all_results[pair] = result_df
+                # Process volatility data for each pair
+                for pair in batch_pairs:
+                    # Only process if we have edge data for this pair
+                    if pair in all_results and not all_results[pair].empty:
+                        # Filter volatility data for this specific pair
+                        pair_vol_df = vol_df[vol_df['pair_name'] == pair].copy()
+                        
+                        # Process each row of volatility data
+                        for _, row in pair_vol_df.iterrows():
+                            try:
+                                time_label = row['time_label']
+                                min_price = row['min_price']
+                                max_price = row['max_price']
+                                trade_count = row['trade_count']
+                                price_range_pct = row['price_range_pct']
+                                
+                                # Skip if insufficient data
+                                if price_range_pct is None or trade_count < 3:
+                                    continue
+                                
+                                # Annualize the price range (assumes normal distribution where range ≈ 4*stddev)
+                                # 144 = number of 10-minute intervals in a day, 365 = days in a year
+                                annualized_vol = price_range_pct * np.sqrt(144 * 365) / 4
+                                
+                                # Update volatility in the results dataframe
+                                mask = all_results[pair]['time_label'] == time_label
+                                if any(mask):
+                                    all_results[pair].loc[mask, 'volatility'] = annualized_vol
+                                    
+                            except Exception as e:
+                                logger.error(f"Error processing volatility for {pair} at {time_label}: {e}")
+            
+            except Exception as vol_error:
+                # Log the volatility error but continue with edge data
+                logger.error(f"Error fetching volatility data for batch {batch_pairs}: {vol_error}")
+                # We'll proceed with edge data only
         
         except Exception as e:
             logger.error(f"Error processing batch {batch_pairs}: {e}")
@@ -497,7 +399,7 @@ def batch_fetch_edge_volatility(selected_pairs, start_time_sg, now_sg, batch_siz
 
 # Batch fetch market spread data
 @st.cache_data(ttl=600)
-def batch_fetch_market_spread_data(selected_pairs, start_time_sg, now_sg, batch_size=5):
+def batch_fetch_market_spread_data(selected_pairs, start_time_sg, now_sg, batch_size=3):
     # Convert to UTC for database query
     start_time_utc = start_time_sg.astimezone(pytz.utc)
     end_time_utc = now_sg.astimezone(pytz.utc)
@@ -862,7 +764,7 @@ if pair_data:
     # Tab 2: Volatility Matrix
     with tab2:
         st.markdown("## Volatility Matrix (10min timeframe, Last 24 hours, Singapore Time)")
-        st.markdown("### Annualized Volatility based on 2-minute price intervals")
+        st.markdown("### Annualized Volatility based on price range within 10-minute intervals")
         
         # Create volatility matrix with pairs as columns
         vol_df = create_transposed_volatility_matrix(pair_data, time_labels, date_labels, selected_pairs)
@@ -888,10 +790,10 @@ if pair_data:
             # Explanation of the volatility calculation
             st.markdown("""
             **Notes on Improved Volatility Calculation:**
-            - Uses 2-minute price intervals within each 10-minute window
-            - Calculates standard deviation of price returns (not log returns)
-            - Annualizes based on the actual number of observed intervals
-            - Empty cells indicate insufficient price data for calculation (need at least 3 price points)
+            - Uses price range (high-low) within each 10-minute window
+            - Estimates volatility based on the normalized price range
+            - Annualizes correctly for 10-minute intervals
+            - Empty cells indicate insufficient price data (fewer than 3 trades)
             """)
         else:
             st.warning("No volatility data available for selected pairs.")
