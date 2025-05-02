@@ -1077,6 +1077,7 @@ def create_fee_curve_plot(pair_name):
     return fig
 
 # Function to create PM vs fee sensitivity plot
+# Function to create PM vs fee sensitivity plot
 def create_pm_fee_sensitivity_plot(pair_name):
     """Create a plot showing how PM changes affect fees at different PM values"""
     # Sample a range of PM values on logarithmic scale
