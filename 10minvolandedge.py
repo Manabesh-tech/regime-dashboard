@@ -115,16 +115,18 @@ progress_bar = st.progress(0)
 status_text = st.empty()
 
 # Create tabs
-tab1, tab2 = st.tabs(["Edge", "Volatility"])
+tab1, tab2, tab3 = st.tabs(["Edge", "Volatility", "Spreads"])
 
 # Process each pair and display data
 edge_data = {}
 vol_data = {}
+spread_data = {}
 
 # Process each pair
 for i, pair in enumerate(selected_pairs):
-    progress_bar.progress(i / max(1, len(selected_pairs)))
-    status_text.text(f"Processing {pair} ({i+1}/{len(selected_pairs)})")
+    progress_percent = i / max(1, len(selected_pairs) * 3)  # Divide by 3 because we have 3 types of data
+    progress_bar.progress(progress_percent)
+    status_text.text(f"Processing {pair} - Edge Data ({i+1}/{len(selected_pairs)})")
     
     # Convert to UTC for database query
     start_time_utc = start_time_sg.astimezone(pytz.utc)
@@ -202,6 +204,11 @@ for i, pair in enumerate(selected_pairs):
         st.error(f"Error processing edge data for {pair}: {e}")
         edge_data[pair] = pd.DataFrame(columns=['timestamp_sg', 'edge', 'time_label'])
     
+    # Update progress
+    progress_percent = (i / max(1, len(selected_pairs)) + 1/3)
+    progress_bar.progress(progress_percent)
+    status_text.text(f"Processing {pair} - Volatility Data ({i+1}/{len(selected_pairs)})")
+    
     # Volatility Query
     try:
         vol_query = f"""
@@ -265,6 +272,60 @@ for i, pair in enumerate(selected_pairs):
     except Exception as e:
         st.error(f"Error processing volatility data for {pair}: {e}")
         vol_data[pair] = pd.DataFrame(columns=['timestamp_sg', 'min_price', 'max_price', 'trade_count', 'price_range', 'volatility', 'time_label'])
+    
+    # Update progress
+    progress_percent = (i / max(1, len(selected_pairs)) + 2/3)
+    progress_bar.progress(progress_percent)
+    status_text.text(f"Processing {pair} - Spread Data ({i+1}/{len(selected_pairs)})")
+    
+    # Market Spread Query
+    try:
+        spread_query = f"""
+        WITH time_intervals AS (
+          SELECT 
+            t.interval_start,
+            t.interval_start + INTERVAL '10 minutes' AS interval_end
+          FROM (
+            SELECT 
+              generate_series(
+                '{start_time_utc}'::timestamp, 
+                '{end_time_utc}'::timestamp, 
+                '10 minutes'::interval
+              ) AS interval_start
+          ) t
+        ),
+        spread_data AS (
+          SELECT 
+            ti.interval_start,
+            AVG(fee1) as avg_spread
+          FROM time_intervals ti
+          LEFT JOIN oracle_exchange_fee oef ON
+            oef.time_group >= ti.interval_start AND 
+            oef.time_group < ti.interval_end AND
+            oef.pair_name = '{pair}' AND
+            oef.source IN ('binanceFuture', 'gateFuture', 'hyperliquidFuture')
+          GROUP BY ti.interval_start
+        )
+        SELECT
+          ti.interval_start + INTERVAL '8 hour' AS timestamp_sg,
+          COALESCE(sd.avg_spread, NULL) AS avg_spread
+        FROM time_intervals ti
+        LEFT JOIN spread_data sd ON ti.interval_start = sd.interval_start
+        ORDER BY ti.interval_start DESC
+        """
+        
+        spread_df = pd.read_sql(spread_query, engine)
+        
+        # Convert timestamp to Singapore timezone
+        spread_df['timestamp_sg'] = pd.to_datetime(spread_df['timestamp_sg'])
+        spread_df['time_label'] = spread_df['timestamp_sg'].dt.strftime('%H:%M')
+        
+        # Store in dictionary
+        spread_data[pair] = spread_df
+        
+    except Exception as e:
+        st.error(f"Error processing spread data for {pair}: {e}")
+        spread_data[pair] = pd.DataFrame(columns=['timestamp_sg', 'avg_spread', 'time_label'])
 
 progress_bar.progress(1.0)
 status_text.text(f"Processed {len(selected_pairs)} pairs")
@@ -272,6 +333,7 @@ status_text.text(f"Processed {len(selected_pairs)} pairs")
 # Create Edge Matrix
 with tab1:
     st.markdown("## Edge Matrix (10min timeframe, Last 24 hours, Singapore Time)")
+    st.markdown("### Edge = (Trading PNL + Taker Fee + Funding PNL + SL Fee - Rebate Amount) / Open Collateral")
     
     # Create a matrix with time slots as rows and pairs as columns
     edge_matrix = pd.DataFrame({
@@ -288,12 +350,13 @@ with tab1:
                 edge_by_time = {}
                 for _, row in df.iterrows():
                     if pd.notna(row['edge']):
-                        edge_by_time[row['time_label']] = row['edge']
+                        # Format edge as percentage
+                        edge_by_time[row['time_label']] = f"{row['edge']*100:.1f}%"
                 
                 # Add the pair's edge values to the matrix
                 edge_values = []
                 for time in time_labels:
-                    edge_values.append(edge_by_time.get(time, None))
+                    edge_values.append(edge_by_time.get(time, ""))
                 
                 edge_matrix[pair] = edge_values
     
@@ -303,18 +366,19 @@ with tab1:
     # Legend
     st.markdown("""
     **Edge Legend:**
-    - Very Negative: < -10%
-    - Negative: -10% to -5%
-    - Slightly Negative: -5% to -1%
-    - Neutral: -1% to 1%
-    - Slightly Positive: 1% to 5%
-    - Positive: 5% to 10%
-    - Very Positive: > 10%
-    """)
+    <span style='background-color:rgba(180, 0, 0, 0.9);color:white;padding:2px 6px;border-radius:3px;'>Very Negative (<-10%)</span>
+    <span style='background-color:rgba(255, 0, 0, 0.9);color:white;padding:2px 6px;border-radius:3px;'>Negative (-10% to -5%)</span>
+    <span style='background-color:rgba(255, 150, 150, 0.9);color:black;padding:2px 6px;border-radius:3px;'>Slightly Negative (-5% to -1%)</span>
+    <span style='background-color:rgba(255, 255, 150, 0.9);color:black;padding:2px 6px;border-radius:3px;'>Neutral (-1% to 1%)</span>
+    <span style='background-color:rgba(150, 255, 150, 0.9);color:black;padding:2px 6px;border-radius:3px;'>Slightly Positive (1% to 5%)</span>
+    <span style='background-color:rgba(0, 255, 0, 0.9);color:black;padding:2px 6px;border-radius:3px;'>Positive (5% to 10%)</span>
+    <span style='background-color:rgba(0, 180, 0, 0.9);color:white;padding:2px 6px;border-radius:3px;'>Very Positive (>10%)</span>
+    """, unsafe_allow_html=True)
 
 # Create Volatility Matrix
 with tab2:
     st.markdown("## Volatility Matrix (10min timeframe, Last 24 hours, Singapore Time)")
+    st.markdown("### Annualized Volatility based on price range within 10-minute windows")
     
     # Create a matrix with time slots as rows and pairs as columns
     vol_matrix = pd.DataFrame({
@@ -331,12 +395,13 @@ with tab2:
                 vol_by_time = {}
                 for _, row in df.iterrows():
                     if pd.notna(row['volatility']):
-                        vol_by_time[row['time_label']] = row['volatility']
+                        # Format volatility as percentage
+                        vol_by_time[row['time_label']] = f"{row['volatility']*100:.1f}%"
                 
                 # Add the pair's volatility values to the matrix
                 vol_values = []
                 for time in time_labels:
-                    vol_values.append(vol_by_time.get(time, None))
+                    vol_values.append(vol_by_time.get(time, ""))
                 
                 vol_matrix[pair] = vol_values
     
@@ -346,12 +411,12 @@ with tab2:
     # Legend
     st.markdown("""
     **Volatility Legend:**
-    - Low: < 20%
-    - Medium-Low: 20% to 50%
-    - Medium: 50% to 100%
-    - Medium-High: 100% to 150%
-    - High: > 150%
-    """)
+    <span style='background-color:rgba(0, 180, 0, 0.9);color:white;padding:2px 6px;border-radius:3px;'>Low (<20%)</span>
+    <span style='background-color:rgba(150, 255, 150, 0.9);color:black;padding:2px 6px;border-radius:3px;'>Medium-Low (20% to 50%)</span>
+    <span style='background-color:rgba(255, 255, 150, 0.9);color:black;padding:2px 6px;border-radius:3px;'>Medium (50% to 100%)</span>
+    <span style='background-color:rgba(255, 150, 0, 0.9);color:black;padding:2px 6px;border-radius:3px;'>Medium-High (100% to 150%)</span>
+    <span style='background-color:rgba(255, 0, 0, 0.9);color:white;padding:2px 6px;border-radius:3px;'>High (>150%)</span>
+    """, unsafe_allow_html=True)
     
     # Explanation
     st.markdown("""
@@ -359,6 +424,57 @@ with tab2:
     - Based on price range (high-low) within each 10-minute window
     - Requires at least 3 trades in the interval
     - Annualized for easier comparison
+    """)
+
+# Create Spreads Matrix
+with tab3:
+    st.markdown("## Market Spreads Matrix (10min timeframe, Last 24 hours, Singapore Time)")
+    st.markdown("### Spreads shown in basis points (1bp = 0.01%)")
+    
+    # Create a matrix with time slots as rows and pairs as columns
+    spread_matrix = pd.DataFrame({
+        'Time': time_labels,
+        'Date': date_labels
+    })
+    
+    # Add spread data for each pair
+    for pair in selected_pairs:
+        if pair in spread_data:
+            df = spread_data[pair]
+            if not df.empty:
+                # Create a mapping of time label to spread value
+                spread_by_time = {}
+                for _, row in df.iterrows():
+                    if pd.notna(row['avg_spread']):
+                        # Format spread as basis points
+                        spread_by_time[row['time_label']] = f"{row['avg_spread']*10000:.2f}"
+                
+                # Add the pair's spread values to the matrix
+                spread_values = []
+                for time in time_labels:
+                    spread_values.append(spread_by_time.get(time, ""))
+                
+                spread_matrix[pair] = spread_values
+    
+    # Display the spreads matrix
+    st.dataframe(spread_matrix, use_container_width=True)
+    
+    # Legend
+    st.markdown("""
+    **Spread Legend:**
+    <span style='background-color:rgba(0, 180, 0, 0.9);color:white;padding:2px 6px;border-radius:3px;'>Very Low (<2.5)</span>
+    <span style='background-color:rgba(150, 255, 150, 0.9);color:black;padding:2px 6px;border-radius:3px;'>Low (2.5 to 5)</span>
+    <span style='background-color:rgba(255, 255, 150, 0.9);color:black;padding:2px 6px;border-radius:3px;'>Medium (5 to 10)</span>
+    <span style='background-color:rgba(255, 150, 0, 0.9);color:black;padding:2px 6px;border-radius:3px;'>High (10 to 20)</span>
+    <span style='background-color:rgba(255, 0, 0, 0.9);color:white;padding:2px 6px;border-radius:3px;'>Very High (>20)</span>
+    """, unsafe_allow_html=True)
+    
+    # Notes
+    st.markdown("""
+    **Notes:**
+    - Market spreads are averaged from binanceFuture, gateFuture, and hyperliquidFuture
+    - Spreads are shown in basis points (1bp = 0.01%)
+    - Empty cells indicate no data for that time slot
     """)
 
 # Add performance info in sidebar
