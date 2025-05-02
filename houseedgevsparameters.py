@@ -648,7 +648,7 @@ def format_time_display(dt):
 
 # Function to calculate and record fee for a 0.1% price move
 def calculate_and_record_fee(pair_name, timestamp):
-    """Calculate and record the fee for a 0.1% price move for the given pair."""
+    """Calculate and record the fee percentage for a 0.1% price move for the given pair."""
     # Get required parameters
     pnl_base_rate = st.session_state.pair_data[pair_name]['pnl_base_rate']
     position_multiplier = st.session_state.pair_data[pair_name]['position_multiplier']
@@ -667,8 +667,8 @@ def calculate_and_record_fee(pair_name, timestamp):
         rate_multiplier = st.session_state.pair_data[pair_name]['rate_multiplier']
         rate_exponent = st.session_state.pair_data[pair_name]['rate_exponent']
     
-    # Calculate fee and percentage
-    fee_amount, fee_pct = calculate_fee_for_move(
+    # Calculate fee percentage
+    fee_pct = calculate_fee_for_move(
         0.1, 
         pnl_base_rate, 
         position_multiplier,
@@ -677,13 +677,12 @@ def calculate_and_record_fee(pair_name, timestamp):
     )
     
     # Record in fee history
-    st.session_state.pair_data[pair_name]['fee_history'].append((timestamp, fee_amount))
+    st.session_state.pair_data[pair_name]['fee_history'].append((timestamp, fee_pct))
     
     # Update current fee values in session state
-    st.session_state.pair_data[pair_name]['current_fee_amount'] = fee_amount
     st.session_state.pair_data[pair_name]['current_fee_percentage'] = fee_pct
     
-    return fee_amount, fee_pct
+    return fee_pct
 
 # Function to process edge data and calculate parameter updates for a specific pair
 def process_edge_data(pair_name, timestamp=None):
@@ -1008,9 +1007,9 @@ def create_fee_plot(pair_name):
     
     return fig
 
-# Function to create fee curve plot for a specific pair
+# Function to create fee percentage vs price move plot
 def create_fee_curve_plot(pair_name):
-    """Create two plots: fee amount vs price move and fee percentage vs price move."""
+    """Create a plot of fee percentage vs price move."""
     # Ensure pair state is initialized
     init_pair_state(pair_name)
     
@@ -1022,89 +1021,60 @@ def create_fee_curve_plot(pair_name):
     
     # Calculate fee across a range of move sizes
     move_sizes = np.linspace(0, 1, 101)  # Focus on positive moves only (where fees apply)
-    current_fees = []
     current_fee_pcts = []
     
     for move in move_sizes:
-        fee_amount, fee_pct = calculate_fee_for_move(
+        fee_pct = calculate_fee_for_move(
             move, 
             pnl_base_rate, 
             position_multiplier,
             rate_multiplier,
             rate_exponent
         )
-        current_fees.append(fee_amount)
         current_fee_pcts.append(fee_pct)
     
-    # Create figure and axis for fee amount
-    fig1, ax1 = plt.subplots(figsize=(10, 6))
+    # Create figure and axis for fee percentage
+    fig, ax = plt.subplots(figsize=(10, 6))
     
-    # Plot current fee curve
-    ax1.plot(move_sizes, current_fees, 'b-', label='Current Fee Amount')
+    # Plot current fee percentage curve
+    ax.plot(move_sizes, current_fee_pcts, 'g-', label='Current Fee Percentage')
     
-    # Plot proposed fee curve if available
+    # Plot proposed fee percentage curve if available
     if (st.session_state.pair_data[pair_name]['proposed_buffer_rate'] is not None and 
         st.session_state.pair_data[pair_name]['proposed_position_multiplier'] is not None):
         
         proposed_buffer = st.session_state.pair_data[pair_name]['proposed_buffer_rate']
         proposed_multiplier = st.session_state.pair_data[pair_name]['proposed_position_multiplier']
         
-        proposed_fees = []
         proposed_fee_pcts = []
         
         for move in move_sizes:
-            fee_amount, fee_pct = calculate_fee_for_move(
+            fee_pct = calculate_fee_for_move(
                 move, 
                 pnl_base_rate, 
                 proposed_multiplier,
                 rate_multiplier,
                 rate_exponent
             )
-            proposed_fees.append(fee_amount)
             proposed_fee_pcts.append(fee_pct)
         
-        ax1.plot(move_sizes, proposed_fees, 'r--', label='Proposed Fee Amount')
+        ax.plot(move_sizes, proposed_fee_pcts, 'r--', label='Proposed Fee Percentage')
     
     # Set title and labels
-    ax1.set_title(f'Fee Amount vs. Price Move Size - {pair_name}')
-    ax1.set_xlabel('Price Move (%)')
-    ax1.set_ylabel('Fee Amount')
+    ax.set_title(f'Fee Percentage vs. Price Move Size - {pair_name}')
+    ax.set_xlabel('Price Move (%)')
+    ax.set_ylabel('Fee (% of Profit)')
     
     # Add grid
-    ax1.grid(True, alpha=0.3)
+    ax.grid(True, alpha=0.3)
     
     # Add legend
-    ax1.legend()
+    ax.legend()
     
     # Tight layout
     plt.tight_layout()
     
-    # Create figure and axis for fee percentage
-    fig2, ax2 = plt.subplots(figsize=(10, 6))
-    
-    # Plot current fee percentage curve
-    ax2.plot(move_sizes, current_fee_pcts, 'g-', label='Current Fee Percentage')
-    
-    # Plot proposed fee percentage curve if available
-    if (st.session_state.pair_data[pair_name]['proposed_buffer_rate'] is not None and 
-        st.session_state.pair_data[pair_name]['proposed_position_multiplier'] is not None):
-        ax2.plot(move_sizes, proposed_fee_pcts, 'r--', label='Proposed Fee Percentage')
-    
-    # Set title and labels
-    ax2.set_title(f'Fee Percentage vs. Price Move Size - {pair_name}')
-    ax2.set_xlabel('Price Move (%)')
-    ax2.set_ylabel('Fee (% of Profit)')
-    
-    # Add grid
-    ax2.grid(True, alpha=0.3)
-    
-    # Add legend
-    ax2.legend()
-    
-    # Tight layout
-    plt.tight_layout()
-    
-    return fig1, fig2
+    return fig
 
 # Function to create PM vs fee sensitivity plot
 def create_pm_fee_sensitivity_plot(pair_name):
@@ -1117,10 +1087,10 @@ def create_pm_fee_sensitivity_plot(pair_name):
     rate_multiplier = st.session_state.pair_data[pair_name].get('rate_multiplier', 10000)
     rate_exponent = st.session_state.pair_data[pair_name].get('rate_exponent', 1)
     
-    # Calculate fee for 0.1% move for each PM value
+    # Calculate fee percentage for 0.1% move for each PM value
     fees = []
     for pm in pm_values:
-        fee_amount, fee_pct = calculate_fee_for_move(
+        fee_pct = calculate_fee_for_move(
             0.1, 
             pnl_base_rate, 
             pm,
@@ -1137,7 +1107,7 @@ def create_pm_fee_sensitivity_plot(pair_name):
     
     # Add current PM position
     current_pm = st.session_state.pair_data[pair_name]['position_multiplier']
-    current_fee_amount, current_fee = calculate_fee_for_move(
+    current_fee = calculate_fee_for_move(
         0.1, 
         pnl_base_rate, 
         current_pm,
@@ -1150,7 +1120,7 @@ def create_pm_fee_sensitivity_plot(pair_name):
     if st.session_state.pair_data[pair_name]['proposed_position_multiplier'] is not None:
         proposed_pm = st.session_state.pair_data[pair_name]['proposed_position_multiplier']
         # Calculate proposed fee
-        proposed_fee_amount, proposed_fee = calculate_fee_for_move(
+        proposed_fee = calculate_fee_for_move(
             0.1, 
             pnl_base_rate, 
             proposed_pm,
@@ -1200,18 +1170,16 @@ def create_fee_comparison_table(pair_name):
     pnl_base_rate = st.session_state.pair_data[pair_name]['pnl_base_rate']
     
     # Calculate fees with current parameters
-    current_fees = []
     current_fee_pcts = []
     
     for move in move_sizes:
-        fee_amount, fee_pct = calculate_fee_for_move(
+        fee_pct = calculate_fee_for_move(
             move, 
             pnl_base_rate, 
             current_multiplier,
             rate_multiplier,
             rate_exponent
         )
-        current_fees.append(fee_amount)
         current_fee_pcts.append(fee_pct)
     
     # Calculate fees with proposed parameters if available
@@ -1221,26 +1189,22 @@ def create_fee_comparison_table(pair_name):
         proposed_buffer = st.session_state.pair_data[pair_name]['proposed_buffer_rate']
         proposed_multiplier = st.session_state.pair_data[pair_name]['proposed_position_multiplier']
         
-        proposed_fees = []
         proposed_fee_pcts = []
         
         for move in move_sizes:
-            fee_amount, fee_pct = calculate_fee_for_move(
+            fee_pct = calculate_fee_for_move(
                 move, 
                 pnl_base_rate, 
                 proposed_multiplier,
                 rate_multiplier,
                 rate_exponent
             )
-            proposed_fees.append(fee_amount)
             proposed_fee_pcts.append(fee_pct)
         
         # Create dataframe for the table with both current and proposed
         fee_df = pd.DataFrame({
             'Move Size (%)': move_sizes,
-            'Current Fee Amount': current_fees,
             'Current Fee (%)': current_fee_pcts,
-            'Proposed Fee Amount': proposed_fees,
             'Proposed Fee (%)': proposed_fee_pcts,
             'Fee % Change': [(new - old) / old * 100 if old != 0 else float('inf') 
                               for new, old in zip(proposed_fee_pcts, current_fee_pcts)]
@@ -1249,7 +1213,6 @@ def create_fee_comparison_table(pair_name):
         # Create dataframe with just current fees
         fee_df = pd.DataFrame({
             'Move Size (%)': move_sizes,
-            'Current Fee Amount': current_fees,
             'Current Fee (%)': current_fee_pcts
         })
     
@@ -1650,12 +1613,8 @@ def render_pair_detail(pair_name):
     with detail_tabs[2]:
         st.markdown("### Fee Analysis")
         
-        # Create fee curve plots
-        fee_amount_fig, fee_percentage_fig = create_fee_curve_plot(pair_name)
-        if fee_amount_fig is not None:
-            st.markdown("#### Fee Amount vs Price Move")
-            st.pyplot(fee_amount_fig)
-        
+        # Create fee curve plot
+        fee_percentage_fig = create_fee_curve_plot(pair_name)
         if fee_percentage_fig is not None:
             st.markdown("#### Fee Percentage vs Price Move")
             st.pyplot(fee_percentage_fig)
@@ -1956,10 +1915,8 @@ def main():
     # Parameter control section in sidebar
     st.sidebar.markdown("### Parameter Controls")
     
-    # Data mode selection
-    st.sidebar.markdown("#### Data Source")
-    simulated_data = st.sidebar.checkbox("Use Simulated Data", value=st.session_state.get('simulated_data_mode', True))
-    st.session_state.simulated_data_mode = simulated_data
+    # Always use simulated data for now
+    st.session_state.simulated_data_mode = True
     
     # Pair selection
     st.sidebar.markdown("#### Trading Pair Selection")
@@ -1986,6 +1943,24 @@ def main():
             st.rerun()
         else:
             st.sidebar.warning(f"{selected_pair} is already being monitored.")
+    
+    # Add all pairs button
+    if st.sidebar.button("Add All Pairs", key="add_all_pairs"):
+        new_pairs_added = 0
+        for pair in available_pairs:
+            if pair not in st.session_state.monitored_pairs:
+                st.session_state.monitored_pairs.append(pair)
+                # Initialize the pair
+                initialize_pair(pair)
+                new_pairs_added += 1
+        
+        if new_pairs_added > 0:
+            st.sidebar.success(f"Added {new_pairs_added} new pairs to monitoring list!")
+            # Reset navigation state and rerun
+            st.session_state.navigating = False
+            st.rerun()
+        else:
+            st.sidebar.info("All available pairs are already being monitored.")
     
     # Remove pair button
     if st.session_state.monitored_pairs:
