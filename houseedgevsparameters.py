@@ -471,29 +471,46 @@ def update_buffer_rate(current_buffer, edge, edge_ref, max_leverage, alpha_up=0.
     return max(lower_bound, min(upper_bound, current_buffer + adjustment))
 
 # Function to update position multiplier based on edge comparison with improved scaling
-def update_position_multiplier(current_multiplier, edge, edge_ref, alpha_up=0.02, alpha_down=0.1):
+def update_position_multiplier_logarithmic(current_multiplier, edge, edge_ref, alpha_up=0.02, alpha_down=0.1):
     """
-    Update position_multiplier based on edge comparison with proper scaling.
+    Update position_multiplier based on edge comparison using logarithmic scaling.
     Decreases sharply when edge declines, increases slowly when edge improves.
+    Uses different alpha values for up/down adjustments.
     """
+    # Safety checks
+    if edge_ref == 0 or current_multiplier <= 0:
+        return max(1, min(14000, current_multiplier))
+    
     delta = edge - edge_ref
-    upper_bound = 14000
+    upper_bound = 1500  # Maintain the same upper bound as original
     lower_bound = 1
     
-    # Calculate a normalized delta relative to the reference edge
-    # This scales the adjustment to the magnitude of the reference edge
-    if edge_ref != 0:
-        normalized_delta = delta / abs(edge_ref)  # Scale relative to reference
-    else:
-        normalized_delta = delta  # Fallback if reference is zero
+    # Calculate normalized delta relative to reference edge
+    normalized_delta = delta / abs(edge_ref)
     
-    # Apply caps to avoid extreme adjustments
+    # Cap normalized delta to avoid extreme adjustments
     normalized_delta = max(min(normalized_delta, 1.0), -1.0)
     
-    # Asymmetric adjustment: fast down, slow up
-    adjustment = -alpha_down * abs(normalized_delta) * current_multiplier if normalized_delta < 0 else alpha_up * normalized_delta * current_multiplier
+    # Convert to log space
+    log_pm = np.log(current_multiplier)
     
-    return max(lower_bound, min(upper_bound, current_multiplier + adjustment))
+    # Apply asymmetric adjustment in log space
+    # Use alpha_down when edge declines (negative delta), alpha_up when edge improves
+    if normalized_delta < 0:
+        # Edge declining - decrease PM more aggressively
+        adjustment = -alpha_down * abs(normalized_delta)
+    else:
+        # Edge improving - increase PM more conservatively
+        adjustment = alpha_up * normalized_delta
+    
+    # Apply adjustment in log space
+    new_log_pm = log_pm + adjustment
+    
+    # Convert back to linear space
+    new_pm = np.exp(new_log_pm)
+    
+    # Apply bounds
+    return max(lower_bound, min(upper_bound, new_pm))
 
 # New function to get status of a pair
 def get_pair_status(current_edge, reference_edge, threshold=0.2):
