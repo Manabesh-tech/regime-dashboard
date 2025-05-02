@@ -330,6 +330,17 @@ for i, pair in enumerate(selected_pairs):
 progress_bar.progress(1.0)
 status_text.text(f"Processed {len(selected_pairs)} pairs")
 
+# Function to calculate data density for pairs
+def calculate_data_density(data_dict, value_column):
+    data_counts = {}
+    for pair, df in data_dict.items():
+        if not df.empty and value_column in df.columns:
+            # Count non-null values
+            data_counts[pair] = df[value_column].notna().sum()
+        else:
+            data_counts[pair] = 0
+    return data_counts
+
 # Create Edge Matrix
 with tab1:
     st.markdown("## Edge Matrix (10min timeframe, Last 24 hours, Singapore Time)")
@@ -341,8 +352,14 @@ with tab1:
         'Date': date_labels
     })
     
-    # Add edge data for each pair
-    for pair in selected_pairs:
+    # Calculate data density for edge
+    edge_counts = calculate_data_density(edge_data, 'edge')
+    
+    # Sort pairs by data density (highest first)
+    sorted_pairs = sorted(selected_pairs, key=lambda p: edge_counts.get(p, 0), reverse=True)
+    
+    # Add edge data for pairs in density-sorted order
+    for pair in sorted_pairs:
         if pair in edge_data:
             df = edge_data[pair]
             if not df.empty:
@@ -386,8 +403,14 @@ with tab2:
         'Date': date_labels
     })
     
-    # Add volatility data for each pair
-    for pair in selected_pairs:
+    # Calculate data density for volatility
+    vol_counts = calculate_data_density(vol_data, 'volatility')
+    
+    # Sort pairs by data density (highest first)
+    sorted_pairs = sorted(selected_pairs, key=lambda p: vol_counts.get(p, 0), reverse=True)
+    
+    # Add volatility data for pairs in density-sorted order
+    for pair in sorted_pairs:
         if pair in vol_data:
             df = vol_data[pair]
             if not df.empty:
@@ -437,8 +460,14 @@ with tab3:
         'Date': date_labels
     })
     
-    # Add spread data for each pair
-    for pair in selected_pairs:
+    # Calculate data density for spreads
+    spread_counts = calculate_data_density(spread_data, 'avg_spread')
+    
+    # Sort pairs by data density (highest first)
+    sorted_pairs = sorted(selected_pairs, key=lambda p: spread_counts.get(p, 0), reverse=True)
+    
+    # Add spread data for pairs in density-sorted order
+    for pair in sorted_pairs:
         if pair in spread_data:
             df = spread_data[pair]
             if not df.empty:
