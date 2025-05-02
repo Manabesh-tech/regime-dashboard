@@ -556,8 +556,7 @@ def init_pair_state(pair_name):
             'reference_position_multiplier': None,
             'last_update_time': None,
             'params_changed': False,
-            'current_fee_amount': None,
-            'current_fee_percentage': None
+                       'current_fee_percentage': None
         }
 
 # Initialize session state variables
@@ -1792,7 +1791,7 @@ def render_pair_monitor(pair_name):
             rate_exponent = st.session_state.pair_data[pair_name].get('rate_exponent', 1)
             
             # Calculate current and new fees - ensure proper calculation
-            current_fee_amount, current_fee_pct = calculate_fee_for_move(
+            current_fee_pct = calculate_fee_for_move(
                 0.1, 
                 st.session_state.pair_data[pair_name]['pnl_base_rate'], 
                 st.session_state.pair_data[pair_name]['position_multiplier'],
@@ -1808,7 +1807,7 @@ def render_pair_monitor(pair_name):
                 rate_exponent
             )
             
-            delta_fee_amount = new_fee_amount - current_fee_amount
+            
             delta_fee_pct = new_fee_pct - current_fee_pct
             
             # Calculate percentage change safely
