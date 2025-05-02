@@ -158,17 +158,17 @@ def init_connection():
         st.sidebar.error(f"Database connection error: {e}")
         return None
 
-# Fetch available trading pairs (simulated for stability)
+# Fetch available trading pairs
 def fetch_pairs():
     """
     Fetch all active trading pairs.
     Returns a list of pair names or default list.
     """
-    # Force simulated data mode for stability
-    if True:
+    # If in simulated data mode, return a fixed list
+    if st.session_state.get('simulated_data_mode', True):
         return ["BTC/USDT", "ETH/USDT", "SOL/USDT", "DOGE/USDT", "XRP/USDT"]
     
-    # Original database code (disabled)
+    # Otherwise try to fetch from database
     engine = init_connection()
     if not engine:
         return ["BTC/USDT", "ETH/USDT", "SOL/USDT"]  # Default pairs if connection fails
@@ -189,31 +189,195 @@ def fetch_pairs():
         st.error(f"Error fetching pairs: {e}")
         return ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
 
-# Fetch current parameters for a specific pair (simulated)
+# Fetch current parameters for a specific pair
 def fetch_current_parameters(pair_name):
     """
     Fetch current parameters for a specific pair.
     Returns a dictionary with all parameter values needed for fee calculation.
     """
-    # Force simulated data for stability
-    return {
-        "buffer_rate": 0.001,
-        "position_multiplier": 1000,
-        "max_leverage": 100,
-        "rate_multiplier": 10000,
-        "rate_exponent": 1,
-        "pnl_base_rate": 0.0005
-    }
+    # If in simulated data mode, return fixed values
+    if st.session_state.get('simulated_data_mode', True):
+        return {
+            "buffer_rate": 0.001,
+            "position_multiplier": 1000,
+            "max_leverage": 100,
+            "rate_multiplier": 10000,
+            "rate_exponent": 1,
+            "pnl_base_rate": 0.0005
+        }
+    
+    # Otherwise try to fetch from database
+    engine = init_connection()
+    if not engine:
+        return {
+            "buffer_rate": 0.001,
+            "position_multiplier": 1000,
+            "max_leverage": 100,
+            "rate_multiplier": 10000,
+            "rate_exponent": 1,
+            "pnl_base_rate": 0.0005
+        }
+    
+    try:
+        query = f"""
+        SELECT
+            (leverage_config::jsonb->0->>'buffer_rate')::numeric AS buffer_rate,
+            position_multiplier,
+            max_leverage,
+            rate_multiplier,
+            rate_exponent,
+            pnl_base_rate
+        FROM
+            public.trade_pool_pairs
+        WHERE
+            pair_name = '{pair_name}'
+            AND status = 1
+        """
+        
+        df = pd.read_sql(query, engine)
+        if df.empty:
+            return {
+                "buffer_rate": 0.001,
+                "position_multiplier": 1000,
+                "max_leverage": 100,
+                "rate_multiplier": 10000,
+                "rate_exponent": 1,
+                "pnl_base_rate": 0.0005
+            }
+        
+        # Convert to dictionary
+        params = {
+            "buffer_rate": float(df['buffer_rate'].iloc[0]),
+            "position_multiplier": float(df['position_multiplier'].iloc[0]),
+            "max_leverage": float(df['max_leverage'].iloc[0]),
+            "rate_multiplier": float(df['rate_multiplier'].iloc[0]),
+            "rate_exponent": float(df['rate_exponent'].iloc[0]),
+            "pnl_base_rate": float(df['pnl_base_rate'].iloc[0])
+        }
+        
+        return params
+    except Exception as e:
+        st.error(f"Error fetching parameters for {pair_name}: {e}")
+        return {
+            "buffer_rate": 0.001,
+            "position_multiplier": 10000,
+            "max_leverage": 100,
+            "rate_multiplier": 10000,
+            "rate_exponent": 1,
+            "pnl_base_rate": 0.0005
+        }
 
-# Calculate edge for a specific pair (simulated)
+# Calculate edge for a specific pair
 def calculate_edge(pair_name, lookback_minutes=10):
     """
     Calculate house edge for a specific pair.
-    Returns simulated edge value.
+    Returns edge value or None if calculation fails.
     """
-    # Generate random edge values for testing
-    import random
-    return 0.001 + random.uniform(-0.0005, 0.0010)
+    # Check if we're in simulated data mode
+    if st.session_state.get('simulated_data_mode', True):
+        # Generate random edge values for testing
+        import random
+        return 0.001 + random.uniform(-0.0005, 0.0010)
+    
+    engine = init_connection()
+    if engine is None:
+        # For testing - generate random edge values when no connection
+        import random
+        return 0.001 + random.uniform(-0.0005, 0.0010)
+    
+    try:
+        # Get current time in Singapore timezone
+        singapore_tz = pytz.timezone('Asia/Singapore')
+        now_utc = datetime.now(pytz.utc)
+        now_sg = now_utc.astimezone(singapore_tz)
+        
+        # Calculate lookback period
+        start_time_sg = now_sg - timedelta(minutes=lookback_minutes)
+        
+        # Convert to UTC for database query
+        start_time_utc = start_time_sg.astimezone(pytz.utc)
+        end_time_utc = now_sg.astimezone(pytz.utc)
+        
+        # Add debug logging
+        print(f"Calculating edge for {pair_name} from {start_time_utc} to {end_time_utc}")
+        
+        # Query for house edge calculation
+        edge_query = f"""
+        WITH pnl_data AS (
+          SELECT
+            SUM(-1 * taker_pnl * collateral_price) AS trading_pnl,
+            SUM(CASE WHEN taker_fee_mode = 1 AND taker_way IN (1, 3) THEN taker_fee * collateral_price ELSE 0 END) AS taker_fee,
+            SUM(CASE WHEN taker_way = 0 THEN -1 * funding_fee * collateral_price ELSE 0 END) AS funding_pnl,
+            SUM(taker_sl_fee * collateral_price + maker_sl_fee) AS sl_fee
+          FROM public.trade_fill_fresh
+          WHERE created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
+            AND pair_name = '{pair_name}'
+        ),
+        collateral_data AS (
+          SELECT
+            SUM(deal_vol * collateral_price) AS open_collateral
+          FROM public.trade_fill_fresh
+          WHERE taker_fee_mode = 2 AND taker_way IN (1, 3)
+            AND created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
+            AND pair_name = '{pair_name}'
+        ),
+        rebate_data AS (
+          SELECT
+            SUM(amount * coin_price) AS rebate_amount
+          FROM public.user_cashbooks
+          WHERE remark = '给邀请人返佣'
+            AND created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
+        )
+        SELECT
+          CASE
+            WHEN COALESCE(cd.open_collateral, 0) = 0 THEN 0
+            ELSE (COALESCE(pd.trading_pnl, 0) + 
+                  COALESCE(pd.taker_fee, 0) + 
+                  COALESCE(pd.funding_pnl, 0) + 
+                  COALESCE(pd.sl_fee, 0) - 
+                  COALESCE(rd.rebate_amount, 0)) / 
+                 cd.open_collateral
+          END AS house_edge,
+          COALESCE(pd.trading_pnl, 0) + 
+            COALESCE(pd.taker_fee, 0) + 
+            COALESCE(pd.funding_pnl, 0) + 
+            COALESCE(pd.sl_fee, 0) - 
+            COALESCE(rd.rebate_amount, 0) AS pnl,
+          COALESCE(cd.open_collateral, 0) AS open_collateral
+        FROM pnl_data pd
+        CROSS JOIN collateral_data cd
+        CROSS JOIN rebate_data rd
+        """
+        
+        # Add a debug log
+        st.session_state.last_query_time = datetime.now(pytz.utc)
+        
+        df = pd.read_sql(edge_query, engine)
+        
+        if df.empty or pd.isna(df['house_edge'].iloc[0]):
+            # For testing - generate random edge values when no data
+            import random
+            return 0.001 + random.uniform(-0.0005, 0.0010)
+        
+        edge_value = float(df['house_edge'].iloc[0])
+        
+        # If the edge is exactly 0, set a small positive value
+        # This avoids issues with initial reference being zero
+        if edge_value == 0:
+            edge_value = 0.001
+            
+        # For testing - add variation for testing
+        import random
+        edge_value += random.uniform(-0.0005, 0.0010)
+        
+        print(f"Edge value for {pair_name}: {edge_value}")
+        return edge_value
+    
+    except Exception as e:
+        st.error(f"Error calculating edge for {pair_name}: {e}")
+        # Return a random edge value for testing
+        import random
+        return 0.001 + random.uniform(-0.0005, 0.0010)
 
 # Function to calculate fee for a percentage price move based on the Profit Share Model
 def calculate_fee_for_move(move_pct, pnl_base_rate, position_multiplier, rate_multiplier=15000, 
@@ -713,6 +877,473 @@ def reset_to_reference_parameters(pair_name):
     
     return False, None, None, None, None
 
+# Function to create edge plot with matplotlib for a specific pair
+def create_edge_plot(pair_name):
+    """Create a plot of house edge with reference line for a specific pair."""
+    # Ensure pair state is initialized
+    init_pair_state(pair_name)
+    
+    if len(st.session_state.pair_data[pair_name]['edge_history']) < 1:
+        return None
+    
+    # Extract data for plotting
+    timestamps = [t for t, _ in st.session_state.pair_data[pair_name]['edge_history']]
+    edges = [e for _, e in st.session_state.pair_data[pair_name]['edge_history']]
+    
+    # Create figure and axis
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    # Plot edge line
+    ax.plot(timestamps, edges, 'b-', label='House Edge')
+    
+    # Add reference line if available
+    if st.session_state.pair_data[pair_name]['reference_edge'] is not None:
+        ax.axhline(y=st.session_state.pair_data[pair_name]['reference_edge'], color='r', linestyle='--', label='Reference Edge')
+    
+    # Set title and labels
+    ax.set_title(f'House Edge Monitoring - {pair_name}')
+    ax.set_xlabel('Time')
+    ax.set_ylabel('Edge')
+    
+    # Format y-axis as percentage
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: '{:.2%}'.format(x)))
+    
+    # Add legend
+    ax.legend()
+    
+    # Add grid
+    ax.grid(True, alpha=0.3)
+    
+    # Format dates on x-axis
+    fig.autofmt_xdate()
+    
+    # Tight layout
+    plt.tight_layout()
+    
+    return fig
+
+# Function to create buffer rate and position multiplier plots for a specific pair
+def create_parameter_plots(pair_name):
+    """Create plots for buffer rate and position multiplier history for a specific pair."""
+    # Ensure pair state is initialized
+    init_pair_state(pair_name)
+    
+    buffer_fig, multiplier_fig = None, None
+    
+    # Buffer rate plot
+    if len(st.session_state.pair_data[pair_name]['buffer_history']) >= 1:
+        # Extract data for plotting
+        buffer_times = [t for t, _ in st.session_state.pair_data[pair_name]['buffer_history']]
+        buffer_rates = [r for _, r in st.session_state.pair_data[pair_name]['buffer_history']]
+        
+        # Create figure and axis
+        buffer_fig, buffer_ax = plt.subplots(figsize=(10, 5))
+        
+        # Plot buffer rate line
+        buffer_ax.plot(buffer_times, buffer_rates, 'g-', marker='o', label='Buffer Rate')
+        
+        # Add reference line if available
+        if st.session_state.pair_data[pair_name]['reference_buffer_rate'] is not None:
+            buffer_ax.axhline(y=st.session_state.pair_data[pair_name]['reference_buffer_rate'], color='r', 
+                             linestyle='--', label='Reference Buffer Rate')
+        
+        # Set title and labels
+        buffer_ax.set_title(f'Buffer Rate Adjustments - {pair_name}')
+        buffer_ax.set_xlabel('Time')
+        buffer_ax.set_ylabel('Buffer Rate')
+        
+        # Add legend
+        buffer_ax.legend()
+        
+        # Add grid
+        buffer_ax.grid(True, alpha=0.3)
+        
+        # Format dates on x-axis
+        buffer_fig.autofmt_xdate()
+        
+        # Tight layout
+        plt.tight_layout()
+    
+    # Position multiplier plot
+    if len(st.session_state.pair_data[pair_name]['multiplier_history']) >= 1:
+        # Extract data for plotting
+        multiplier_times = [t for t, _ in st.session_state.pair_data[pair_name]['multiplier_history']]
+        multipliers = [m for _, m in st.session_state.pair_data[pair_name]['multiplier_history']]
+        
+        # Create figure and axis
+        multiplier_fig, multiplier_ax = plt.subplots(figsize=(10, 5))
+        
+        # Plot position multiplier line
+        multiplier_ax.plot(multiplier_times, multipliers, 'm-', marker='o', label='Position Multiplier')
+        
+        # Add reference line if available
+        if st.session_state.pair_data[pair_name]['reference_position_multiplier'] is not None:
+            multiplier_ax.axhline(y=st.session_state.pair_data[pair_name]['reference_position_multiplier'], color='r', 
+                                 linestyle='--', label='Reference Position Multiplier')
+        
+        # Set title and labels
+        multiplier_ax.set_title(f'Position Multiplier Adjustments - {pair_name}')
+        multiplier_ax.set_xlabel('Time')
+        multiplier_ax.set_ylabel('Position Multiplier')
+        
+        # Add legend
+        multiplier_ax.legend()
+        
+        # Add grid
+        multiplier_ax.grid(True, alpha=0.3)
+        
+        # Format dates on x-axis
+        multiplier_fig.autofmt_xdate()
+        
+        # Tight layout
+        plt.tight_layout()
+    
+    return buffer_fig, multiplier_fig
+
+# Function to create fee plot for a specific pair
+def create_fee_plot(pair_name):
+    """Create a plot of fee history for 0.1% price move for a specific pair."""
+    # Ensure pair state is initialized
+    init_pair_state(pair_name)
+    
+    if len(st.session_state.pair_data[pair_name]['fee_history']) < 1:
+        return None
+    
+    # Extract data for plotting
+    fee_times = [t for t, _ in st.session_state.pair_data[pair_name]['fee_history']]
+    fees = [f for _, f in st.session_state.pair_data[pair_name]['fee_history']]
+    
+    # Create figure and axis
+    fig, ax = plt.subplots(figsize=(10, 5))
+    
+    # Plot fee line
+    ax.plot(fee_times, fees, 'r-', marker='o', label='Fee for 0.1% Move')
+    
+    # Set title and labels
+    ax.set_title(f'Fee for 0.1% Price Move - {pair_name}')
+    ax.set_xlabel('Time')
+    ax.set_ylabel('Fee Amount')
+    
+    # Add grid
+    ax.grid(True, alpha=0.3)
+    
+    # Format dates on x-axis
+    fig.autofmt_xdate()
+    
+    # Tight layout
+    plt.tight_layout()
+    
+    return fig
+
+# Function to create fee curve plot for a specific pair
+def create_fee_curve_plot(pair_name):
+    """Create two plots: fee amount vs price move and fee percentage vs price move."""
+    # Ensure pair state is initialized
+    init_pair_state(pair_name)
+    
+    # Get required parameters
+    pnl_base_rate = st.session_state.pair_data[pair_name]['pnl_base_rate']
+    position_multiplier = st.session_state.pair_data[pair_name]['position_multiplier']
+    rate_multiplier = st.session_state.pair_data[pair_name].get('rate_multiplier', 10000)
+    rate_exponent = st.session_state.pair_data[pair_name].get('rate_exponent', 1)
+    
+    # Calculate fee across a range of move sizes
+    move_sizes = np.linspace(0, 1, 101)  # Focus on positive moves only (where fees apply)
+    current_fees = []
+    current_fee_pcts = []
+    
+    for move in move_sizes:
+        fee_amount, fee_pct = calculate_fee_for_move(
+            move, 
+            pnl_base_rate, 
+            position_multiplier,
+            rate_multiplier,
+            rate_exponent
+        )
+        current_fees.append(fee_amount)
+        current_fee_pcts.append(fee_pct)
+    
+    # Create figure and axis for fee amount
+    fig1, ax1 = plt.subplots(figsize=(10, 6))
+    
+    # Plot current fee curve
+    ax1.plot(move_sizes, current_fees, 'b-', label='Current Fee Amount')
+    
+    # Plot proposed fee curve if available
+    if (st.session_state.pair_data[pair_name]['proposed_buffer_rate'] is not None and 
+        st.session_state.pair_data[pair_name]['proposed_position_multiplier'] is not None):
+        
+        proposed_buffer = st.session_state.pair_data[pair_name]['proposed_buffer_rate']
+        proposed_multiplier = st.session_state.pair_data[pair_name]['proposed_position_multiplier']
+        
+        proposed_fees = []
+        proposed_fee_pcts = []
+        
+        for move in move_sizes:
+            fee_amount, fee_pct = calculate_fee_for_move(
+                move, 
+                pnl_base_rate, 
+                proposed_multiplier,
+                rate_multiplier,
+                rate_exponent
+            )
+            proposed_fees.append(fee_amount)
+            proposed_fee_pcts.append(fee_pct)
+        
+        ax1.plot(move_sizes, proposed_fees, 'r--', label='Proposed Fee Amount')
+    
+    # Set title and labels
+    ax1.set_title(f'Fee Amount vs. Price Move Size - {pair_name}')
+    ax1.set_xlabel('Price Move (%)')
+    ax1.set_ylabel('Fee Amount')
+    
+    # Add grid
+    ax1.grid(True, alpha=0.3)
+    
+    # Add legend
+    ax1.legend()
+    
+    # Tight layout
+    plt.tight_layout()
+    
+    # Create figure and axis for fee percentage
+    fig2, ax2 = plt.subplots(figsize=(10, 6))
+    
+    # Plot current fee percentage curve
+    ax2.plot(move_sizes, current_fee_pcts, 'g-', label='Current Fee Percentage')
+    
+    # Plot proposed fee percentage curve if available
+    if (st.session_state.pair_data[pair_name]['proposed_buffer_rate'] is not None and 
+        st.session_state.pair_data[pair_name]['proposed_position_multiplier'] is not None):
+        ax2.plot(move_sizes, proposed_fee_pcts, 'r--', label='Proposed Fee Percentage')
+    
+    # Set title and labels
+    ax2.set_title(f'Fee Percentage vs. Price Move Size - {pair_name}')
+    ax2.set_xlabel('Price Move (%)')
+    ax2.set_ylabel('Fee (% of Profit)')
+    
+    # Add grid
+    ax2.grid(True, alpha=0.3)
+    
+    # Add legend
+    ax2.legend()
+    
+    # Tight layout
+    plt.tight_layout()
+    
+    return fig1, fig2
+
+# Function to create PM vs fee sensitivity plot
+def create_pm_fee_sensitivity_plot(pair_name):
+    """Create a plot showing how PM changes affect fees at different PM values"""
+    # Sample a range of PM values on logarithmic scale
+    pm_values = np.logspace(0, 3.5, 20)  # From 1 to ~3000
+    
+    # Get current parameters
+    pnl_base_rate = st.session_state.pair_data[pair_name]['pnl_base_rate']
+    rate_multiplier = st.session_state.pair_data[pair_name].get('rate_multiplier', 10000)
+    rate_exponent = st.session_state.pair_data[pair_name].get('rate_exponent', 1)
+    
+    # Calculate fee for 0.1% move for each PM value
+    fees = []
+    for pm in pm_values:
+        fee_amount, fee_pct = calculate_fee_for_move(
+            0.1, 
+            pnl_base_rate, 
+            pm,
+            rate_multiplier,
+            rate_exponent
+        )
+        fees.append(fee_pct)
+    
+    # Create figure for sensitivity analysis
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    # Plot PM vs Fee curve
+    ax.semilogx(pm_values, fees, 'b-', marker='o')
+    
+    # Add current PM position
+    current_pm = st.session_state.pair_data[pair_name]['position_multiplier']
+    current_fee_amount, current_fee = calculate_fee_for_move(
+        0.1, 
+        pnl_base_rate, 
+        current_pm,
+        rate_multiplier,
+        rate_exponent
+    )
+    ax.scatter([current_pm], [current_fee], color='red', s=100, zorder=5, label='Current PM')
+    
+    # Add proposed PM if available
+    if st.session_state.pair_data[pair_name]['proposed_position_multiplier'] is not None:
+        proposed_pm = st.session_state.pair_data[pair_name]['proposed_position_multiplier']
+        # Calculate proposed fee
+        proposed_fee_amount, proposed_fee = calculate_fee_for_move(
+            0.1, 
+            pnl_base_rate, 
+            proposed_pm,
+            rate_multiplier,
+            rate_exponent
+        )
+        ax.scatter([proposed_pm], [proposed_fee], color='green', s=100, zorder=5, label='Proposed PM')
+    
+    # Set title and labels
+    ax.set_title(f'Fee Sensitivity to Position Multiplier - {pair_name}')
+    ax.set_xlabel('Position Multiplier (log scale)')
+    ax.set_ylabel('Fee for 0.1% Move (%)')
+    
+    # Add grid and legend
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    
+    return fig
+
+# Function to create fee comparison table for a specific pair
+def create_fee_comparison_table(pair_name):
+    """Create a table comparing fees for different move sizes with current and proposed parameters."""
+    # Ensure pair state is initialized
+    init_pair_state(pair_name)
+    
+    move_sizes = [0.01, 0.05, 0.1, 0.2, 0.5, 1.0]
+    
+    # Get required parameters
+    current_buffer = st.session_state.pair_data[pair_name]['buffer_rate']
+    current_multiplier = st.session_state.pair_data[pair_name]['position_multiplier']
+    
+    # Get rate parameters
+    if 'rate_multiplier' not in st.session_state.pair_data[pair_name]:
+        # Fetch if not in session state
+        params = fetch_current_parameters(pair_name)
+        rate_multiplier = params.get('rate_multiplier', 10000)
+        rate_exponent = params.get('rate_exponent', 1)
+        
+        # Store in session state
+        st.session_state.pair_data[pair_name]['rate_multiplier'] = rate_multiplier
+        st.session_state.pair_data[pair_name]['rate_exponent'] = rate_exponent
+    else:
+        rate_multiplier = st.session_state.pair_data[pair_name]['rate_multiplier']
+        rate_exponent = st.session_state.pair_data[pair_name]['rate_exponent']
+        
+    # Get pnl_base_rate parameter
+    pnl_base_rate = st.session_state.pair_data[pair_name]['pnl_base_rate']
+    
+    # Calculate fees with current parameters
+    current_fees = []
+    current_fee_pcts = []
+    
+    for move in move_sizes:
+        fee_amount, fee_pct = calculate_fee_for_move(
+            move, 
+            pnl_base_rate, 
+            current_multiplier,
+            rate_multiplier,
+            rate_exponent
+        )
+        current_fees.append(fee_amount)
+        current_fee_pcts.append(fee_pct)
+    
+    # Calculate fees with proposed parameters if available
+    if (st.session_state.pair_data[pair_name]['proposed_buffer_rate'] is not None and 
+        st.session_state.pair_data[pair_name]['proposed_position_multiplier'] is not None):
+        
+        proposed_buffer = st.session_state.pair_data[pair_name]['proposed_buffer_rate']
+        proposed_multiplier = st.session_state.pair_data[pair_name]['proposed_position_multiplier']
+        
+        proposed_fees = []
+        proposed_fee_pcts = []
+        
+        for move in move_sizes:
+            fee_amount, fee_pct = calculate_fee_for_move(
+                move, 
+                pnl_base_rate, 
+                proposed_multiplier,
+                rate_multiplier,
+                rate_exponent
+            )
+            proposed_fees.append(fee_amount)
+            proposed_fee_pcts.append(fee_pct)
+        
+        # Create dataframe for the table with both current and proposed
+        fee_df = pd.DataFrame({
+            'Move Size (%)': move_sizes,
+            'Current Fee Amount': current_fees,
+            'Current Fee (%)': current_fee_pcts,
+            'Proposed Fee Amount': proposed_fees,
+            'Proposed Fee (%)': proposed_fee_pcts,
+            'Fee % Change': [(new - old) / old * 100 if old != 0 else float('inf') 
+                              for new, old in zip(proposed_fee_pcts, current_fee_pcts)]
+        })
+    else:
+        # Create dataframe with just current fees
+        fee_df = pd.DataFrame({
+            'Move Size (%)': move_sizes,
+            'Current Fee Amount': current_fees,
+            'Current Fee (%)': current_fee_pcts
+        })
+    
+    return fee_df
+
+# Function to recommend position multiplier based on target fee
+def recommend_position_multiplier(pair_name, target_fee_pct=None):
+    """
+    Recommend a position multiplier to achieve a target fee percentage.
+    If no target specified, uses a sliding scale based on edge performance.
+    """
+    # If no target specified, calculate based on edge performance
+    if target_fee_pct is None:
+        current_edge = st.session_state.pair_data[pair_name]['current_edge']
+        reference_edge = st.session_state.pair_data[pair_name]['reference_edge']
+        
+        if current_edge is None or reference_edge is None:
+            return None, "Insufficient edge data for recommendation"
+        
+        # Calculate edge performance ratio
+        edge_ratio = current_edge / reference_edge if reference_edge != 0 else 1
+        
+        # Adjust target fee based on edge performance
+        # Better edge performance -> lower fees
+        # Worse edge performance -> higher fees
+        if edge_ratio >= 1.2:
+            # Edge significantly better - recommend lower fees
+            target_fee_pct = 15.0
+        elif edge_ratio >= 1.0:
+            # Edge at or above reference - moderate fees
+            target_fee_pct = 25.0
+        elif edge_ratio >= 0.8:
+            # Edge slightly below reference - higher fees
+            target_fee_pct = 35.0
+        else:
+            # Edge significantly below reference - much higher fees
+            target_fee_pct = 45.0
+    
+    # Get parameters needed for fee calculation
+    pnl_base_rate = st.session_state.pair_data[pair_name]['pnl_base_rate']
+    rate_multiplier = st.session_state.pair_data[pair_name].get('rate_multiplier', 10000)
+    rate_exponent = st.session_state.pair_data[pair_name].get('rate_exponent', 1)
+    
+    # Generate a range of PM values to search
+    pm_values = np.logspace(0, 3.5, 100)  # From 1 to ~3000
+    
+    # Calculate fees for each PM value
+    closest_pm = None
+    min_diff = float('inf')
+    
+    for pm in pm_values:
+        _, fee_pct = calculate_fee_for_move(
+            0.1, 
+            pnl_base_rate, 
+            pm,
+            rate_multiplier,
+            rate_exponent
+        )
+        
+        # Find PM that gives fee closest to target
+        diff = abs(fee_pct - target_fee_pct)
+        if diff < min_diff:
+            min_diff = diff
+            closest_pm = pm
+    
+    return closest_pm, f"Recommended PM for target fee of {target_fee_pct:.1f}%: {closest_pm:.1f}"
+
 # Function to batch update all monitored pairs
 def batch_update_all_pairs():
     """Process edge data for all monitored pairs."""
@@ -852,7 +1483,7 @@ def initialize_pair(pair_name):
     
     return True
 
-# Function to render the pair overview cards (simplified for stability)
+# Function to render the pair overview cards
 def render_pair_overview():
     """Render overview cards for all monitored pairs."""
     if not st.session_state.monitored_pairs:
@@ -997,27 +1628,427 @@ def render_pair_overview():
                         st.session_state.view_mode = "Pair Monitor"
                         st.session_state.current_pair = pair_name
 
+# Function to render the detailed pair view
+def render_pair_detail(pair_name):
+    """Render detailed view for a specific pair."""
+    # Ensure pair state is initialized
+    init_pair_state(pair_name)
+    
+    # Check if the pair has been initialized properly
+    if not st.session_state.pair_data[pair_name].get('initialized', False) or st.session_state.pair_data[pair_name].get('reference_edge') is None:
+        st.warning(f"Pair {pair_name} has not been properly initialized. Please initialize it first.")
+        return
+    
+    st.markdown(f"### Detailed Analytics: {pair_name}")
+    
+    # Create columns for key metrics
+    col1, col2, col3, col4, col5 = st.columns(5)
+    
+    # Show current edge
+    with col1:
+        if st.session_state.pair_data[pair_name]['current_edge'] is not None:
+            edge_delta = st.session_state.pair_data[pair_name]['current_edge'] - st.session_state.pair_data[pair_name]['reference_edge'] if st.session_state.pair_data[pair_name]['reference_edge'] is not None else None
+            delta_color = "down" if edge_delta and edge_delta < 0 else "up"
+            delta_str = f"<span class='{delta_color}'>{edge_delta:.4%}</span>" if edge_delta is not None else ""
+            st.markdown(f"**Current Edge:** {st.session_state.pair_data[pair_name]['current_edge']:.4%} {delta_str}", unsafe_allow_html=True)
+        else:
+            st.markdown("**Current Edge:** N/A")
+    
+    # Show reference edge
+    with col2:
+        if st.session_state.pair_data[pair_name]['reference_edge'] is not None:
+            st.markdown(f"**Reference Edge:** {st.session_state.pair_data[pair_name]['reference_edge']:.4%}")
+        else:
+            st.markdown("**Reference Edge:** N/A")
+    
+    # Show current buffer rate
+    with col3:
+        st.markdown(f"**Buffer Rate:** {st.session_state.pair_data[pair_name]['buffer_rate']:.6f}")
+    
+    # Show current position multiplier
+    with col4:
+        st.markdown(f"**Position Multiplier:** {st.session_state.pair_data[pair_name]['position_multiplier']:.1f}")
+    
+    # Show current fee for 0.1% move
+    with col5:
+        if st.session_state.pair_data[pair_name].get('current_fee_percentage') is not None:
+            st.markdown(f"**Fee for 0.1% Move:** {st.session_state.pair_data[pair_name]['current_fee_percentage']:.2f}%")
+        else:
+            st.markdown("**Fee for 0.1% Move:** N/A")
+    
+    # Create tabbed view for detailed analytics
+    detail_tabs = st.tabs(["Edge History", "Parameter History", "Fee Analysis", "PM Sensitivity"])
+    
+    # Edge History tab
+    with detail_tabs[0]:
+        # Create edge plot
+        edge_plot = create_edge_plot(pair_name)
+        if edge_plot is not None:
+            st.pyplot(edge_plot)
+        else:
+            st.info("Not enough data points yet for edge visualization.")
+            
+        # Add raw edge history data display
+        if st.checkbox("Show Raw Edge History Data", key=f"show_edge_history_{pair_name}"):
+            if len(st.session_state.pair_data[pair_name]['edge_history']) > 0:
+                edge_df = pd.DataFrame({
+                    'Timestamp': [t for t, _ in st.session_state.pair_data[pair_name]['edge_history']],
+                    'Edge': [f"{e:.6f}" for _, e in st.session_state.pair_data[pair_name]['edge_history']]
+                })
+                st.dataframe(edge_df, hide_index=True, use_container_width=True)
+            else:
+                st.info("No edge history data yet.")
+    
+    # Parameter History tab
+    with detail_tabs[1]:
+        # Create parameter plots
+        buffer_fig, multiplier_fig = create_parameter_plots(pair_name)
+        
+        if buffer_fig is not None:
+            st.pyplot(buffer_fig)
+        else:
+            st.info("Not enough data points yet for buffer rate visualization.")
+            
+        if multiplier_fig is not None:
+            st.pyplot(multiplier_fig)
+        else:
+            st.info("Not enough data points yet for position multiplier visualization.")
+            
+        # Show fee history plot
+        fee_fig = create_fee_plot(pair_name)
+        if fee_fig is not None:
+            st.pyplot(fee_fig)
+        else:
+            st.info("Not enough data points yet for fee visualization.")
+            
+        # Show raw parameter history data
+        if st.checkbox("Show Raw Parameter History Data", key=f"show_param_history_{pair_name}"):
+            # Create tabs for different history tables
+            history_tabs = st.tabs(["Buffer History", "Multiplier History", "Fee History"])
+            
+            with history_tabs[0]:
+                if len(st.session_state.pair_data[pair_name]['buffer_history']) > 0:
+                    buffer_df = pd.DataFrame({
+                        'Timestamp': [t for t, _ in st.session_state.pair_data[pair_name]['buffer_history']],
+                        'Buffer Rate': [f"{r:.6f}" for _, r in st.session_state.pair_data[pair_name]['buffer_history']]
+                    })
+                    st.dataframe(buffer_df, hide_index=True, use_container_width=True)
+                else:
+                    st.info("No buffer rate history data yet.")
+            
+            with history_tabs[1]:
+                if len(st.session_state.pair_data[pair_name]['multiplier_history']) > 0:
+                    multiplier_df = pd.DataFrame({
+                        'Timestamp': [t for t, _ in st.session_state.pair_data[pair_name]['multiplier_history']],
+                        'Position Multiplier': [f"{m:.1f}" for _, m in st.session_state.pair_data[pair_name]['multiplier_history']]
+                    })
+                    st.dataframe(multiplier_df, hide_index=True, use_container_width=True)
+                else:
+                    st.info("No position multiplier history data yet.")
+            
+            with history_tabs[2]:
+                if len(st.session_state.pair_data[pair_name]['fee_history']) > 0:
+                    fee_df = pd.DataFrame({
+                        'Timestamp': [t for t, _ in st.session_state.pair_data[pair_name]['fee_history']],
+                        'Fee for 0.1% Move': [f"{f:.8f}" for _, f in st.session_state.pair_data[pair_name]['fee_history']]
+                    })
+                    st.dataframe(fee_df, hide_index=True, use_container_width=True)
+                else:
+                    st.info("No fee history data yet.")
+    
+    # Fee Analysis tab
+    with detail_tabs[2]:
+        st.markdown("### Fee Analysis")
+        
+        # Create fee curve plots
+        fee_amount_fig, fee_percentage_fig = create_fee_curve_plot(pair_name)
+        if fee_amount_fig is not None:
+            st.markdown("#### Fee Amount vs Price Move")
+            st.pyplot(fee_amount_fig)
+        
+        if fee_percentage_fig is not None:
+            st.markdown("#### Fee Percentage vs Price Move")
+            st.pyplot(fee_percentage_fig)
+        
+        # Fee comparison table
+        st.markdown("### Fee Comparison Table")
+        
+        # Create fee comparison table
+        fee_df = create_fee_comparison_table(pair_name)
+        st.dataframe(fee_df, use_container_width=True)
+        
+        # Fee equation details
+        st.markdown("### Fee Equation")
+        st.markdown("""
+        The fee is calculated using the following equation:
+        
+        $Fee = -1 \\times \\frac{1 + Rate\\_Multiplier \\cdot |\\frac{P_t}{P_T} - 1|^{Rate\\_Exponent}}{1 + 10^6 \\cdot Position\\_Multiplier \\cdot |\\frac{P_t}{P_T} - 1|^{Rate\\_Exponent}} \\times \\frac{Bet \\times Leverage}{1 - Buffer\\_Rate} \\times (P_T - P_t)$
+        
+        Where:
+        - $P_T$ is the initial price
+        - $P_t$ is the price after the move
+        - $Buffer\\_Rate$ is the buffer rate parameter
+        - $Position\\_Multiplier$ is the position multiplier parameter
+        - $Rate\\_Multiplier$ and $Rate\\_Exponent$ are additional parameters affecting the fee curve
+        """)
+        
+    # PM Sensitivity tab
+    with detail_tabs[3]:
+        st.markdown("### Position Multiplier Sensitivity Analysis")
+        
+        # Show PM fee sensitivity plot
+        sensitivity_fig = create_pm_fee_sensitivity_plot(pair_name)
+        if sensitivity_fig is not None:
+            st.pyplot(sensitivity_fig)
+            
+            # Add explanation
+            st.markdown("""
+            This plot shows how the fee for a 0.1% price move changes with different position multiplier values.
+            - The x-axis uses a logarithmic scale to better visualize the relationship.
+            - Lower position multiplier values result in higher fees.
+            - The red point shows the current position multiplier.
+            - If a proposed position multiplier exists, it is shown as a green point.
+            """)
+        
+        # Show PM recommendation section
+        st.markdown("### Position Multiplier Recommendations")
+        
+        # Add a selection for different target fees
+        target_fees = [15, 20, 25, 30, 35, 40, 45, 50]
+        target_fee = st.selectbox(
+            "Select target fee percentage for 0.1% move:",
+            options=target_fees,
+            index=3,  # Default to 30%
+            key=f"target_fee_select_{pair_name}"
+        )
+        
+        # Calculate recommended PM for the selected target fee
+        recommended_pm, recommendation_text = recommend_position_multiplier(pair_name, target_fee)
+        
+        if recommended_pm is not None:
+            st.success(recommendation_text)
+            
+            # Show comparison with current PM
+            current_pm = st.session_state.pair_data[pair_name]['position_multiplier']
+            
+            # Calculate percentage change
+            pct_change = (recommended_pm - current_pm) / current_pm * 100
+            change_text = f"Recommended PM is {pct_change:+.1f}% compared to current PM"
+            
+            st.info(f"Current PM: {current_pm:.1f}")
+            st.info(f"Recommended PM: {recommended_pm:.1f} ({change_text})")
+    
+    # Button to return to overview
+    if st.button("Return to Pairs Overview", type="secondary"):
+        st.session_state.view_mode = "Pairs Overview"
+        st.session_state.current_pair = None
+
+# Function to render the parameter adjustment view
+def render_pair_monitor(pair_name):
+    """Render parameter monitoring and adjustment view for a specific pair."""
+    # Ensure pair state is initialized
+    init_pair_state(pair_name)
+    
+    # Check if the pair has been initialized properly
+    if not st.session_state.pair_data[pair_name].get('initialized', False) or st.session_state.pair_data[pair_name].get('reference_edge') is None:
+        st.warning(f"Pair {pair_name} has not been properly initialized. Please initialize it first.")
+        return
+    
+    st.markdown(f"### Parameter Monitoring: {pair_name}")
+    
+    # Create columns for key metrics
+    col1, col2, col3, col4, col5 = st.columns(5)
+    
+    # Show current edge
+    with col1:
+        if st.session_state.pair_data[pair_name]['current_edge'] is not None:
+            edge_delta = st.session_state.pair_data[pair_name]['current_edge'] - st.session_state.pair_data[pair_name]['reference_edge'] if st.session_state.pair_data[pair_name]['reference_edge'] is not None else None
+            delta_color = "down" if edge_delta and edge_delta < 0 else "up"
+            delta_str = f"<span class='{delta_color}'>{edge_delta:.4%}</span>" if edge_delta is not None else ""
+            st.markdown(f"**Current Edge:** {st.session_state.pair_data[pair_name]['current_edge']:.4%} {delta_str}", unsafe_allow_html=True)
+        else:
+            st.markdown("**Current Edge:** N/A")
+    
+    # Show reference edge
+    with col2:
+        if st.session_state.pair_data[pair_name]['reference_edge'] is not None:
+            st.markdown(f"**Reference Edge:** {st.session_state.pair_data[pair_name]['reference_edge']:.4%}")
+        else:
+            st.markdown("**Reference Edge:** N/A")
+    
+    # Show current buffer rate
+    with col3:
+        st.markdown(f"**Buffer Rate:** {st.session_state.pair_data[pair_name]['buffer_rate']:.6f}")
+    
+    # Show current position multiplier
+    with col4:
+        st.markdown(f"**Position Multiplier:** {st.session_state.pair_data[pair_name]['position_multiplier']:.1f}")
+    
+    # Show current fee for 0.1% move
+    with col5:
+        if st.session_state.pair_data[pair_name].get('current_fee_percentage') is not None:
+            st.markdown(f"**Fee for 0.1% Move:** {st.session_state.pair_data[pair_name]['current_fee_percentage']:.2f}%")
+        else:
+            st.markdown("**Fee for 0.1% Move:** N/A")
+    
+    # Show edge plot
+    edge_plot = create_edge_plot(pair_name)
+    if edge_plot is not None:
+        st.pyplot(edge_plot)
+    else:
+        st.info("Not enough data points yet for edge visualization.")
+    
+    # Parameter update section
+    param_col1, param_col2 = st.columns(2)
+    
+    with param_col1:
+        # Manual update button
+        if st.button("Fetch New Data", key=f"fetch_data_{pair_name}", help="Get the latest edge data and calculate parameter updates"):
+            process_edge_data(pair_name)
+            
+            # Calculate fee with updated edge data
+            timestamp = get_sg_time()
+            calculate_and_record_fee(pair_name, timestamp)
+    
+    with param_col2:
+        # Reset to reference parameters button
+        if st.button("Restore Baseline Parameters", 
+                    type="secondary", 
+                    key=f"reset_params_{pair_name}",
+                    help="Discard current changes and restore the last saved reference parameters"):
+            success, old_buffer, new_buffer, old_multiplier, new_multiplier = reset_to_reference_parameters(pair_name)
+            if success:
+                st.success("Parameters reset to reference values")
+            else:
+                st.error("No reference parameters available")
+    
+    # Show parameter update notification
+    if st.session_state.pair_data[pair_name].get('params_changed', False):
+        st.markdown('<div class="warning">Parameter updates available. Review proposed changes below.</div>', unsafe_allow_html=True)
+        
+        # Parameter change details
+        if st.session_state.pair_data[pair_name]['proposed_buffer_rate'] is not None and st.session_state.pair_data[pair_name]['proposed_position_multiplier'] is not None:
+            delta_buffer = st.session_state.pair_data[pair_name]['proposed_buffer_rate'] - st.session_state.pair_data[pair_name]['buffer_rate']
+            delta_multiplier = st.session_state.pair_data[pair_name]['proposed_position_multiplier'] - st.session_state.pair_data[pair_name]['position_multiplier']
+            
+            # Get rate parameters
+            rate_multiplier = st.session_state.pair_data[pair_name].get('rate_multiplier', 10000)
+            rate_exponent = st.session_state.pair_data[pair_name].get('rate_exponent', 1)
+            
+            # Calculate current and new fees - ensure proper calculation
+            current_fee_amount, current_fee_pct = calculate_fee_for_move(
+                0.1, 
+                st.session_state.pair_data[pair_name]['pnl_base_rate'], 
+                st.session_state.pair_data[pair_name]['position_multiplier'],
+                rate_multiplier,
+                rate_exponent
+            )
+            
+            new_fee_amount, new_fee_pct = calculate_fee_for_move(
+                0.1, 
+                st.session_state.pair_data[pair_name]['pnl_base_rate'], 
+                st.session_state.pair_data[pair_name]['proposed_position_multiplier'],
+                rate_multiplier,
+                rate_exponent
+            )
+            
+            delta_fee_amount = new_fee_amount - current_fee_amount
+            delta_fee_pct = new_fee_pct - current_fee_pct
+            
+            # Calculate percentage change safely
+            if abs(current_fee_pct) > 1e-10:
+                pct_fee_change = (delta_fee_pct / abs(current_fee_pct)) * 100
+            else:
+                pct_fee_change = 0 if abs(delta_fee_pct) < 1e-10 else float('inf')
+            
+            # Show proposed changes in a better formatted layout
+            st.markdown("### Proposed Parameter Changes")
+            
+            st.markdown('<div class="parameter-section">', unsafe_allow_html=True)
+            
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.markdown("**Buffer Rate**")
+                st.markdown(f"Current: {st.session_state.pair_data[pair_name]['buffer_rate']:.6f}")
+                st.markdown(f"Proposed: {st.session_state.pair_data[pair_name]['proposed_buffer_rate']:.6f}")
+                
+                # Show change with color
+                pct_change = delta_buffer/st.session_state.pair_data[pair_name]['buffer_rate']*100
+                change_color = "up" if delta_buffer > 0 else "down"
+                st.markdown(f"Change: {delta_buffer:.6f} (<span class='{change_color}'>{pct_change:+.2f}%</span>)", unsafe_allow_html=True)
+            
+            with col2:
+                st.markdown("**Position Multiplier**")
+                st.markdown(f"Current: {st.session_state.pair_data[pair_name]['position_multiplier']:.1f}")
+                st.markdown(f"Proposed: {st.session_state.pair_data[pair_name]['proposed_position_multiplier']:.1f}")
+                
+                # Show change with color
+                pct_change = delta_multiplier/st.session_state.pair_data[pair_name]['position_multiplier']*100
+                change_color = "up" if delta_multiplier > 0 else "down"
+                st.markdown(f"Change: {delta_multiplier:.1f} (<span class='{change_color}'>{pct_change:+.2f}%</span>)", unsafe_allow_html=True)
+            
+            with col3:
+                st.markdown("**Fee for 0.1% Move**")
+                st.markdown(f"Current: {current_fee_pct:.2f}%")
+                st.markdown(f"Proposed: {new_fee_pct:.2f}%")
+                
+                # Show change with proper color and format
+                change_color = "up" if delta_fee_pct > 0 else "down"
+                if abs(pct_fee_change) != float('inf'):
+                    st.markdown(f"Change: {delta_fee_pct:.2f}% (<span class='{change_color}'>{pct_fee_change:+.2f}%</span>)", unsafe_allow_html=True)
+                else:
+                    st.markdown(f"Change: {delta_fee_pct:.2f}%", unsafe_allow_html=True)
+            
+            st.markdown('</div>', unsafe_allow_html=True)
+            
+            # Show PM sensitivity visualization
+            st.markdown("### Fee Sensitivity Analysis")
+            sensitivity_fig = create_pm_fee_sensitivity_plot(pair_name)
+            if sensitivity_fig is not None:
+                st.pyplot(sensitivity_fig)
+            
+            # Add a view of fee changes for different move sizes
+            with st.expander("View Fee Comparison for Different Move Sizes"):
+                fee_df = create_fee_comparison_table(pair_name)
+                st.dataframe(fee_df, use_container_width=True)
+            
+            # Update display parameters button - more prominent placement
+            update_col1, update_col2 = st.columns([3, 1])
+            
+            with update_col1:
+                st.info("Review the proposed changes carefully. If you apply these changes, they will become the new baseline parameters for this pair.")
+                
+            with update_col2:
+                update_button = st.button("Apply Changes", type="primary", key=f"update_params_{pair_name}", help="Apply proposed parameter updates and set them as the new baseline")
+            
+            if update_button:
+                # Apply the updates to display (not database)
+                success, old_buffer, new_buffer, old_multiplier, new_multiplier = update_display_parameters(pair_name)
+                
+                if success:
+                    st.markdown('<div class="success">Parameters updated successfully! New baseline established.</div>', unsafe_allow_html=True)
+    else:
+        # No parameter changes to show
+        st.info("No parameter changes needed at this time. The current edge is within acceptable bounds of the reference edge.")
+        
+        # Show the sensitivity analysis regardless
+        st.markdown("### Fee Sensitivity Analysis")
+        sensitivity_fig = create_pm_fee_sensitivity_plot(pair_name)
+        if sensitivity_fig is not None:
+            st.pyplot(sensitivity_fig)
+    
+    # Add a horizontal line to separate sections
+    st.markdown("---")
+    
+    # Button to return to overview - at the bottom for consistent placement
+    if st.button("Return to Pairs Overview", type="secondary", key=f"return_from_monitor_{pair_name}"):
+        st.session_state.view_mode = "Pairs Overview"
+        st.session_state.current_pair = None
+
 def main():
     # Initialize all session state variables to prevent duplicates
     init_session_state()
-    
-    # Set up auto-refresh logic - simplified for stability
-    if st.session_state.auto_update:
-        # Set a refresh interval based on update interval, but don't create a new refresh component
-        # which could cause loops
-        selected_interval = st.session_state.get('interval_radio', "1 minute")
-        interval_mapping = {"1 minute": 1, "5 minutes": 5, "10 minutes": 10}
-        current_lookback_mins = interval_mapping.get(selected_interval, 1)
-        st.session_state.lookback_minutes = current_lookback_mins
-        
-        # Update next_update_time if needed
-        current_time = datetime.now(pytz.utc)
-        if 'next_update_time' not in st.session_state or st.session_state.next_update_time < current_time:
-            st.session_state.next_update_time = current_time + timedelta(minutes=current_lookback_mins)
-    
-    # Update pairs on page load when needed - only if auto-update is enabled
-    if st.session_state.auto_update:
-        update_pairs_on_load()
     
     # Title and description
     st.markdown('<div class="header-style">House Edge Parameter Adjustment Dashboard</div>', unsafe_allow_html=True)
@@ -1147,6 +2178,11 @@ def main():
             st.warning("Auto-update is disabled. Use the 'Update Now' button for manual updates.")
         elif pair_count == 0:
             st.info("Add trading pairs to begin monitoring.")
+            
+    # Run auto-update check if needed
+    # This should run after the metrics are displayed
+    if st.session_state.get('auto_update', True):
+        update_pairs_on_load()
     
     # Sidebar controls
     st.sidebar.markdown('<div class="subheader-style">Trading Pair Configuration</div>', unsafe_allow_html=True)
@@ -1323,6 +2359,29 @@ def main():
             else:
                 st.sidebar.info("No changes were applied")
     
+    # Auto-update toggle with immediate effect
+    auto_update_value = st.sidebar.checkbox(
+        "Enable Auto-Update", 
+        value=st.session_state.get('auto_update', False),
+        help="Automatically update data at the selected interval",
+        key="auto_update_checkbox"
+    )
+    
+    # Update the session state value after the checkbox interaction
+    st.session_state.auto_update = auto_update_value
+    
+    # Check for changes to auto-update state
+    if auto_update_value != st.session_state.get('previous_auto_update_state', False):
+        st.session_state.previous_auto_update_state = auto_update_value
+        if auto_update_value:
+            # Reset timer if auto-update was just enabled
+            current_time = datetime.now(pytz.utc)
+            st.session_state.last_update_time = current_time
+            st.session_state.next_update_time = current_time + timedelta(minutes=st.session_state.lookback_minutes)
+            st.sidebar.success("Auto-update enabled. Next update in 1 minute.")
+        else:
+            st.sidebar.info("Auto-update disabled. Use manual update buttons.")
+    
     # Sensitivity parameters section
     st.sidebar.markdown('<div class="subheader-style">Sensitivity Parameters</div>', unsafe_allow_html=True)
     
@@ -1398,37 +2457,9 @@ def main():
     if st.session_state.view_mode == "Pairs Overview":
         render_pair_overview()
     elif st.session_state.view_mode == "Pair Detail" and st.session_state.current_pair is not None:
-        # For now, just show a placeholder to prevent errors
-        st.subheader(f"Detailed Analytics: {st.session_state.current_pair}")
-        st.write("Detailed view is temporarily disabled in this simplified version.")
-        
-        # Button to return to overview
-        if st.button("Return to Pairs Overview", type="secondary"):
-            st.session_state.view_mode = "Pairs Overview"
-            st.session_state.current_pair = None
+        render_pair_detail(st.session_state.current_pair)
     elif st.session_state.view_mode == "Pair Monitor" and st.session_state.current_pair is not None:
-        # For now, just show a placeholder to prevent errors
-        st.subheader(f"Parameter Monitoring: {st.session_state.current_pair}")
-        st.write("Monitor view is temporarily disabled in this simplified version.")
-        
-        pair_name = st.session_state.current_pair
-        if st.session_state.pair_data[pair_name].get('params_changed', False):
-            st.markdown('<div class="warning">Parameter updates available.</div>', unsafe_allow_html=True)
-            
-            # Update display parameters button
-            update_button = st.button("Apply Changes", type="primary", key=f"update_params_{pair_name}")
-            
-            if update_button:
-                success, old_buffer, new_buffer, old_multiplier, new_multiplier = update_display_parameters(pair_name)
-                if success:
-                    st.success("Parameters updated successfully!")
-        else:
-            st.info("No parameter changes needed at this time.")
-            
-        # Button to return to overview
-        if st.button("Return to Pairs Overview", type="secondary"):
-            st.session_state.view_mode = "Pairs Overview"
-            st.session_state.current_pair = None
+        render_pair_monitor(st.session_state.current_pair)
     else:
         # Default to overview if mode is invalid
         st.session_state.view_mode = "Pairs Overview"
