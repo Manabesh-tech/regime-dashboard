@@ -336,50 +336,111 @@ def batch_fetch_edge_volatility(selected_pairs, start_time_sg, now_sg, batch_siz
                         timestamp = row['timestamp_sg']
                         time_label = row['time_label']
                         
-                        # Convert PostgreSQL array to Python list
+                        # Initialize volatility as None (will be updated if calculation succeeds)
+                        volatility = None
+                        
+                        # Print debug info
+                        logger.info(f"Processing volatility for {pair} at {time_label}")
+                        logger.info(f"Price count: {price_count}")
+                        logger.info(f"Price array type: {type(price_array)}")
+                        
+                        # Skip calculation if no price data
                         if price_array is None or price_count < 3:
-                            volatility = None
+                            logger.info(f"Insufficient price data for {pair} at {time_label}")
                         else:
-                            # Parse the array
+                            # Parse the array - handle all possible formats
+                            prices = []
+                            
+                            # Case 1: String representation like '{123,456,789}'
                             if isinstance(price_array, str):
-                                # Strip curly braces and split
-                                prices_str = price_array.strip('{}').split(',')
-                                
-                                # Explicitly convert all prices to float
-                                prices = []
-                                for p in prices_str:
-                                    if p and p != 'NULL' and p != 'None':
-                                        try:
-                                            prices.append(float(p))
-                                        except (ValueError, TypeError):
-                                            pass
-                            else:
-                                # Handle list/array directly
-                                prices = []
+                                try:
+                                    # Strip curly braces and split
+                                    clean_str = price_array.strip('{}')
+                                    if clean_str:  # Only process if not empty
+                                        prices_str = clean_str.split(',')
+                                        for p in prices_str:
+                                            if p and p.strip() != 'NULL' and p.strip() != 'None':
+                                                try:
+                                                    prices.append(float(p.strip()))
+                                                except (ValueError, TypeError) as e:
+                                                    logger.error(f"Could not convert {p} to float: {e}")
+                                except Exception as e:
+                                    logger.error(f"Error parsing string array: {e}")
+                            
+                            # Case 2: List or array
+                            elif isinstance(price_array, (list, np.ndarray)):
                                 for p in price_array:
                                     if p is not None:
                                         try:
                                             prices.append(float(p))
-                                        except (ValueError, TypeError):
-                                            pass
+                                        except (ValueError, TypeError) as e:
+                                            logger.error(f"Could not convert {p} to float: {e}")
                             
-                            # Calculate returns (not log returns) between consecutive prices
-                            if len(prices) >= 3:  # Need at least 3 price points
-                                prices_array = np.array(prices, dtype=float)
-                                returns = np.diff(prices_array) / prices_array[:-1]
-                                
-                                # Standard deviation of returns
-                                std_dev = np.std(returns)
-                                
-                                # Annualize based on actual number of intervals
-                                actual_intervals = len(returns)
-                                # Scale to annual vol (assuming 5 intervals per 10min window, 6 per hour, 24 hours, 365 days)
-                                intervals_per_year = (5 * 6 * 24 * 365) / actual_intervals
-                                annualized_vol = std_dev * np.sqrt(intervals_per_year)
-                                
-                                volatility = annualized_vol
+                            # Case 3: Other types (like PostgreSQL-specific array types)
                             else:
-                                volatility = None
+                                try:
+                                    # Try converting to list first
+                                    price_list = list(price_array)
+                                    for p in price_list:
+                                        if p is not None:
+                                            try:
+                                                prices.append(float(p))
+                                            except (ValueError, TypeError) as e:
+                                                logger.error(f"Could not convert {p} to float: {e}")
+                                except Exception as e:
+                                    logger.error(f"Could not convert price_array to list: {e}")
+                                    # Last resort: try string conversion and parsing
+                                    try:
+                                        arr_str = str(price_array)
+                                        # Clean up the string (remove brackets, etc.)
+                                        clean_str = arr_str.strip('{}[]()').replace('\'', '').replace('"', '')
+                                        if clean_str:
+                                            parts = clean_str.split(',')
+                                            for p in parts:
+                                                if p and p.strip() != 'NULL' and p.strip() != 'None':
+                                                    try:
+                                                        prices.append(float(p.strip()))
+                                                    except (ValueError, TypeError):
+                                                        pass
+                                    except Exception as nested_e:
+                                        logger.error(f"Failed string parsing fallback: {nested_e}")
+                            
+                            # Log the parsed prices for debugging
+                            logger.info(f"Parsed {len(prices)} valid prices: {prices[:5]}...")
+                            
+                            # Calculate volatility with robust error handling
+                            if len(prices) >= 3:  # Need at least 3 price points
+                                try:
+                                    # Convert to numpy array and ensure they're floats
+                                    prices_array = np.array(prices, dtype=np.float64)
+                                    
+                                    # Log min, max, mean prices to verify data quality
+                                    logger.info(f"Price stats: min={np.min(prices_array):.2f}, max={np.max(prices_array):.2f}, mean={np.mean(prices_array):.2f}")
+                                    
+                                    # Calculate returns
+                                    # Check for zero prices that would cause division error
+                                    if np.any(prices_array[:-1] == 0):
+                                        logger.warning(f"Zero prices detected for {pair} at {time_label}, skipping volatility calculation")
+                                    else:
+                                        # Calculate simple returns
+                                        returns = np.diff(prices_array) / prices_array[:-1]
+                                        
+                                        # Standard deviation of returns
+                                        std_dev = np.std(returns)
+                                        
+                                        # Annualize based on actual number of intervals
+                                        actual_intervals = len(returns)
+                                        # Scale to annual vol (assuming 5 intervals per 10min window, 6 per hour, 24 hours, 365 days)
+                                        intervals_per_year = (5 * 6 * 24 * 365) / actual_intervals
+                                        annualized_vol = std_dev * np.sqrt(intervals_per_year)
+                                        
+                                        logger.info(f"Calculated volatility: {annualized_vol*100:.2f}% from {actual_intervals} intervals")
+                                        volatility = annualized_vol
+                                        
+                                except Exception as e:
+                                    logger.error(f"Error in numpy calculation: {e}")
+                            else:
+                                logger.info(f"Not enough valid prices ({len(prices)}) for volatility calculation")
                         
                         # Add to results
                         volatility_results.append({
@@ -589,16 +650,38 @@ def create_transposed_volatility_matrix(pair_data, time_labels, date_labels, sel
             pair_df = pair_data[pair]
             
             # Create a series with volatility values indexed by time_label
-            if not pair_df.empty:
-                vol_by_time = pd.Series(
-                    pair_df['volatility'].values,
-                    index=pair_df['time_label']
-                )
+            if not pair_df.empty and 'volatility' in pair_df.columns:
+                # Handle case where volatility column exists but might have invalid values
+                vol_values = []
+                time_index = []
+                
+                # Process each row to ensure we have valid volatility values
+                for idx, row in pair_df.iterrows():
+                    try:
+                        time_label = row['time_label']
+                        vol_value = row['volatility']
+                        
+                        # Ensure volatility value is a valid number
+                        if vol_value is not None and not pd.isna(vol_value):
+                            try:
+                                # Try to convert to float to verify it's a number
+                                vol_float = float(vol_value)
+                                vol_values.append(vol_float)
+                                time_index.append(time_label)
+                            except (ValueError, TypeError):
+                                # Log but skip invalid values
+                                logger.warning(f"Invalid volatility value for {pair} at {time_label}: {vol_value}")
+                    except Exception as e:
+                        logger.error(f"Error processing volatility for {pair}: {e}")
+                
+                # Create Series with valid values only
+                vol_by_time = pd.Series(vol_values, index=time_index)
                 
                 # Add this pair's data to the matrix
                 matrix_data[pair] = [vol_by_time.get(time, None) for time in time_labels]
             else:
-                # No data for this pair
+                # No data for this pair or missing volatility column
+                logger.warning(f"Missing volatility data for {pair}")
                 matrix_data[pair] = [None] * len(time_labels)
         else:
             # Pair not in data
@@ -681,10 +764,16 @@ def display_matrix(df, format_func, height=600):
     # Process each numeric column
     for col in formatted_df.columns:
         if col not in ['time_slot', 'date']:
-            # Format values using the provided function
-            formatted_df[col] = formatted_df[col].apply(
-                lambda x: format_func(x) if not pd.isna(x) else ""
-            )
+            # Safer approach to formatting that handles potential non-numeric values
+            def safe_format(x):
+                try:
+                    if pd.isna(x) or x is None:
+                        return ""
+                    return format_func(x)
+                except (TypeError, ValueError):
+                    return str(x)
+            
+            formatted_df[col] = formatted_df[col].apply(safe_format)
     
     # Add row numbers for better reference
     formatted_df = formatted_df.reset_index()
