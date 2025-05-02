@@ -263,6 +263,75 @@ def fetch_current_parameters(pair_name):
             "pnl_base_rate": 0.0005
         }
 
+# Function to fetch parameters for multiple pairs in a single query - OPTIMIZATION
+def fetch_parameters_for_multiple_pairs(pair_names):
+    """
+    Fetch parameters for multiple pairs in a single database query.
+    Returns a dictionary with pair names as keys and parameter dictionaries as values.
+    """
+    if not pair_names:
+        return {}
+    
+    engine = init_connection()
+    if not engine:
+        st.error("Failed to connect to database. Check your connection settings.")
+        return {}
+    
+    try:
+        # Format pair names for SQL IN clause
+        pair_names_str = "', '".join(pair_names)
+        
+        query = f"""
+        SELECT
+            pair_name,
+            (leverage_config::jsonb->0->>'buffer_rate')::numeric AS buffer_rate,
+            position_multiplier,
+            max_leverage,
+            rate_multiplier,
+            rate_exponent,
+            pnl_base_rate
+        FROM
+            public.trade_pool_pairs
+        WHERE
+            pair_name IN ('{pair_names_str}')
+            AND status = 1
+        """
+        
+        df = pd.read_sql(query, engine)
+        
+        # Convert to dictionary of parameter dictionaries
+        params_dict = {}
+        for _, row in df.iterrows():
+            pair_name = row['pair_name']
+            params_dict[pair_name] = {
+                "buffer_rate": float(row['buffer_rate']),
+                "position_multiplier": float(row['position_multiplier']),
+                "max_leverage": float(row['max_leverage']),
+                "rate_multiplier": float(row['rate_multiplier']),
+                "rate_exponent": float(row['rate_exponent']),
+                "pnl_base_rate": float(row['pnl_base_rate'])
+            }
+        
+        # Add default values for any missing pairs
+        default_params = {
+            "buffer_rate": 0.001,
+            "position_multiplier": 1000,
+            "max_leverage": 100,
+            "rate_multiplier": 10000,
+            "rate_exponent": 1,
+            "pnl_base_rate": 0.0005
+        }
+        
+        for pair_name in pair_names:
+            if pair_name not in params_dict:
+                params_dict[pair_name] = default_params.copy()
+        
+        return params_dict
+    
+    except Exception as e:
+        st.error(f"Error fetching parameters for multiple pairs: {e}")
+        return {}
+
 # Calculate edge for a specific pair using real data
 def calculate_edge_for_period(pair_name, start_time_utc, end_time_utc):
     """
@@ -597,7 +666,8 @@ def init_pair_state(pair_name):
             'last_update_time': None,
             'params_changed': False,
             'current_fee_percentage': None,
-            'last_edge_minutes': 5  # Default minutes used for edge calculation
+            'last_edge_minutes': 5,  # Default minutes used for edge calculation
+            'deferred_edge_calc': False  # Flag for lazy loading of edge data
         }
 
 # Initialize session state variables
@@ -1342,7 +1412,8 @@ def recommend_position_multiplier(pair_name, target_fee_pct=None):
     
     return closest_pm, f"Recommended PM for target fee of {target_fee_pct:.1f}%: {closest_pm:.1f}"
 
-# Initialize a trading pair for monitoring
+# Function to initialize a trading pair for monitoring
+# Function to initialize a trading pair for monitoring - OPTIMIZED VERSION
 def initialize_pair(pair_name):
     """Initialize a trading pair for monitoring, including all required parameters."""
     # Initialize pair state if it doesn't exist
@@ -1372,33 +1443,13 @@ def initialize_pair(pair_name):
     # Calculate and record initial fee for 0.1% move
     fee_pct = calculate_and_record_fee(pair_name, timestamp)
     
-    # Fetch initial reference edge using the default 5-minute period
-    # Get current time in Singapore timezone
-    singapore_tz = pytz.timezone('Asia/Singapore')
-    now_utc = datetime.now(pytz.utc)
-    now_sg = now_utc.astimezone(singapore_tz)
+    # Set default initial edge value - use lazy loading
+    default_initial_edge = 0.001
+    st.session_state.pair_data[pair_name]['reference_edge'] = default_initial_edge
+    st.session_state.pair_data[pair_name]['current_edge'] = default_initial_edge
     
-    # Calculate 5 minutes ago
-    start_time_sg = now_sg - timedelta(minutes=5)
-    
-    # Convert to UTC for database query
-    start_time_utc = start_time_sg.astimezone(pytz.utc)
-    end_time_utc = now_sg.astimezone(pytz.utc)
-    
-    # Calculate initial edge
-    initial_edge = calculate_edge_for_period(pair_name, start_time_utc, end_time_utc)
-    
-    # Store minutes used for edge calculation
-    st.session_state.pair_data[pair_name]['last_edge_minutes'] = 5
-    
-    if initial_edge is not None:
-        # Use a small positive default if edge is zero
-        if initial_edge == 0:
-            initial_edge = 0.001  # Use 0.1% as minimum edge
-        
-        st.session_state.pair_data[pair_name]['reference_edge'] = initial_edge
-        st.session_state.pair_data[pair_name]['current_edge'] = initial_edge
-        st.session_state.pair_data[pair_name]['edge_history'] = [(timestamp, initial_edge)]
+    # Flag for lazy loading
+    st.session_state.pair_data[pair_name]['deferred_edge_calc'] = True
     
     # Reset proposed values
     st.session_state.pair_data[pair_name]['proposed_buffer_rate'] = None
@@ -1414,6 +1465,46 @@ def initialize_pair(pair_name):
     st.session_state.pair_data[pair_name]['initialized'] = True
     
     return True
+
+# Function for lazy loading of edge data - NEW FUNCTION
+def lazy_load_edge_data(pair_name):
+    """Calculate initial edge data when a pair is first viewed."""
+    if st.session_state.pair_data[pair_name].get('deferred_edge_calc', False):
+        with st.spinner(f"Calculating initial edge data for {pair_name}..."):
+            # Get current time in Singapore timezone
+            singapore_tz = pytz.timezone('Asia/Singapore')
+            now_utc = datetime.now(pytz.utc)
+            now_sg = now_utc.astimezone(singapore_tz)
+            
+            # Calculate 5 minutes ago
+            start_time_sg = now_sg - timedelta(minutes=5)
+            
+            # Convert to UTC for database query
+            start_time_utc = start_time_sg.astimezone(pytz.utc)
+            end_time_utc = now_sg.astimezone(pytz.utc)
+            
+            # Calculate initial edge
+            initial_edge = calculate_edge_for_period(pair_name, start_time_utc, end_time_utc)
+            
+            if initial_edge is not None:
+                # Use a small positive default if edge is zero
+                if initial_edge == 0:
+                    initial_edge = 0.001  # Use 0.1% as minimum edge
+                
+                timestamp = st.session_state.pair_data[pair_name]['last_update_time']
+                st.session_state.pair_data[pair_name]['reference_edge'] = initial_edge
+                st.session_state.pair_data[pair_name]['current_edge'] = initial_edge
+                st.session_state.pair_data[pair_name]['edge_history'] = [(timestamp, initial_edge)]
+                
+                # Store minutes used for edge calculation
+                st.session_state.pair_data[pair_name]['last_edge_minutes'] = 5
+            
+            # Mark edge calculation as completed
+            st.session_state.pair_data[pair_name]['deferred_edge_calc'] = False
+        
+        return True
+    
+    return False
 
 # Function to render the pair overview cards
 def render_pair_overview():
@@ -1571,11 +1662,16 @@ def render_pair_overview():
                     if st.button(button_label, key=f"monitor_{pair_name}", on_click=navigate_to, args=("Pair Monitor", pair_name)):
                         pass  # Navigation is handled by the on_click callback
 
-# Function to render the detailed pair view
+# Function to render the detailed pair view - MODIFIED WITH LAZY LOADING
 def render_pair_detail(pair_name):
     """Render detailed view for a specific pair."""
     # Ensure pair state is initialized
     init_pair_state(pair_name)
+    
+    # Check if we need to lazy load edge data
+    if lazy_load_edge_data(pair_name):
+        # Edge data was loaded, rerun to show updated UI
+        st.rerun()
     
     # Check if the pair has been initialized properly
     if not st.session_state.pair_data[pair_name].get('initialized', False) or st.session_state.pair_data[pair_name].get('reference_edge') is None:
@@ -1802,11 +1898,16 @@ def render_pair_detail(pair_name):
     if st.button("Return to Pairs Overview", type="secondary", on_click=navigate_to, args=("Pairs Overview",)):
         pass  # Navigation is handled by the on_click callback
 
-# Function to render the parameter adjustment view
+# Function to render the parameter adjustment view - MODIFIED WITH LAZY LOADING
 def render_pair_monitor(pair_name):
     """Render parameter monitoring and adjustment view for a specific pair."""
     # Ensure pair state is initialized
     init_pair_state(pair_name)
+    
+    # Check if we need to lazy load edge data
+    if lazy_load_edge_data(pair_name):
+        # Edge data was loaded, rerun to show updated UI
+        st.rerun()
     
     # Check if the pair has been initialized properly
     if not st.session_state.pair_data[pair_name].get('initialized', False) or st.session_state.pair_data[pair_name].get('reference_edge') is None:
@@ -2027,7 +2128,7 @@ def render_pair_monitor(pair_name):
     if st.button("Return to Pairs Overview", type="secondary", key=f"return_from_monitor_{pair_name}", on_click=navigate_to, args=("Pairs Overview",)):
         pass  # Navigation is handled by the on_click callback
         
-# Main application
+# Main application - OPTIMIZED VERSION FOR ADD ALL PAIRS
 def main():
     # Initialize session state
     init_session_state()
@@ -2067,18 +2168,78 @@ def main():
         else:
             st.sidebar.warning(f"{selected_pair} is already being monitored.")
     
-    # Add all pairs button
+    # OPTIMIZED ADD ALL PAIRS BUTTON
     if st.sidebar.button("Add All Pairs", key="add_all_pairs"):
-        new_pairs_added = 0
-        for pair in available_pairs:
-            if pair not in st.session_state.monitored_pairs:
-                st.session_state.monitored_pairs.append(pair)
-                # Initialize the pair
-                initialize_pair(pair)
-                new_pairs_added += 1
+        # First identify which pairs need to be added
+        new_pairs = [pair for pair in available_pairs if pair not in st.session_state.monitored_pairs]
         
-        if new_pairs_added > 0:
-            st.sidebar.success(f"Added {new_pairs_added} new pairs to monitoring list!")
+        if new_pairs:
+            # Create a progress bar
+            progress_text = f"Adding {len(new_pairs)} pairs..."
+            add_progress = st.sidebar.progress(0, text=progress_text)
+            
+            # Batch fetch parameters for all new pairs at once
+            all_params = fetch_parameters_for_multiple_pairs(new_pairs)
+            
+            # Initialize each pair with the fetched parameters
+            for i, pair in enumerate(new_pairs):
+                # Add to monitored pairs list
+                st.session_state.monitored_pairs.append(pair)
+                
+                # Initialize pair state if needed
+                init_pair_state(pair)
+                
+                # Get parameters for this pair
+                params = all_params.get(pair, {
+                    "buffer_rate": 0.001,
+                    "position_multiplier": 1000,
+                    "max_leverage": 100,
+                    "rate_multiplier": 10000,
+                    "rate_exponent": 1,
+                    "pnl_base_rate": 0.0005
+                })
+                
+                # Update session state with fetched parameters
+                st.session_state.pair_data[pair]['buffer_rate'] = params["buffer_rate"]
+                st.session_state.pair_data[pair]['pnl_base_rate'] = params["pnl_base_rate"]
+                st.session_state.pair_data[pair]['position_multiplier'] = params["position_multiplier"]
+                st.session_state.pair_data[pair]['max_leverage'] = params["max_leverage"]
+                st.session_state.pair_data[pair]['rate_multiplier'] = params["rate_multiplier"]
+                st.session_state.pair_data[pair]['rate_exponent'] = params["rate_exponent"]
+                
+                # Save reference values
+                st.session_state.pair_data[pair]['reference_buffer_rate'] = params["buffer_rate"]
+                st.session_state.pair_data[pair]['reference_position_multiplier'] = params["position_multiplier"]
+                
+                # Reset history - use Singapore time
+                timestamp = get_sg_time()
+                st.session_state.pair_data[pair]['edge_history'] = []
+                st.session_state.pair_data[pair]['buffer_history'] = [(timestamp, params["buffer_rate"])]
+                st.session_state.pair_data[pair]['multiplier_history'] = [(timestamp, params["position_multiplier"])]
+                
+                # Calculate and record initial fee for 0.1% move
+                fee_pct = calculate_and_record_fee(pair, timestamp)
+                
+                # Mark pair as initialized but defer edge calculation until viewed
+                st.session_state.pair_data[pair]['initialized'] = True
+                st.session_state.pair_data[pair]['deferred_edge_calc'] = True  # Flag for lazy loading
+                
+                # Set last update time
+                st.session_state.pair_data[pair]['last_update_time'] = timestamp
+                
+                # Use a small default initial edge value - will be recalculated when viewed
+                default_initial_edge = 0.001
+                st.session_state.pair_data[pair]['reference_edge'] = default_initial_edge
+                st.session_state.pair_data[pair]['current_edge'] = default_initial_edge
+                
+                # Update progress bar
+                progress_percentage = (i + 1) / len(new_pairs)
+                add_progress.progress(progress_percentage, text=f"Adding pairs... {i+1}/{len(new_pairs)}")
+            
+            # Clean up progress bar
+            add_progress.empty()
+            st.sidebar.success(f"Added {len(new_pairs)} new pairs to monitoring list!")
+            
             # Reset navigation state and rerun
             st.session_state.navigating = False
             st.rerun()
