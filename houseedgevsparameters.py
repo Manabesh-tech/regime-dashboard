@@ -8,14 +8,6 @@ import math
 import pytz
 from sqlalchemy import create_engine, text
 
-# Try to import auto-refresh, but don't error if not available
-try:
-    from streamlit_autorefresh import st_autorefresh
-except ImportError:
-    # Create a dummy function if the import fails
-    def st_autorefresh(interval=0, key=None):
-        pass
-
 # Page configuration
 st.set_page_config(
     page_title="House Edge Adjustment Dashboard",
@@ -311,9 +303,6 @@ def calculate_edge(pair_name, lookback_minutes=10):
         start_time_utc = start_time_sg.astimezone(pytz.utc)
         end_time_utc = now_sg.astimezone(pytz.utc)
         
-        # Add debug logging
-        print(f"Calculating edge for {pair_name} from {start_time_utc} to {end_time_utc}")
-        
         # Query for house edge calculation
         edge_query = f"""
         WITH pnl_data AS (
@@ -362,9 +351,6 @@ def calculate_edge(pair_name, lookback_minutes=10):
         CROSS JOIN rebate_data rd
         """
         
-        # Add a debug log
-        st.session_state.last_query_time = datetime.now(pytz.utc)
-        
         df = pd.read_sql(edge_query, engine)
         
         if df.empty or pd.isna(df['house_edge'].iloc[0]):
@@ -383,7 +369,6 @@ def calculate_edge(pair_name, lookback_minutes=10):
         import random
         edge_value += random.uniform(-0.0005, 0.0010)
         
-        print(f"Edge value for {pair_name}: {edge_value}")
         return edge_value
     
     except Exception as e:
@@ -608,38 +593,13 @@ def init_session_state():
     if 'history_length' not in st.session_state:
         st.session_state.history_length = 100  # Default history length
     
-    if 'auto_update' not in st.session_state:
-        st.session_state.auto_update = False  # Default to disabled for stability
-    
     if 'view_mode' not in st.session_state:
         st.session_state.view_mode = "Pairs Overview"  # Default view mode
     
     if 'last_refresh_time' not in st.session_state:
         st.session_state.last_refresh_time = datetime.now(pytz.utc)
     
-    # Ensure next_update_time and last_update_time are aware of timezone
-    current_time = datetime.now(pytz.utc)
-    
-    if 'next_update_time' not in st.session_state:
-        st.session_state.next_update_time = current_time + timedelta(minutes=1)
-    elif st.session_state.next_update_time.tzinfo is None:
-        st.session_state.next_update_time = st.session_state.next_update_time.replace(tzinfo=pytz.utc)
-    
-    if 'last_update_time' not in st.session_state:
-        st.session_state.last_update_time = current_time
-    elif st.session_state.last_update_time.tzinfo is None:
-        st.session_state.last_update_time = st.session_state.last_update_time.replace(tzinfo=pytz.utc)
-    
-    if 'last_auto_refresh' not in st.session_state:
-        st.session_state.last_auto_refresh = current_time
-    elif st.session_state.last_auto_refresh.tzinfo is None:
-        st.session_state.last_auto_refresh = st.session_state.last_auto_refresh.replace(tzinfo=pytz.utc)
-    
-    if 'last_global_update' not in st.session_state:
-        st.session_state.last_global_update = current_time
-    elif st.session_state.last_global_update.tzinfo is None:
-        st.session_state.last_global_update = st.session_state.last_global_update.replace(tzinfo=pytz.utc)
-    
+    # Set the simulated data mode to true by default
     if 'simulated_data_mode' not in st.session_state:
         st.session_state.simulated_data_mode = True
         
@@ -1357,89 +1317,6 @@ def recommend_position_multiplier(pair_name, target_fee_pct=None):
     
     return closest_pm, f"Recommended PM for target fee of {target_fee_pct:.1f}%: {closest_pm:.1f}"
 
-# Function to batch update all monitored pairs
-def batch_update_all_pairs():
-    """Process edge data for all monitored pairs."""
-    if not st.session_state.monitored_pairs:
-        return []
-    
-    timestamp = datetime.now(pytz.utc)
-    pairs_updated = []
-    
-    for pair_name in st.session_state.monitored_pairs:
-        # Skip pairs that haven't been initialized
-        if not st.session_state.pair_data.get(pair_name, {}).get('initialized', False):
-            continue
-        
-        # Process edge data for this pair
-        parameters_changed = process_edge_data(pair_name, timestamp)
-        
-        # If parameters changed, add to the list
-        if parameters_changed:
-            pairs_updated.append(pair_name)
-    
-    # Return list of pairs that need parameter updates
-    return pairs_updated
-
-# Function to update all monitored pairs on each page load
-def update_pairs_on_load():
-    """
-    Updates all monitored pairs on each page load when needed.
-    This ensures edge data is always fresh.
-    """
-    # Only update if we have monitored pairs and auto-update is enabled
-    if not st.session_state.get('monitored_pairs', []) or not st.session_state.get('auto_update', False):
-        return False
-    
-    # Get current time in UTC
-    current_time = datetime.now(pytz.utc)
-    
-    # Initialize or fix last_update_time if needed
-    if 'last_update_time' not in st.session_state:
-        st.session_state.last_update_time = current_time
-    elif st.session_state.last_update_time.tzinfo is None:
-        st.session_state.last_update_time = st.session_state.last_update_time.replace(tzinfo=pytz.utc)
-    
-    # Calculate time since last update in minutes
-    minutes_since_last_update = (current_time - st.session_state.last_update_time).total_seconds() / 60
-    
-    # Get current selected interval
-    selected_interval = st.session_state.get('interval_radio', "1 minute")
-    interval_mapping = {"1 minute": 1, "5 minutes": 5, "10 minutes": 10}
-    current_lookback_mins = interval_mapping.get(selected_interval, 1)
-    
-    # Check if enough time has passed since last update
-    # Also force update if the interval has changed
-    needs_update = (minutes_since_last_update >= current_lookback_mins) or \
-                    (st.session_state.get('lookback_minutes') != current_lookback_mins)
-    
-    if needs_update:
-        print(f"Updating pairs on page load. Last update was {minutes_since_last_update:.2f} minutes ago.")
-        
-        # Update the session state with the current interval
-        st.session_state.lookback_minutes = current_lookback_mins
-        
-        # Update all pairs
-        pairs_updated = batch_update_all_pairs()
-        
-        # Update timing information
-        st.session_state.last_update_time = current_time
-        st.session_state.next_update_time = current_time + timedelta(minutes=current_lookback_mins)
-        
-        # Update fee calculations for all pairs
-        timestamp = get_sg_time()
-        for pair_name in st.session_state.monitored_pairs:
-            if st.session_state.pair_data[pair_name].get('initialized', False):
-                calculate_and_record_fee(pair_name, timestamp)
-        
-        # Update the last refresh time
-        st.session_state.last_refresh_time = current_time
-        
-        # Update successful
-        return True
-    
-    return False
-
 # Initialize a trading pair for monitoring
 def initialize_pair(pair_name):
     """Initialize a trading pair for monitoring, including all required parameters."""
@@ -2064,3 +1941,192 @@ def render_pair_monitor(pair_name):
     # Button to return to overview - at the bottom for consistent placement
     if st.button("Return to Pairs Overview", type="secondary", key=f"return_from_monitor_{pair_name}", on_click=navigate_to, args=("Pairs Overview",)):
         pass  # Navigation is handled by the on_click callback
+        
+# Main application
+def main():
+    # Initialize session state
+    init_session_state()
+    
+    # Sidebar configuration
+    st.sidebar.title("House Edge Control")
+    
+    # Add a note about refresh rates having been turned off
+    st.sidebar.info("Auto-update functionality has been disabled to resolve performance issues. Use the manual refresh buttons instead.")
+    
+    # Parameter control section in sidebar
+    st.sidebar.markdown("### Parameter Controls")
+    
+    # Data mode selection
+    st.sidebar.markdown("#### Data Source")
+    simulated_data = st.sidebar.checkbox("Use Simulated Data", value=st.session_state.get('simulated_data_mode', True))
+    st.session_state.simulated_data_mode = simulated_data
+    
+    # Pair selection
+    st.sidebar.markdown("#### Trading Pair Selection")
+    
+    # Fetch available pairs
+    available_pairs = fetch_pairs()
+    
+    # Pair selection dropdown
+    selected_pair = st.sidebar.selectbox(
+        "Select Pair", 
+        available_pairs, 
+        key="pair_select"
+    )
+    
+    # Add pair button
+    if st.sidebar.button("Add Pair for Monitoring", key="add_pair"):
+        if selected_pair not in st.session_state.monitored_pairs:
+            st.session_state.monitored_pairs.append(selected_pair)
+            # Initialize the pair
+            initialize_pair(selected_pair)
+            st.sidebar.success(f"Added {selected_pair} to monitoring list!")
+            # Reset navigation state and rerun
+            st.session_state.navigating = False
+            st.rerun()
+        else:
+            st.sidebar.warning(f"{selected_pair} is already being monitored.")
+    
+    # Remove pair button
+    if st.session_state.monitored_pairs:
+        remove_pair = st.sidebar.selectbox(
+            "Select Pair to Remove",
+            st.session_state.monitored_pairs,
+            key="remove_pair_select"
+        )
+        
+        if st.sidebar.button("Remove Pair", key="remove_pair"):
+            st.session_state.monitored_pairs.remove(remove_pair)
+            # Clean up pair data
+            if remove_pair in st.session_state.pair_data:
+                del st.session_state.pair_data[remove_pair]
+            # Also remove from pairs with changes if present
+            if remove_pair in st.session_state.pairs_with_changes:
+                st.session_state.pairs_with_changes.remove(remove_pair)
+            st.sidebar.success(f"Removed {remove_pair} from monitoring list!")
+            # Reset navigation state and rerun
+            st.session_state.navigating = False
+            st.rerun()
+    
+    # Lookback period selection
+    st.sidebar.markdown("#### Lookback Period")
+    lookback_options = {"1 minute": 1, "5 minutes": 5, "10 minutes": 10}
+    selected_interval = st.sidebar.radio(
+        "Select edge calculation period:",
+        options=list(lookback_options.keys()),
+        key="interval_radio"
+    )
+    # Update lookback minutes in session state
+    st.session_state.lookback_minutes = lookback_options[selected_interval]
+    
+    # Parameter adjustment sensitivity controls
+    st.sidebar.markdown("#### Parameter Adjustment Controls")
+    
+    # Expand sensitivity controls in an expander
+    with st.sidebar.expander("Adjustment Sensitivity Controls"):
+        # Buffer rate adjustment sensitivity
+        st.markdown("##### Buffer Rate Adjustment Sensitivity")
+        buffer_alpha_up = st.slider(
+            "Buffer Increase Rate (when edge decreases):",
+            min_value=0.01, 
+            max_value=0.5, 
+            value=st.session_state.buffer_alpha_up,
+            step=0.01,
+            key="buffer_alpha_up_slider",
+            help="Higher values make buffer rate increase more quickly when edge decreases"
+        )
+        
+        buffer_alpha_down = st.slider(
+            "Buffer Decrease Rate (when edge increases):",
+            min_value=0.01, 
+            max_value=0.2, 
+            value=st.session_state.buffer_alpha_down,
+            step=0.01,
+            key="buffer_alpha_down_slider",
+            help="Higher values make buffer rate decrease more quickly when edge increases"
+        )
+        
+        st.session_state.buffer_alpha_up = buffer_alpha_up
+        st.session_state.buffer_alpha_down = buffer_alpha_down
+        
+        st.markdown("##### Position Multiplier Adjustment Sensitivity")
+        multiplier_alpha_up = st.slider(
+            "Multiplier Increase Rate (when edge increases):",
+            min_value=0.01, 
+            max_value=0.2, 
+            value=st.session_state.multiplier_alpha_up,
+            step=0.01,
+            key="multiplier_alpha_up_slider",
+            help="Higher values make position multiplier increase more quickly when edge increases"
+        )
+        
+        multiplier_alpha_down = st.slider(
+            "Multiplier Decrease Rate (when edge decreases):",
+            min_value=0.01, 
+            max_value=0.5, 
+            value=st.session_state.multiplier_alpha_down,
+            step=0.01,
+            key="multiplier_alpha_down_slider",
+            help="Higher values make position multiplier decrease more quickly when edge decreases"
+        )
+        
+        st.session_state.multiplier_alpha_up = multiplier_alpha_up
+        st.session_state.multiplier_alpha_down = multiplier_alpha_down
+    
+    # Add a manual refresh button
+    if st.sidebar.button("Manual Refresh", type="primary"):
+        with st.spinner("Refreshing data..."):
+            # Process edge data for all monitored pairs
+            for pair_name in st.session_state.monitored_pairs:
+                if st.session_state.pair_data.get(pair_name, {}).get('initialized', False):
+                    process_edge_data(pair_name)
+                    # Calculate and record fee
+                    timestamp = get_sg_time()
+                    calculate_and_record_fee(pair_name, timestamp)
+        
+        st.sidebar.success("Data refreshed successfully!")
+        st.session_state.last_refresh_time = datetime.now(pytz.utc)
+        
+        # Reset navigation state to prevent duplicate reruns
+        st.session_state.navigating = False
+        st.rerun()
+    
+    # Display last refresh time
+    last_refresh = st.session_state.last_refresh_time
+    if last_refresh.tzinfo is None:
+        last_refresh = last_refresh.replace(tzinfo=pytz.utc)
+    singapore_last_refresh = to_singapore_time(last_refresh)
+    refresh_time_str = singapore_last_refresh.strftime('%Y-%m-%d %H:%M:%S')
+    st.sidebar.info(f"Last manual refresh: {refresh_time_str}")
+    
+    # Main content area based on view mode
+    if st.session_state.view_mode == "Pairs Overview":
+        # Header
+        st.title("House Edge Adjustment Dashboard")
+        st.markdown("Monitor and adjust trading fees based on real-time edge performance.")
+        
+        # Render the overview
+        render_pair_overview()
+    
+    elif st.session_state.view_mode == "Pair Detail":
+        # Check if we have a current pair selected
+        if st.session_state.current_pair is None:
+            st.warning("No pair selected. Please select a pair from the overview.")
+            if st.button("Return to Overview"):
+                st.session_state.view_mode = "Pairs Overview"
+                st.rerun()
+        else:
+            render_pair_detail(st.session_state.current_pair)
+    
+    elif st.session_state.view_mode == "Pair Monitor":
+        # Check if we have a current pair selected
+        if st.session_state.current_pair is None:
+            st.warning("No pair selected. Please select a pair from the overview.")
+            if st.button("Return to Overview"):
+                st.session_state.view_mode = "Pairs Overview"
+                st.rerun()
+        else:
+            render_pair_monitor(st.session_state.current_pair)
+
+if __name__ == "__main__":
+    main()
