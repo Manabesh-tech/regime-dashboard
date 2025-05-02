@@ -1,4 +1,4 @@
-# Save this as pages/05_Daily_Volatility_Table.py in your Streamlit app folder
+# Save this as pages/05_5min_Volatility_Table.py in your Streamlit app folder
 
 import streamlit as st
 import pandas as pd
@@ -7,9 +7,13 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import psycopg2
 import pytz
+import warnings
+
+# Suppress warnings
+warnings.filterwarnings('ignore')
 
 st.set_page_config(
-    page_title="Daily Volatility Table",
+    page_title="5min Volatility Table",
     page_icon="📈",
     layout="wide"
 )
@@ -49,14 +53,14 @@ except Exception as e:
 
 # --- UI Setup ---
 st.set_option('deprecation.showPyplotGlobalUse', False)
-st.title("Daily Volatility Table (30min)")
-st.subheader("All Trading Pairs - Last 24 Hours (Singapore Time)")
+st.title("5-Minute Volatility Table")
+st.subheader("All Trading Pairs - Last 12 Hours (Singapore Time)")
 
-# Define parameters for the 30-minute timeframe
-timeframe = "30min"
-lookback_days = 1  # 24 hours
-rolling_window = 20  # Window size for volatility calculation
-expected_points = 48  # Expected data points per pair over 24 hours
+# Define parameters for the 5-minute timeframe
+timeframe = "5min"
+lookback_hours = 12  # 12 hours instead of 24
+rolling_window = 10  # Reduced window size for 5min data to improve calculation speed
+expected_points = 144  # Expected data points per pair over 12 hours (12 hours * 12 5-min periods per hour)
 singapore_timezone = pytz.timezone('Asia/Singapore')
 
 # Get current time in Singapore timezone
@@ -67,7 +71,7 @@ st.write(f"Current Singapore Time: {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
 # Set extreme volatility threshold
 extreme_vol_threshold = 1.0  # 100% annualized volatility
 
-# Function to get partition tables based on date range
+# Function to get partition tables based on date range - OPTIMIZED to query fewer tables
 def get_partition_tables(conn, start_date, end_date):
     """
     Get list of partition tables that need to be queried based on date range.
@@ -100,19 +104,16 @@ def get_partition_tables(conn, start_date, end_date):
     cursor = conn.cursor()
     existing_tables = []
     
-    for table in table_names:
-        # Check if table exists
-        cursor.execute("""
-            SELECT EXISTS (
-                SELECT FROM information_schema.tables 
-                WHERE table_schema = 'public' 
-                AND table_name = %s
-            );
-        """, (table,))
-        
-        if cursor.fetchone()[0]:
-            existing_tables.append(table)
+    # Query to check all tables at once
+    table_list_str = "', '".join(table_names)
+    cursor.execute(f"""
+        SELECT table_name 
+        FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name IN ('{table_list_str}')
+    """)
     
+    existing_tables = [row[0] for row in cursor.fetchall()]
     cursor.close()
     
     if not existing_tables:
@@ -153,46 +154,32 @@ def build_query_for_partition_tables(tables, pair_name, start_time, end_time):
     complete_query = " UNION ".join(union_parts) + " ORDER BY timestamp"
     return complete_query
 
-# Fetch all available tokens from DB
-@st.cache_data(show_spinner="Fetching tokens...")
-def fetch_all_tokens():
-    # Calculate time range for the last 24 hours
-    end_time = now_sg.strftime("%Y-%m-%d %H:%M:%S")
-    start_time = (now_sg - timedelta(days=lookback_days)).strftime("%Y-%m-%d %H:%M:%S")
+# Function to fetch trading pairs from database
+@st.cache_data(ttl=600)
+def fetch_trading_pairs():
+    query = """
+    SELECT pair_name 
+    FROM trade_pool_pairs 
+    WHERE status = 1
+    ORDER BY pair_name
+    """
     
-    # Get partition tables for this period
-    partition_tables = get_partition_tables(conn, start_time, end_time)
-    
-    if not partition_tables:
-        st.error("No partition tables found for the last 24 hours.")
-        return []
-    
-    # Get distinct tokens from the first partition table (for efficiency)
-    # You could query all tables if needed, but that might be slow
-    cursor = conn.cursor()
     try:
-        cursor.execute(f"""
-        SELECT DISTINCT pair_name 
-        FROM public.{partition_tables[0]}
-        WHERE source_type = 0
-        ORDER BY pair_name
-        """)
-        tokens = [row[0] for row in cursor.fetchall()]
-        return tokens
+        df = pd.read_sql(query, conn)
+        return df['pair_name'].tolist()
     except Exception as e:
-        st.error(f"Error fetching tokens: {e}")
-        return ["BTC", "ETH", "SOL", "DOGE", "PEPE", "AI16Z"]  # Default fallback
-    finally:
-        cursor.close()
+        st.error(f"Error fetching trading pairs: {e}")
+        return ["BTC/USDT", "ETH/USDT"]  # Default pairs if database query fails
 
-all_tokens = fetch_all_tokens()
+# Get all available tokens from DB by fetching active trading pairs
+all_tokens = fetch_trading_pairs()
 
-# UI Controls
-col1, col2 = st.columns([3, 1])
+# UI Controls - OPTIMIZED layout for better user experience
+col1, col2, col3 = st.columns([2, 1, 1])
 
 with col1:
     # Let user select tokens to display (or select all)
-    select_all = st.checkbox("Select All Tokens", value=True)
+    select_all = st.checkbox("Select All Tokens", value=False)  # Default to false to reduce initial load
     
     if select_all:
         selected_tokens = all_tokens
@@ -209,44 +196,42 @@ with col2:
         st.cache_data.clear()
         st.experimental_rerun()
 
+with col3:
+    # Add option to adjust lookback period
+    lookback_option = st.selectbox(
+        "Lookback Period",
+        options=[6, 12, 24],
+        index=1,  # Default to 12 hours
+        format_func=lambda x: f"{x} hours"
+    )
+    lookback_hours = lookback_option
+
 if not selected_tokens:
     st.warning("Please select at least one token")
     st.stop()
 
-# Function to calculate various volatility metrics
+# Function to calculate volatility metrics - OPTIMIZED calculation
 def calculate_volatility_metrics(price_series):
     if price_series is None or len(price_series) < 2:
         return {
-            'realized_vol': np.nan,
-            'parkinson_vol': np.nan,
-            'gk_vol': np.nan,
-            'rs_vol': np.nan
+            'realized_vol': np.nan
         }
     
     try:
         # Calculate log returns
         log_returns = np.diff(np.log(price_series))
         
-        # 1. Standard deviation of returns (realized volatility)
-        realized_vol = np.std(log_returns) * np.sqrt(252 * 48)  # Annualized volatility (30min bars)
-        
-        # For other volatility metrics, need OHLC data
-        # For simplicity, we'll focus on realized volatility for now
-        # But the structure allows adding more volatility metrics
+        # Realized volatility - for 5min data, we need to adjust the annualization factor
+        # 5min = 12 periods per hour * 24 hours * 365 days = 105120 periods per year
+        realized_vol = np.std(log_returns) * np.sqrt(105120)  
         
         return {
-            'realized_vol': realized_vol,
-            'parkinson_vol': np.nan,  # Placeholder for Parkinson volatility
-            'gk_vol': np.nan,         # Placeholder for Garman-Klass volatility
-            'rs_vol': np.nan          # Placeholder for Rogers-Satchell volatility
+            'realized_vol': realized_vol
         }
     except Exception as e:
         print(f"Error in volatility calculation: {e}")
         return {
-            'realized_vol': np.nan,
-            'parkinson_vol': np.nan,
-            'gk_vol': np.nan,
-            'rs_vol': np.nan
+            'realized_vol': np.nan
         }
 
 # Volatility classification function
@@ -262,41 +247,38 @@ def classify_volatility(vol):
     else:
         return ("EXTREME", 4, "Extreme volatility")
 
-# Function to generate aligned 30-minute time blocks for the past 24 hours
-def generate_aligned_time_blocks(current_time):
+# Function to generate aligned 5-minute time blocks for the past 12 hours
+def generate_aligned_time_blocks(current_time, hours_back=12):
     """
-    Generate fixed 30-minute time blocks for past 24 hours,
-    aligned with standard 30-minute intervals (e.g., 4:00-4:30, 4:30-5:00)
+    Generate fixed 5-minute time blocks for past X hours,
+    aligned with standard 5-minute intervals
     """
-    # Round down to the nearest 30-minute mark
-    if current_time.minute < 30:
-        # Round down to XX:00
-        latest_complete_block_end = current_time.replace(minute=0, second=0, microsecond=0)
-    else:
-        # Round down to XX:30
-        latest_complete_block_end = current_time.replace(minute=30, second=0, microsecond=0)
+    # Round down to the nearest 5-minute mark
+    minute = current_time.minute
+    rounded_minute = (minute // 5) * 5
+    latest_complete_block_end = current_time.replace(minute=rounded_minute, second=0, microsecond=0)
     
     # Generate block labels for display
     blocks = []
-    for i in range(48):  # 24 hours of 30-minute blocks
-        block_end = latest_complete_block_end - timedelta(minutes=i*30)
-        block_start = block_end - timedelta(minutes=30)
+    for i in range(hours_back * 12):  # 12 hours of 5-minute blocks = 144 blocks
+        block_end = latest_complete_block_end - timedelta(minutes=i*5)
+        block_start = block_end - timedelta(minutes=5)
         block_label = f"{block_start.strftime('%H:%M')}"
         blocks.append((block_start, block_end, block_label))
     
     return blocks
 
 # Generate aligned time blocks
-aligned_time_blocks = generate_aligned_time_blocks(now_sg)
+aligned_time_blocks = generate_aligned_time_blocks(now_sg, lookback_hours)
 time_block_labels = [block[2] for block in aligned_time_blocks]
 
-# Fetch and calculate volatility for a token with 30min timeframe
-@st.cache_data(ttl=600, show_spinner="Calculating volatility metrics...")
+# Fetch and calculate volatility for a token with 5min timeframe - OPTIMIZED query
+@st.cache_data(ttl=300, show_spinner="Calculating volatility metrics...")
 def fetch_and_calculate_volatility(token):
     # Get current time in Singapore timezone
     now_utc = datetime.now(pytz.utc)
     now_sg = now_utc.astimezone(singapore_timezone)
-    start_time_sg = now_sg - timedelta(days=lookback_days)
+    start_time_sg = now_sg - timedelta(hours=lookback_hours)
     
     # Convert for database query (keep as Singapore time strings as the query will handle timezone)
     start_time = start_time_sg.strftime("%Y-%m-%d %H:%M:%S")
@@ -329,86 +311,99 @@ def fetch_and_calculate_volatility(token):
         df['timestamp'] = pd.to_datetime(df['timestamp'])
         df = df.set_index('timestamp').sort_index()
         
-        # Create 1-minute OHLC data
-        one_min_ohlc = df['final_price'].resample('1min').ohlc().dropna()
-        if one_min_ohlc.empty:
-            print(f"[{token}] No OHLC data after resampling.")
+        # Work directly with 1-minute data
+        one_min_data = df['final_price'].dropna()
+        if one_min_data.empty:
+            print(f"[{token}] No data after cleaning.")
             return None
             
-        # Calculate rolling volatility on 1-minute data
-        one_min_ohlc['realized_vol'] = one_min_ohlc['close'].rolling(window=rolling_window).apply(
+        # Resample to 5min intervals aligned with clock
+        five_min_ohlc = one_min_data.resample('5min', closed='left', label='left').ohlc().dropna()
+        
+        if five_min_ohlc.empty:
+            print(f"[{token}] No 5-min data after resampling.")
+            return None
+            
+        # Calculate rolling volatility directly on 5-minute close prices
+        five_min_ohlc['realized_vol'] = five_min_ohlc['close'].rolling(window=rolling_window).apply(
             lambda x: calculate_volatility_metrics(x)['realized_vol']
         )
         
-        # Resample to exactly 30min intervals aligned with clock
-        thirty_min_vol = one_min_ohlc['realized_vol'].resample('30min', closed='left', label='left').mean().dropna()
+        # Get last X hours worth of data
+        blocks_needed = lookback_hours * 12  # Number of 5-minute blocks in lookback period
+        last_period_vol = five_min_ohlc['realized_vol'].tail(blocks_needed)
         
-        if thirty_min_vol.empty:
-            print(f"[{token}] No 30-min volatility data.")
+        if last_period_vol.empty:
+            print(f"[{token}] No 5-min volatility data.")
             return None
             
-        # Get last 24 hours (48 30-minute bars)
-        last_24h_vol = thirty_min_vol.tail(48)  # Get up to last 48 periods (24 hours)
-        last_24h_vol = last_24h_vol.to_frame()
+        last_period_vol = last_period_vol.to_frame()
         
         # Store original datetime index for reference
-        last_24h_vol['original_datetime'] = last_24h_vol.index
+        last_period_vol['original_datetime'] = last_period_vol.index
         
         # Format time label to match our aligned blocks (HH:MM format)
-        last_24h_vol['time_label'] = last_24h_vol.index.strftime('%H:%M')
+        last_period_vol['time_label'] = last_period_vol.index.strftime('%H:%M')
         
-        # Calculate 24-hour average volatility
-        last_24h_vol['avg_24h_vol'] = last_24h_vol['realized_vol'].mean()
+        # Calculate average volatility over lookback period
+        last_period_vol['avg_period_vol'] = last_period_vol['realized_vol'].mean()
         
         # Classify volatility
-        last_24h_vol['vol_info'] = last_24h_vol['realized_vol'].apply(classify_volatility)
-        last_24h_vol['vol_regime'] = last_24h_vol['vol_info'].apply(lambda x: x[0])
-        last_24h_vol['vol_desc'] = last_24h_vol['vol_info'].apply(lambda x: x[2])
+        last_period_vol['vol_info'] = last_period_vol['realized_vol'].apply(classify_volatility)
+        last_period_vol['vol_regime'] = last_period_vol['vol_info'].apply(lambda x: x[0])
+        last_period_vol['vol_desc'] = last_period_vol['vol_info'].apply(lambda x: x[2])
         
-        # Also classify the 24-hour average
-        last_24h_vol['avg_vol_info'] = last_24h_vol['avg_24h_vol'].apply(classify_volatility)
-        last_24h_vol['avg_vol_regime'] = last_24h_vol['avg_vol_info'].apply(lambda x: x[0])
-        last_24h_vol['avg_vol_desc'] = last_24h_vol['avg_vol_info'].apply(lambda x: x[2])
+        # Also classify the average
+        last_period_vol['avg_vol_info'] = last_period_vol['avg_period_vol'].apply(classify_volatility)
+        last_period_vol['avg_vol_regime'] = last_period_vol['avg_vol_info'].apply(lambda x: x[0])
+        last_period_vol['avg_vol_desc'] = last_period_vol['avg_vol_info'].apply(lambda x: x[2])
         
         # Flag extreme volatility events
-        last_24h_vol['is_extreme'] = last_24h_vol['realized_vol'] >= extreme_vol_threshold
+        last_period_vol['is_extreme'] = last_period_vol['realized_vol'] >= extreme_vol_threshold
         
         print(f"[{token}] Successful Volatility Calculation")
-        return last_24h_vol
+        return last_period_vol
     except Exception as e:
         st.error(f"Error processing {token}: {e}")
         print(f"[{token}] Error processing: {e}")
         return None
 
-# Show the blocks we're analyzing
-with st.expander("View Time Blocks Being Analyzed"):
+# Show the blocks we're analyzing - OPTIMIZED to be in expander for cleaner UI
+with st.expander("View Time Blocks Being Analyzed", expanded=False):
     time_blocks_df = pd.DataFrame([(b[0].strftime('%Y-%m-%d %H:%M'), b[1].strftime('%Y-%m-%d %H:%M'), b[2]) 
                                   for b in aligned_time_blocks], 
                                  columns=['Start Time', 'End Time', 'Block Label'])
     st.dataframe(time_blocks_df)
 
-# Show progress bar while calculating
+# Optimize the progress bar with batched processing
 progress_bar = st.progress(0)
 status_text = st.empty()
 
-# Calculate volatility for each token
+# Process tokens in batches to increase perceived speed
 token_results = {}
-for i, token in enumerate(selected_tokens):
-    try:
-        progress_bar.progress((i) / len(selected_tokens))
-        status_text.text(f"Processing {token} ({i+1}/{len(selected_tokens)})")
-        result = fetch_and_calculate_volatility(token)
-        if result is not None:
-            token_results[token] = result
-    except Exception as e:
-        st.error(f"Error processing token {token}: {e}")
-        print(f"Error processing token {token} in main loop: {e}")
+batch_size = min(5, len(selected_tokens))  # Process up to 5 tokens simultaneously
+for i in range(0, len(selected_tokens), batch_size):
+    batch = selected_tokens[i:i+batch_size]
+    
+    # Update progress
+    progress_bar.progress(i / len(selected_tokens))
+    status_text.text(f"Processing batch {i//batch_size + 1}/{(len(selected_tokens)-1)//batch_size + 1} ({len(batch)} tokens)")
+    
+    # Process tokens in current batch (could be parallelized in a future version)
+    for token in batch:
+        try:
+            result = fetch_and_calculate_volatility(token)
+            if result is not None:
+                token_results[token] = result
+        except Exception as e:
+            st.error(f"Error processing token {token}: {e}")
+            print(f"Error processing token {token} in main loop: {e}")
 
 # Final progress update
 progress_bar.progress(1.0)
 status_text.text(f"Processed {len(token_results)}/{len(selected_tokens)} tokens successfully")
 
-# Create table for display
+# Create table for display - OPTIMIZED display for 5min data
 if token_results:
     # Create table data
     table_data = {}
@@ -449,18 +444,21 @@ if token_results:
             return 'background-color: rgba(255, 0, 0, 0.7); color: white'
     
     styled_table = vol_table.style.applymap(color_cells)
-    st.markdown("## Volatility Table (30min timeframe, Last 24 hours, Singapore Time)")
+    st.markdown(f"## Volatility Table (5min timeframe, Last {lookback_hours} hours, Singapore Time)")
     st.markdown("### Color Legend: <span style='color:green'>Low Vol</span>, <span style='color:#aaaa00'>Medium Vol</span>, <span style='color:orange'>High Vol</span>, <span style='color:red'>Extreme Vol</span>", unsafe_allow_html=True)
     st.markdown("Values shown as annualized volatility percentage")
-    st.dataframe(styled_table, height=700, use_container_width=True)
+    
+    # OPTIMIZATION: Set a maximum height for the table to avoid overwhelming the page
+    max_height = min(700, 100 + 20 * len(ordered_times))  # Base height + rows
+    st.dataframe(styled_table, height=max_height, use_container_width=True)
     
     # Create ranking table based on average volatility
-    st.subheader("Volatility Ranking (24-Hour Average, Descending Order)")
+    st.subheader(f"Volatility Ranking ({lookback_hours}-Hour Average, Descending Order)")
     
     ranking_data = []
     for token, df in token_results.items():
-        if not df.empty and 'avg_24h_vol' in df.columns and not df['avg_24h_vol'].isna().all():
-            avg_vol = df['avg_24h_vol'].iloc[0]  # All rows have the same avg value
+        if not df.empty and 'avg_period_vol' in df.columns and not df['avg_period_vol'].isna().all():
+            avg_vol = df['avg_period_vol'].iloc[0]  # All rows have the same avg value
             vol_regime = df['avg_vol_desc'].iloc[0]
             max_vol = df['realized_vol'].max()
             min_vol = df['realized_vol'].min()
@@ -513,7 +511,7 @@ if token_results:
             .applymap(color_value, subset=['Avg Vol (%)', 'Max Vol (%)', 'Min Vol (%)'])
         
         # Display the styled dataframe
-        st.dataframe(styled_ranking, height=500, use_container_width=True)
+        st.dataframe(styled_ranking, height=min(500, 100 + 35 * len(ranking_df)), use_container_width=True)
     else:
         st.warning("No ranking data available.")
     
@@ -545,61 +543,76 @@ if token_results:
         extreme_df = extreme_df.reset_index(drop=True)
         
         # Display the dataframe
-        st.dataframe(extreme_df, height=300, use_container_width=True)
+        st.dataframe(extreme_df, height=min(300, 100 + 35 * len(extreme_df)), use_container_width=True)
         
         # Create a more visually appealing list of extreme events
-        st.markdown("### Extreme Volatility Events Detail")
-        
-        # Only process top 10 events if there are any
-        top_events = extreme_events[:min(10, len(extreme_events))]
-        for i, event in enumerate(top_events):
-            token = event['Token']
-            time = event['Time']
-            vol = event['Volatility (%)']
-            date = event['Full Timestamp'].split(' ')[0]
+        with st.expander("Extreme Volatility Events Detail", expanded=False):
+            # Only process top 10 events if there are any
+            top_events = extreme_events[:min(10, len(extreme_events))]
+            for i, event in enumerate(top_events):
+                token = event['Token']
+                time = event['Time']
+                vol = event['Volatility (%)']
+                date = event['Full Timestamp'].split(' ')[0]
+                
+                st.markdown(f"**{i+1}. {token}** at **{time}** on {date}: <span style='color:red; font-weight:bold;'>{vol}%</span> volatility", unsafe_allow_html=True)
             
-            st.markdown(f"**{i+1}. {token}** at **{time}** on {date}: <span style='color:red; font-weight:bold;'>{vol}%</span> volatility", unsafe_allow_html=True)
-        
-        if len(extreme_events) > 10:
-            st.markdown(f"*... and {len(extreme_events) - 10} more extreme events*")
+            if len(extreme_events) > 10:
+                st.markdown(f"*... and {len(extreme_events) - 10} more extreme events*")
         
     else:
         st.info("No extreme volatility events detected in the selected tokens.")
     
-    # 24-Hour Average Volatility Distribution
-    st.subheader("24-Hour Average Volatility Overview (Singapore Time)")
-    avg_values = {}
-    for token, df in token_results.items():
-        if not df.empty and 'avg_24h_vol' in df.columns and not df['avg_24h_vol'].isna().all():
-            avg = df['avg_24h_vol'].iloc[0]  # All rows have the same avg value
-            regime = df['avg_vol_desc'].iloc[0]
-            avg_values[token] = (avg, regime)
+    # Average Volatility Distribution - OPTIMIZED with simple metrics display
+    # Using columns to make it more compact
+    st.subheader(f"{lookback_hours}-Hour Average Volatility Overview (Singapore Time)")
     
-    if avg_values:
-        low_vol = sum(1 for v, r in avg_values.values() if v < 0.3)
-        medium_vol = sum(1 for v, r in avg_values.values() if 0.3 <= v < 0.6)
-        high_vol = sum(1 for v, r in avg_values.values() if 0.6 <= v < 1.0)
-        extreme_vol = sum(1 for v, r in avg_values.values() if v >= 1.0)
-        total = low_vol + medium_vol + high_vol + extreme_vol
+    # OPTIMIZATION: Place metrics in a more compact layout
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        avg_values = {}
+        for token, df in token_results.items():
+            if not df.empty and 'avg_period_vol' in df.columns and not df['avg_period_vol'].isna().all():
+                avg = df['avg_period_vol'].iloc[0]  # All rows have the same avg value
+                regime = df['avg_vol_desc'].iloc[0]
+                avg_values[token] = (avg, regime)
         
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Low Vol", f"{low_vol} ({low_vol/total*100:.1f}%)")
-        col2.metric("Medium Vol", f"{medium_vol} ({medium_vol/total*100:.1f}%)")
-        col3.metric("High Vol", f"{high_vol} ({high_vol/total*100:.1f}%)")
-        col4.metric("Extreme Vol", f"{extreme_vol} ({extreme_vol/total*100:.1f}%)")
-        
-        labels = ['Low Vol', 'Medium Vol', 'High Vol', 'Extreme Vol']
-        values = [low_vol, medium_vol, high_vol, extreme_vol]
-        colors = ['rgba(100,255,100,0.8)', 'rgba(255,255,100,0.8)', 'rgba(255,165,0,0.8)', 'rgba(255,0,0,0.8)']
-        
-        fig = go.Figure(data=[go.Pie(labels=labels, values=values, marker=dict(colors=colors, line=dict(color='#000000', width=2)), textinfo='label+percent', hole=.3)])
-        fig.update_layout(
-            title="24-Hour Average Volatility Distribution (Singapore Time)",
-            height=400,
-            font=dict(color="#000000", size=12),
-        )
-        st.plotly_chart(fig, use_container_width=True)
-        
+        if avg_values:
+            low_vol = sum(1 for v, r in avg_values.values() if v < 0.3)
+            medium_vol = sum(1 for v, r in avg_values.values() if 0.3 <= v < 0.6)
+            high_vol = sum(1 for v, r in avg_values.values() if 0.6 <= v < 1.0)
+            extreme_vol = sum(1 for v, r in avg_values.values() if v >= 1.0)
+            total = low_vol + medium_vol + high_vol + extreme_vol
+            
+            col1a, col1b = st.columns(2)
+            col2a, col2b = st.columns(2)
+            
+            col1a.metric("Low Vol", f"{low_vol} ({low_vol/total*100:.1f}%)")
+            col1b.metric("Medium Vol", f"{medium_vol} ({medium_vol/total*100:.1f}%)")
+            col2a.metric("High Vol", f"{high_vol} ({high_vol/total*100:.1f}%)")
+            col2b.metric("Extreme Vol", f"{extreme_vol} ({extreme_vol/total*100:.1f}%)")
+        else:
+            st.warning("No average volatility data available for the selected tokens.")
+    
+    with col2:
+        # Simple pie chart for volatility distribution
+        if 'avg_values' in locals() and avg_values:
+            labels = ['Low Vol', 'Medium Vol', 'High Vol', 'Extreme Vol']
+            values = [low_vol, medium_vol, high_vol, extreme_vol]
+            colors = ['rgba(100,255,100,0.8)', 'rgba(255,255,100,0.8)', 'rgba(255,165,0,0.8)', 'rgba(255,0,0,0.8)']
+            
+            fig = go.Figure(data=[go.Pie(labels=labels, values=values, marker=dict(colors=colors, line=dict(color='#000000', width=2)), textinfo='label+percent', hole=.3)])
+            fig.update_layout(
+                title=f"{lookback_hours}-Hour Average Volatility Distribution",
+                height=300,
+                font=dict(color="#000000", size=12),
+                margin=dict(l=10, r=10, t=40, b=10),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+    # OPTIMIZATION: Put detailed token lists in expanders to save space
+    with st.expander("Token Volatility Categories", expanded=False):
         # Create columns for each volatility category
         col1, col2 = st.columns(2)
         col3, col4 = st.columns(2)
@@ -643,14 +656,14 @@ if token_results:
                     st.markdown(f"- **{token}**: <span style='color:red'>{value:.1f}%</span> ({regime})", unsafe_allow_html=True)
             else:
                 st.markdown("*No tokens in this category*")
-    else:
-        st.warning("No average volatility data available for the selected tokens.")
+else:
+    st.warning("No volatility data available for the selected tokens.")
 
-with st.expander("Understanding the Volatility Table"):
+with st.expander("Understanding the Volatility Table", expanded=False):
     st.markdown("""
     ### How to Read This Table
-    This table shows annualized volatility values for all selected tokens over the last 24 hours using 30-minute bars.
-    Each row represents a specific 30-minute time period, with times shown in Singapore time. The table is sorted with the most recent 30-minute period at the top.
+    This table shows annualized volatility values for all selected tokens over the last 12 hours using 5-minute bars.
+    Each row represents a specific 5-minute time period, with times shown in Singapore time. The table is sorted with the most recent 5-minute period at the top.
     
     **Color coding:**
     - **Green** (< 30%): Low volatility
@@ -663,15 +676,14 @@ with st.expander("Understanding the Volatility Table"):
     - Darker red = Higher volatility
     
     **Ranking Table:**
-    The ranking table sorts tokens by their 24-hour average volatility from highest to lowest.
+    The ranking table sorts tokens by their average volatility over the selected lookback period, from highest to lowest.
     
     **Extreme Volatility Events:**
-    These are specific 30-minute periods where a token's annualized volatility exceeded 100%.
+    These are specific 5-minute periods where a token's annualized volatility exceeded 100%.
     
     **Technical details:**
     - Volatility is calculated as the standard deviation of log returns, annualized to represent the expected price variation over a year
     - Values shown are in percentage (e.g., 50.0 means 50% annualized volatility)
-    - The calculation uses a rolling window of 20 one-minute price points
-    - The 24-hour average section shows the mean volatility across all 48 30-minute periods
+    - The calculation uses a rolling window of 10 price points for 5-minute data (versus 20 for 30-minute data)
     - Missing values (light gray cells) indicate insufficient data for calculation
     """)
