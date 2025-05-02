@@ -3,6 +3,8 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
+import time
+import math
 import pytz
 from sqlalchemy import create_engine, text
 
@@ -129,6 +131,12 @@ st.markdown("""
     .stButton > button {
         width: 100%;
     }
+    .edge-info {
+        color: #666;
+        font-size: 0.8em;
+        margin-top: -10px;
+        margin-bottom: 10px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -192,9 +200,47 @@ def calculate_edge(pair_name, lookback_minutes=10):
     Calculate house edge for a specific pair.
     Returns edge value or None if calculation fails.
     """
-    # Generate random edge values for testing
+    # Generate random edge values for testing with time component
     import random
-    return 0.001 + random.uniform(-0.0005, 0.0010)
+    
+    # Base edge value
+    base_edge = 0.001
+    
+    # Add variation that scales with lookback period
+    # Longer periods have less variation as they average out more
+    variation_scale = 1.0 / math.sqrt(max(1, lookback_minutes))
+    variation = random.uniform(-0.0005, 0.0010) * variation_scale
+    
+    # Add time-dependent component to simulate trends
+    time_component = 0.0002 * math.sin(time.time() / 3600)  # Gentle sine wave over hours
+    
+    return base_edge + variation + time_component
+
+# Calculate average edge between last update and now
+def calculate_average_edge(pair_name):
+    """
+    Calculate the average edge for a specific pair between the last update and now.
+    """
+    # Get the last update time for this pair
+    last_update = st.session_state.pair_data[pair_name].get('last_update_time')
+    if last_update is None:
+        # If no previous update, use a default 5-minute lookback
+        return calculate_edge(pair_name, 5), 5
+    
+    # Ensure last_update is timezone-aware
+    if last_update.tzinfo is None:
+        last_update = last_update.replace(tzinfo=pytz.utc)
+    
+    # Get current time
+    current_time = get_sg_time()
+    
+    # Calculate time difference in minutes
+    time_diff_minutes = max(1, (current_time - last_update).total_seconds() / 60)
+    
+    # Calculate edge using the entire time difference
+    edge = calculate_edge(pair_name, int(time_diff_minutes))
+    
+    return edge, int(time_diff_minutes)
 
 # Calculate fee percentage for a price move based on the Profit Share Model
 def calculate_fee_for_move(move_pct, pnl_base_rate, position_multiplier, rate_multiplier=15000, 
@@ -371,7 +417,8 @@ def init_pair_state(pair_name):
             'reference_position_multiplier': None,
             'last_update_time': None,
             'params_changed': False,
-            'current_fee_percentage': None
+            'current_fee_percentage': None,
+            'last_edge_minutes': 5  # Default minutes used for edge calculation
         }
 
 # Initialize session state variables
@@ -388,9 +435,6 @@ def init_session_state():
     
     if 'current_pair' not in st.session_state:
         st.session_state.current_pair = None
-    
-    if 'lookback_minutes' not in st.session_state:
-        st.session_state.lookback_minutes = 1  # Default to 1 minute for faster updates
     
     if 'buffer_alpha_up' not in st.session_state:
         st.session_state.buffer_alpha_up = 0.1
@@ -514,8 +558,11 @@ def process_edge_data(pair_name, timestamp=None):
         timestamp = timestamp.replace(tzinfo=pytz.utc)
         timestamp = to_singapore_time(timestamp)
     
-    # Fetch new edge
-    new_edge = calculate_edge(pair_name, st.session_state.lookback_minutes)
+    # Fetch new edge (using average calculation between last update and now)
+    new_edge, minutes_used = calculate_average_edge(pair_name)
+    
+    # Store the minutes used for the edge calculation
+    st.session_state.pair_data[pair_name]['last_edge_minutes'] = minutes_used
     
     # Skip updates if edge calculation failed, but don't return yet to update timestamp
     if new_edge is not None:
@@ -1150,8 +1197,10 @@ def initialize_pair(pair_name):
     # Calculate and record initial fee for 0.1% move
     fee_pct = calculate_and_record_fee(pair_name, timestamp)
     
-    # Fetch initial reference edge based on selected lookback period
-    initial_edge = calculate_edge(pair_name, st.session_state.lookback_minutes)
+    # Fetch initial reference edge using the default 5-minute lookback
+    initial_edge, minutes_used = calculate_average_edge(pair_name)
+    st.session_state.pair_data[pair_name]['last_edge_minutes'] = minutes_used
+    
     if initial_edge is not None:
         # Use a small positive default if edge is zero
         if initial_edge == 0:
@@ -1228,6 +1277,7 @@ def render_pair_overview():
             fee_percentage = pair_data.get('current_fee_percentage')
             last_update = pair_data.get('last_update_time')
             params_changed = pair_data.get('params_changed', False)
+            edge_minutes = pair_data.get('last_edge_minutes', 5)
             
             # Determine status indicator
             status = get_pair_status(current_edge, reference_edge)
@@ -1291,6 +1341,9 @@ def render_pair_overview():
                         <span style="color: #666;">Current Edge:</span>
                         <span style="font-weight: 500;">{edge_display}</span>
                     </div>
+                    <div style="color: #666; font-size: 0.8em; margin-top: -5px; margin-bottom: 5px; text-align: right;">
+                        (Averaged over {edge_minutes} minutes)
+                    </div>
                     <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
                         <span style="color: #666;">Reference Edge:</span>
                         <span style="font-weight: 500;">{ref_display}</span>
@@ -1347,10 +1400,14 @@ def render_pair_detail(pair_name):
     # Show current edge
     with col1:
         if st.session_state.pair_data[pair_name]['current_edge'] is not None:
+            # Get minutes used for last calculation
+            minutes_used = st.session_state.pair_data[pair_name].get('last_edge_minutes', 5)
+            
             edge_delta = st.session_state.pair_data[pair_name]['current_edge'] - st.session_state.pair_data[pair_name]['reference_edge'] if st.session_state.pair_data[pair_name]['reference_edge'] is not None else None
             delta_color = "down" if edge_delta and edge_delta < 0 else "up"
             delta_str = f"<span class='{delta_color}'>{edge_delta:.4%}</span>" if edge_delta is not None else ""
             st.markdown(f"**Current Edge:** {st.session_state.pair_data[pair_name]['current_edge']:.4%} {delta_str}", unsafe_allow_html=True)
+            st.markdown(f"<div class='edge-info'>(Averaged over {minutes_used} minutes)</div>", unsafe_allow_html=True)
         else:
             st.markdown("**Current Edge:** N/A")
     
@@ -1574,10 +1631,14 @@ def render_pair_monitor(pair_name):
     # Show current edge
     with col1:
         if st.session_state.pair_data[pair_name]['current_edge'] is not None:
+            # Get minutes used for last calculation
+            minutes_used = st.session_state.pair_data[pair_name].get('last_edge_minutes', 5)
+            
             edge_delta = st.session_state.pair_data[pair_name]['current_edge'] - st.session_state.pair_data[pair_name]['reference_edge'] if st.session_state.pair_data[pair_name]['reference_edge'] is not None else None
             delta_color = "down" if edge_delta and edge_delta < 0 else "up"
             delta_str = f"<span class='{delta_color}'>{edge_delta:.4%}</span>" if edge_delta is not None else ""
             st.markdown(f"**Current Edge:** {st.session_state.pair_data[pair_name]['current_edge']:.4%} {delta_str}", unsafe_allow_html=True)
+            st.markdown(f"<div class='edge-info'>(Averaged over {minutes_used} minutes)</div>", unsafe_allow_html=True)
         else:
             st.markdown("**Current Edge:** N/A")
     
@@ -1785,7 +1846,7 @@ def main():
     st.sidebar.title("House Edge Control")
     
     # Add a note about refresh rates having been turned off
-    st.sidebar.info("Auto-update functionality has been disabled to resolve performance issues. Use the manual refresh buttons instead.")
+    st.sidebar.info("Edge calculations automatically use all data since the last update.")
     
     # Parameter control section in sidebar
     st.sidebar.markdown("### Parameter Controls")
@@ -1857,18 +1918,6 @@ def main():
             # Reset navigation state and rerun
             st.session_state.navigating = False
             st.rerun()
-    
-    # Lookback period selection
-    st.sidebar.markdown("#### Lookback Period")
-    st.sidebar.markdown("When you press 'Fetch New Data', the edge will be calculated based on data from this time period:")
-    lookback_options = {"1 minute": 1, "5 minutes": 5, "10 minutes": 10}
-    selected_interval = st.sidebar.radio(
-        "Select edge calculation period:",
-        options=list(lookback_options.keys()),
-        key="interval_radio"
-    )
-    # Update lookback minutes in session state
-    st.session_state.lookback_minutes = lookback_options[selected_interval]
     
     # Parameter adjustment sensitivity controls
     st.sidebar.markdown("#### Parameter Adjustment Controls")
