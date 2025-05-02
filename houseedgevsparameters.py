@@ -477,12 +477,12 @@ def update_position_multiplier_logarithmic(current_multiplier, edge, edge_ref, a
     Decreases sharply when edge declines, increases slowly when edge improves.
     Uses different alpha values for up/down adjustments.
     """
-    # Safety checks
+    # Handle edge cases safely
     if edge_ref == 0 or current_multiplier <= 0:
         return max(1, min(14000, current_multiplier))
     
     delta = edge - edge_ref
-    upper_bound = 1500  # Maintain the same upper bound as original
+    upper_bound = 14000
     lower_bound = 1
     
     # Calculate normalized delta relative to reference edge
