@@ -3,8 +3,6 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
-import time
-import math
 import pytz
 from sqlalchemy import create_engine, text
 
@@ -169,30 +167,8 @@ def fetch_pairs():
     Fetch all active trading pairs.
     Returns a list of pair names or default list.
     """
-    # If in simulated data mode, return a fixed list
-    if st.session_state.get('simulated_data_mode', True):
-        return ["BTC/USDT", "ETH/USDT", "SOL/USDT", "DOGE/USDT", "XRP/USDT"]
-    
-    # Otherwise try to fetch from database
-    engine = init_connection()
-    if not engine:
-        return ["BTC/USDT", "ETH/USDT", "SOL/USDT"]  # Default pairs if connection fails
-    
-    try:
-        query = """
-        SELECT DISTINCT pair_name 
-        FROM public.trade_fill_fresh 
-        WHERE created_at > NOW() - INTERVAL '1 day'
-        ORDER BY pair_name
-        """
-        
-        df = pd.read_sql(query, engine)
-        if df.empty:
-            return ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
-        return df['pair_name'].tolist()
-    except Exception as e:
-        st.error(f"Error fetching pairs: {e}")
-        return ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+    # Always return a fixed list for now
+    return ["BTC/USDT", "ETH/USDT", "SOL/USDT", "DOGE/USDT", "XRP/USDT"]
 
 # Fetch current parameters for a specific pair
 def fetch_current_parameters(pair_name):
@@ -200,77 +176,15 @@ def fetch_current_parameters(pair_name):
     Fetch current parameters for a specific pair.
     Returns a dictionary with all parameter values needed for fee calculation.
     """
-    # If in simulated data mode, return fixed values
-    if st.session_state.get('simulated_data_mode', True):
-        return {
-            "buffer_rate": 0.001,
-            "position_multiplier": 1000,
-            "max_leverage": 100,
-            "rate_multiplier": 10000,
-            "rate_exponent": 1,
-            "pnl_base_rate": 0.0005
-        }
-    
-    # Otherwise try to fetch from database
-    engine = init_connection()
-    if not engine:
-        return {
-            "buffer_rate": 0.001,
-            "position_multiplier": 1000,
-            "max_leverage": 100,
-            "rate_multiplier": 10000,
-            "rate_exponent": 1,
-            "pnl_base_rate": 0.0005
-        }
-    
-    try:
-        query = f"""
-        SELECT
-            (leverage_config::jsonb->0->>'buffer_rate')::numeric AS buffer_rate,
-            position_multiplier,
-            max_leverage,
-            rate_multiplier,
-            rate_exponent,
-            pnl_base_rate
-        FROM
-            public.trade_pool_pairs
-        WHERE
-            pair_name = '{pair_name}'
-            AND status = 1
-        """
-        
-        df = pd.read_sql(query, engine)
-        if df.empty:
-            return {
-                "buffer_rate": 0.001,
-                "position_multiplier": 1000,
-                "max_leverage": 100,
-                "rate_multiplier": 10000,
-                "rate_exponent": 1,
-                "pnl_base_rate": 0.0005
-            }
-        
-        # Convert to dictionary
-        params = {
-            "buffer_rate": float(df['buffer_rate'].iloc[0]),
-            "position_multiplier": float(df['position_multiplier'].iloc[0]),
-            "max_leverage": float(df['max_leverage'].iloc[0]),
-            "rate_multiplier": float(df['rate_multiplier'].iloc[0]),
-            "rate_exponent": float(df['rate_exponent'].iloc[0]),
-            "pnl_base_rate": float(df['pnl_base_rate'].iloc[0])
-        }
-        
-        return params
-    except Exception as e:
-        st.error(f"Error fetching parameters for {pair_name}: {e}")
-        return {
-            "buffer_rate": 0.001,
-            "position_multiplier": 10000,
-            "max_leverage": 100,
-            "rate_multiplier": 10000,
-            "rate_exponent": 1,
-            "pnl_base_rate": 0.0005
-        }
+    # Return fixed values for simulated data
+    return {
+        "buffer_rate": 0.001,
+        "position_multiplier": 1000,
+        "max_leverage": 100,
+        "rate_multiplier": 10000,
+        "rate_exponent": 1,
+        "pnl_base_rate": 0.0005
+    }
 
 # Calculate edge for a specific pair
 def calculate_edge(pair_name, lookback_minutes=10):
@@ -278,114 +192,19 @@ def calculate_edge(pair_name, lookback_minutes=10):
     Calculate house edge for a specific pair.
     Returns edge value or None if calculation fails.
     """
-    # Check if we're in simulated data mode
-    if st.session_state.get('simulated_data_mode', True):
-        # Generate random edge values for testing
-        import random
-        return 0.001 + random.uniform(-0.0005, 0.0010)
-    
-    engine = init_connection()
-    if engine is None:
-        # For testing - generate random edge values when no connection
-        import random
-        return 0.001 + random.uniform(-0.0005, 0.0010)
-    
-    try:
-        # Get current time in Singapore timezone
-        singapore_tz = pytz.timezone('Asia/Singapore')
-        now_utc = datetime.now(pytz.utc)
-        now_sg = now_utc.astimezone(singapore_tz)
-        
-        # Calculate lookback period
-        start_time_sg = now_sg - timedelta(minutes=lookback_minutes)
-        
-        # Convert to UTC for database query
-        start_time_utc = start_time_sg.astimezone(pytz.utc)
-        end_time_utc = now_sg.astimezone(pytz.utc)
-        
-        # Query for house edge calculation
-        edge_query = f"""
-        WITH pnl_data AS (
-          SELECT
-            SUM(-1 * taker_pnl * collateral_price) AS trading_pnl,
-            SUM(CASE WHEN taker_fee_mode = 1 AND taker_way IN (1, 3) THEN taker_fee * collateral_price ELSE 0 END) AS taker_fee,
-            SUM(CASE WHEN taker_way = 0 THEN -1 * funding_fee * collateral_price ELSE 0 END) AS funding_pnl,
-            SUM(taker_sl_fee * collateral_price + maker_sl_fee) AS sl_fee
-          FROM public.trade_fill_fresh
-          WHERE created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
-            AND pair_name = '{pair_name}'
-        ),
-        collateral_data AS (
-          SELECT
-            SUM(deal_vol * collateral_price) AS open_collateral
-          FROM public.trade_fill_fresh
-          WHERE taker_fee_mode = 2 AND taker_way IN (1, 3)
-            AND created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
-            AND pair_name = '{pair_name}'
-        ),
-        rebate_data AS (
-          SELECT
-            SUM(amount * coin_price) AS rebate_amount
-          FROM public.user_cashbooks
-          WHERE remark = '给邀请人返佣'
-            AND created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
-        )
-        SELECT
-          CASE
-            WHEN COALESCE(cd.open_collateral, 0) = 0 THEN 0
-            ELSE (COALESCE(pd.trading_pnl, 0) + 
-                  COALESCE(pd.taker_fee, 0) + 
-                  COALESCE(pd.funding_pnl, 0) + 
-                  COALESCE(pd.sl_fee, 0) - 
-                  COALESCE(rd.rebate_amount, 0)) / 
-                 cd.open_collateral
-          END AS house_edge,
-          COALESCE(pd.trading_pnl, 0) + 
-            COALESCE(pd.taker_fee, 0) + 
-            COALESCE(pd.funding_pnl, 0) + 
-            COALESCE(pd.sl_fee, 0) - 
-            COALESCE(rd.rebate_amount, 0) AS pnl,
-          COALESCE(cd.open_collateral, 0) AS open_collateral
-        FROM pnl_data pd
-        CROSS JOIN collateral_data cd
-        CROSS JOIN rebate_data rd
-        """
-        
-        df = pd.read_sql(edge_query, engine)
-        
-        if df.empty or pd.isna(df['house_edge'].iloc[0]):
-            # For testing - generate random edge values when no data
-            import random
-            return 0.001 + random.uniform(-0.0005, 0.0010)
-        
-        edge_value = float(df['house_edge'].iloc[0])
-        
-        # If the edge is exactly 0, set a small positive value
-        # This avoids issues with initial reference being zero
-        if edge_value == 0:
-            edge_value = 0.001
-            
-        # For testing - add variation for testing
-        import random
-        edge_value += random.uniform(-0.0005, 0.0010)
-        
-        return edge_value
-    
-    except Exception as e:
-        st.error(f"Error calculating edge for {pair_name}: {e}")
-        # Return a random edge value for testing
-        import random
-        return 0.001 + random.uniform(-0.0005, 0.0010)
+    # Generate random edge values for testing
+    import random
+    return 0.001 + random.uniform(-0.0005, 0.0010)
 
-# Function to calculate fee for a percentage price move based on the Profit Share Model
+# Calculate fee percentage for a price move based on the Profit Share Model
 def calculate_fee_for_move(move_pct, pnl_base_rate, position_multiplier, rate_multiplier=15000, 
                            rate_exponent=1, bet=1.0, leverage=1.0, debug=False):
     """
-    Calculate fee for a percentage price move using the Profit Share Model formula.
+    Calculate fee percentage for a price move using the Profit Share Model formula.
     """
     # For negative or zero price moves, no fee is charged
     if move_pct <= 0:
-        return 0, 0
+        return 0
     
     # Set initial price (fixed at 100000 as in spreadsheet)
     initial_price = 100000
@@ -409,11 +228,8 @@ def calculate_fee_for_move(move_pct, pnl_base_rate, position_multiplier, rate_mu
     # Calculate hypothetical PnL
     hypothetical_pnl = relative_change * initial_price
     
-    # Calculate fee amount
-    fee_amount = price_after_move - p_close
-    
-    # Calculate fee as percentage of profit
-    fee_percentage = (fee_amount / hypothetical_pnl) * 100 if hypothetical_pnl != 0 else 0
+    # Calculate fee percentage
+    fee_percentage = (price_after_move - p_close) / hypothetical_pnl * 100 if hypothetical_pnl != 0 else 0
     
     if debug:
         debug_info = {
@@ -435,13 +251,12 @@ def calculate_fee_for_move(move_pct, pnl_base_rate, position_multiplier, rate_mu
                 "term2": term2,
                 "p_close": p_close,
                 "hypothetical_pnl": hypothetical_pnl,
-                "fee_amount": fee_amount,
                 "fee_percentage": fee_percentage
             }
         }
-        return fee_amount, fee_percentage, debug_info
+        return fee_percentage, debug_info
     
-    return fee_amount, fee_percentage
+    return fee_percentage
 
 # Function to update buffer rate based on edge comparison
 def update_buffer_rate(current_buffer, edge, edge_ref, max_leverage, alpha_up=0.1, alpha_down=0.02):
@@ -547,7 +362,7 @@ def init_pair_state(pair_name):
             'edge_history': [],  # List of (timestamp, edge) tuples
             'buffer_history': [],  # List of (timestamp, buffer_rate) tuples
             'multiplier_history': [],  # List of (timestamp, position_multiplier) tuples
-            'fee_history': [],  # List of (timestamp, fee_for_01pct_move) tuples
+            'fee_history': [],  # List of (timestamp, fee_percentage) tuples
             'current_edge': None,
             'reference_edge': None,
             'proposed_buffer_rate': None,
@@ -556,7 +371,7 @@ def init_pair_state(pair_name):
             'reference_position_multiplier': None,
             'last_update_time': None,
             'params_changed': False,
-                       'current_fee_percentage': None
+            'current_fee_percentage': None
         }
 
 # Initialize session state variables
@@ -980,18 +795,30 @@ def create_fee_plot(pair_name):
     if len(st.session_state.pair_data[pair_name]['fee_history']) < 1:
         return None
     
-    # Extract data for plotting
-    fee_times = [t for t, _ in st.session_state.pair_data[pair_name]['fee_history']]
-    fees = [f for _, f in st.session_state.pair_data[pair_name]['fee_history']]
+    # Extract data for plotting, ensuring it's scalar values
+    fee_times = []
+    fees = []
+    
+    for t, f in st.session_state.pair_data[pair_name]['fee_history']:
+        fee_times.append(t)
+        
+        # Handle different possible types for f
+        if isinstance(f, (tuple, list)):
+            # If it's a tuple/list, take the percentage value
+            # This handles legacy data format
+            fees.append(f[1] if len(f) > 1 else f[0])
+        else:
+            # Otherwise assume it's already a scalar
+            fees.append(f)
     
     # Create figure and axis
     fig, ax = plt.subplots(figsize=(10, 5))
     
-    # Plot fee line
-    ax.plot(fee_times, fees, 'r-', marker='o', label='Fee % for 0.1% Move')
+    # Plot fee line - make sure the fees are converted to float
+    ax.plot(fee_times, [float(f) for f in fees], 'r-', marker='o', label='Fee for 0.1% Move (%)')
     
     # Set title and labels
-    ax.set_title(f'Fee % for 0.1% Price Move - {pair_name}')
+    ax.set_title(f'Fee Percentage for 0.1% Price Move - {pair_name}')
     ax.set_xlabel('Time')
     ax.set_ylabel('Fee Percentage (%)')
     
@@ -1006,7 +833,7 @@ def create_fee_plot(pair_name):
     
     return fig
 
-# Function to create fee percentage vs price move plot
+# Function to create fee curve plot
 def create_fee_curve_plot(pair_name):
     """Create a plot of fee percentage vs price move."""
     # Ensure pair state is initialized
@@ -1076,7 +903,6 @@ def create_fee_curve_plot(pair_name):
     return fig
 
 # Function to create PM vs fee sensitivity plot
-# Function to create PM vs fee sensitivity plot
 def create_pm_fee_sensitivity_plot(pair_name):
     """Create a plot showing how PM changes affect fees at different PM values"""
     # Sample a range of PM values on logarithmic scale
@@ -1114,8 +940,12 @@ def create_pm_fee_sensitivity_plot(pair_name):
         rate_multiplier,
         rate_exponent
     )
+    
+    # Ensure current_fee is a scalar value for plotting
+    if isinstance(current_fee, (tuple, list)):
+        current_fee = current_fee[0] if current_fee else 0
+    
     ax.scatter([current_pm], [current_fee], color='red', s=100, zorder=5, label='Current PM')
-
     
     # Add proposed PM if available
     if st.session_state.pair_data[pair_name]['proposed_position_multiplier'] is not None:
@@ -1128,6 +958,11 @@ def create_pm_fee_sensitivity_plot(pair_name):
             rate_multiplier,
             rate_exponent
         )
+        
+        # Ensure proposed_fee is a scalar value for plotting
+        if isinstance(proposed_fee, (tuple, list)):
+            proposed_fee = proposed_fee[0] if proposed_fee else 0
+            
         ax.scatter([proposed_pm], [proposed_fee], color='green', s=100, zorder=5, label='Proposed PM')
     
     # Set title and labels
@@ -1265,13 +1100,17 @@ def recommend_position_multiplier(pair_name, target_fee_pct=None):
     min_diff = float('inf')
     
     for pm in pm_values:
-        _, fee_pct = calculate_fee_for_move(
+        fee_pct = calculate_fee_for_move(
             0.1, 
             pnl_base_rate, 
             pm,
             rate_multiplier,
             rate_exponent
         )
+        
+        # Handle if fee_pct is a tuple/list (which it shouldn't be anymore, but just in case)
+        if isinstance(fee_pct, (tuple, list)):
+            fee_pct = fee_pct[1] if len(fee_pct) > 1 else fee_pct[0]
         
         # Find PM that gives fee closest to target
         diff = abs(fee_pct - target_fee_pct)
@@ -1309,7 +1148,7 @@ def initialize_pair(pair_name):
     st.session_state.pair_data[pair_name]['multiplier_history'] = [(timestamp, st.session_state.pair_data[pair_name]['position_multiplier'])]
     
     # Calculate and record initial fee for 0.1% move
-    fee_amount, fee_pct = calculate_and_record_fee(pair_name, timestamp)
+    fee_pct = calculate_and_record_fee(pair_name, timestamp)
     
     # Fetch initial reference edge based on selected lookback period
     initial_edge = calculate_edge(pair_name, st.session_state.lookback_minutes)
@@ -1397,7 +1236,14 @@ def render_pair_overview():
             # Format edge values and last update time
             edge_display = f"{current_edge:.4%}" if current_edge is not None else "N/A"
             ref_display = f"{reference_edge:.4%}" if reference_edge is not None else "N/A"
-            fee_display = f"{fee_percentage:.2f}%" if fee_percentage is not None else "N/A"
+            
+            # Handle fee_percentage being possibly a tuple for backward compatibility
+            if fee_percentage is not None:
+                if isinstance(fee_percentage, (tuple, list)):
+                    fee_percentage = fee_percentage[1] if len(fee_percentage) > 1 else fee_percentage[0]
+                fee_display = f"{fee_percentage:.2f}%"
+            else:
+                fee_display = "N/A"
             
             # Calculate edge delta
             if current_edge is not None and reference_edge is not None:
@@ -1524,16 +1370,15 @@ def render_pair_detail(pair_name):
         st.markdown(f"**Position Multiplier:** {st.session_state.pair_data[pair_name]['position_multiplier']:.1f}")
     
     # Show current fee for 0.1% move
-    # Show current fee for 0.1% move
     with col5:
-      current_fee = st.session_state.pair_data[pair_name].get('current_fee_percentage')
-      if current_fee is not None:
-        # Handle if it's accidentally still a tuple
-        if isinstance(current_fee, (tuple, list)):
-            current_fee = current_fee[0] if current_fee else 0
-        st.markdown(f"**Fee for 0.1% Move:** {current_fee:.2f}%")
-      else:
-        st.markdown("**Fee for 0.1% Move:** N/A")
+        current_fee = st.session_state.pair_data[pair_name].get('current_fee_percentage')
+        if current_fee is not None:
+            # Handle if it's still a tuple for backward compatibility
+            if isinstance(current_fee, (tuple, list)):
+                current_fee = current_fee[1] if len(current_fee) > 1 else current_fee[0]
+            st.markdown(f"**Fee for 0.1% Move:** {current_fee:.2f}%")
+        else:
+            st.markdown("**Fee for 0.1% Move:** N/A")
     
     # Create tabbed view for detailed analytics
     detail_tabs = st.tabs(["Edge History", "Parameter History", "Fee Analysis", "PM Sensitivity"])
@@ -1607,9 +1452,19 @@ def render_pair_detail(pair_name):
             
             with history_tabs[2]:
                 if len(st.session_state.pair_data[pair_name]['fee_history']) > 0:
+                    # Extract the data, handling potential tuples
+                    timestamps = []
+                    fees = []
+                    for t, f in st.session_state.pair_data[pair_name]['fee_history']:
+                        timestamps.append(t)
+                        if isinstance(f, (tuple, list)):
+                            fees.append(f"{f[1] if len(f) > 1 else f[0]:.2f}")
+                        else:
+                            fees.append(f"{f:.2f}")
+                            
                     fee_df = pd.DataFrame({
-                        'Timestamp': [t for t, _ in st.session_state.pair_data[pair_name]['fee_history']],
-                        'Fee for 0.1% Move': [f"{f:.8f}" for _, f in st.session_state.pair_data[pair_name]['fee_history']]
+                        'Timestamp': timestamps,
+                        'Fee Percentage': fees
                     })
                     st.dataframe(fee_df, hide_index=True, use_container_width=True)
                 else:
@@ -1637,11 +1492,14 @@ def render_pair_detail(pair_name):
         st.markdown("""
         The fee is calculated using the following equation:
         
-        $Fee = -1 \\times \\frac{1 + Rate\\_Multiplier \\cdot |\\frac{P_t}{P_T} - 1|^{Rate\\_Exponent}}{1 + 10^6 \\cdot Position\\_Multiplier \\cdot |\\frac{P_t}{P_T} - 1|^{Rate\\_Exponent}} \\times \\frac{Bet \\times Leverage}{1 - Buffer\\_Rate} \\times (P_T - P_t)$
+        $Fee = P_T - P_c$
         
         Where:
+        $P_c = P_T + (1 - pnl\\_base\\_rate) \\cdot \\frac{P_t - P_T}{(1 + \\frac{1}{|\\frac{P_t}{P_T} - 1| \\cdot rate\\_multiplier})^{rate\\_exponent} + \\frac{bet \\cdot leverage}{1000000 \\cdot |\\frac{P_t}{P_T} - 1| \\cdot position\\_multiplier}}$
+        
         - $P_T$ is the initial price
         - $P_t$ is the price after the move
+        - $P_c$ is the closing price used for fee calculation
         - $Buffer\\_Rate$ is the buffer rate parameter
         - $Position\\_Multiplier$ is the position multiplier parameter
         - $Rate\\_Multiplier$ and $Rate\\_Exponent$ are additional parameters affecting the fee curve
@@ -1740,8 +1598,12 @@ def render_pair_monitor(pair_name):
     
     # Show current fee for 0.1% move
     with col5:
-        if st.session_state.pair_data[pair_name].get('current_fee_percentage') is not None:
-            st.markdown(f"**Fee for 0.1% Move:** {st.session_state.pair_data[pair_name]['current_fee_percentage']:.2f}%")
+        current_fee = st.session_state.pair_data[pair_name].get('current_fee_percentage')
+        if current_fee is not None:
+            # Handle if it's still a tuple for backward compatibility
+            if isinstance(current_fee, (tuple, list)):
+                current_fee = current_fee[1] if len(current_fee) > 1 else current_fee[0]
+            st.markdown(f"**Fee for 0.1% Move:** {current_fee:.2f}%")
         else:
             st.markdown("**Fee for 0.1% Move:** N/A")
     
@@ -1805,7 +1667,11 @@ def render_pair_monitor(pair_name):
                 rate_exponent
             )
             
-            new_fee_amount, new_fee_pct = calculate_fee_for_move(
+            # Handle if current_fee_pct is still a tuple for backward compatibility
+            if isinstance(current_fee_pct, (tuple, list)):
+                current_fee_pct = current_fee_pct[1] if len(current_fee_pct) > 1 else current_fee_pct[0]
+                
+            new_fee_pct = calculate_fee_for_move(
                 0.1, 
                 st.session_state.pair_data[pair_name]['pnl_base_rate'], 
                 st.session_state.pair_data[pair_name]['proposed_position_multiplier'],
@@ -1813,6 +1679,9 @@ def render_pair_monitor(pair_name):
                 rate_exponent
             )
             
+            # Handle if new_fee_pct is still a tuple for backward compatibility
+            if isinstance(new_fee_pct, (tuple, list)):
+                new_fee_pct = new_fee_pct[1] if len(new_fee_pct) > 1 else new_fee_pct[0]
             
             delta_fee_pct = new_fee_pct - current_fee_pct
             
@@ -1991,6 +1860,7 @@ def main():
     
     # Lookback period selection
     st.sidebar.markdown("#### Lookback Period")
+    st.sidebar.markdown("When you press 'Fetch New Data', the edge will be calculated based on data from this time period:")
     lookback_options = {"1 minute": 1, "5 minutes": 5, "10 minutes": 10}
     selected_interval = st.sidebar.radio(
         "Select edge calculation period:",
