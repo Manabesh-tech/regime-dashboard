@@ -1,14 +1,27 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
+from sqlalchemy.engine import Engine
 from datetime import datetime, timedelta
 import pytz
+import time
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Page configuration
 st.set_page_config(page_title="Edge & Volatility Matrix", layout="wide")
 st.title("Edge & Volatility Matrix (10min)")
 st.subheader("All Trading Pairs - Last 24 Hours (Singapore Time)")
+
+# Set SQL query timeout
+@event.listens_for(Engine, "before_cursor_execute")
+def before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+    conn.connection.set_isolation_level(0)
+    cursor.execute("SET statement_timeout = 60000;")  # 60 seconds timeout
 
 # DB connection
 try:
@@ -30,10 +43,10 @@ start_time_sg = now_sg - timedelta(days=1)
 
 st.write(f"Current Singapore Time: {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
 
-# Fetch pairs
+# Fetch pairs with activity filter
 @st.cache_data(ttl=600)
 def fetch_pairs():
-    # Use a more specific query to only fetch active pairs
+    # More efficient query with activity filter
     query = """
     SELECT DISTINCT pair_name 
     FROM public.trade_fill_fresh 
@@ -42,16 +55,17 @@ def fetch_pairs():
     """
     
     try:
-        df = pd.read_sql(query, engine)
-        if df.empty:
-            return []
-        return df['pair_name'].tolist()
+        with engine.connect().execution_options(timeout=30) as conn:
+            df = pd.read_sql(query, conn)
+            if df.empty:
+                return []
+            return df['pair_name'].tolist()
     except Exception as e:
-        st.error(f"Error fetching pairs: {e}")
+        logger.error(f"Error fetching pairs: {e}")
         return ["BTC/USDT", "ETH/USDT", "SOL/USDT", "DOGE/USDT", "PEPE/USDT"]
 
-# Generate time slots
-@st.cache_data(ttl=600)
+# Generate time slots once
+@st.cache_data(ttl=3600)
 def generate_time_slots(now_time, start_time):
     result_slots = []
     result_labels = []
@@ -79,7 +93,7 @@ time_slots, time_labels, date_labels = generate_time_slots(now_sg, start_time_sg
 
 # UI controls
 pairs = fetch_pairs()
-col1, col2, col3 = st.columns([3, 1, 1])
+col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
 
 with col1:
     search_term = st.text_input("Search pairs", "")
@@ -89,436 +103,433 @@ with col1:
             st.warning(f"No pairs found matching '{search_term}'")
             selected_pairs = pairs[:5] if len(pairs) >= 5 else pairs
     else:
-        selected_pairs = pairs
+        # Default to just showing 5 pairs to avoid performance issues
+        selected_pairs = pairs[:5] if len(pairs) >= 5 else pairs
 
 with col2:
     select_all = st.checkbox("Select All Pairs", value=False)
     if select_all:
-        selected_pairs = pairs
+        # Add a max limit to avoid overloading
+        max_pairs = 20
+        if len(pairs) > max_pairs:
+            st.warning(f"Limited to top {max_pairs} pairs for performance")
+            selected_pairs = pairs[:max_pairs]
+        else:
+            selected_pairs = pairs
 
 with col3:
+    # Add option to limit number of pairs
+    max_selected = st.number_input("Max Pairs", min_value=1, max_value=50, value=10)
+    if len(selected_pairs) > max_selected:
+        selected_pairs = selected_pairs[:max_selected]
+        st.info(f"Showing top {max_selected} pairs")
+
+with col4:
     if st.button("Refresh Data"):
         st.cache_data.clear()
         st.experimental_rerun()
 
-# Function to fetch data and calculate edge and volatility
+# Function to batch fetch edge and volatility data
 @st.cache_data(ttl=600)
-def calculate_edge_volatility(pair_name):
+def batch_fetch_edge_volatility(selected_pairs, start_time_sg, now_sg, batch_size=5):
     # Convert to UTC for database query
     start_time_utc = start_time_sg.astimezone(pytz.utc)
     end_time_utc = now_sg.astimezone(pytz.utc)
     
-    # Query for correct house edge calculation based on the provided SQL
-    edge_query = f"""
-    WITH time_intervals AS (
-      SELECT 
-        generate_series(
-          date_trunc('hour', '{start_time_utc}'::timestamp) + 
-          INTERVAL '10 min' * floor(EXTRACT(MINUTE FROM '{start_time_utc}'::timestamp) / 10),
-          '{end_time_utc}'::timestamp,
-          INTERVAL '10 minutes'
-        ) AS interval_start
-    ),
-    pair_names AS (
-      SELECT '{pair_name}' AS pair_name
-    ),
-    time_pairs AS (
-      SELECT 
-        t.interval_start,
-        p.pair_name
-      FROM time_intervals t
-      CROSS JOIN pair_names p
-    ),
-    pnl_data AS (
-      SELECT
-        date_trunc('hour', created_at + INTERVAL '8 hour') + 
-          INTERVAL '10 min' * floor(extract(minute from created_at + INTERVAL '8 hour') / 10) AS interval_start,
-        pair_name,
-        SUM(-1 * taker_pnl * collateral_price) AS trading_pnl,
-        SUM(CASE WHEN taker_fee_mode = 1 AND taker_way IN (1, 3) THEN taker_fee * collateral_price ELSE 0 END) AS taker_fee,
-        SUM(CASE WHEN taker_way = 0 THEN -1 * funding_fee * collateral_price ELSE 0 END) AS funding_pnl,
-        SUM(taker_sl_fee * collateral_price + maker_sl_fee) AS sl_fee
-      FROM public.trade_fill_fresh
-      WHERE created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
-        AND pair_name = '{pair_name}'
-      GROUP BY 1, 2
-    ),
-    collateral_data AS (
-      SELECT
-        date_trunc('hour', created_at + INTERVAL '8 hour') + 
-          INTERVAL '10 min' * floor(extract(minute from created_at + INTERVAL '8 hour') / 10) AS interval_start,
-        pair_name,
-        SUM(deal_vol * collateral_price) AS open_collateral
-      FROM public.trade_fill_fresh
-      WHERE taker_fee_mode = 2 AND taker_way IN (1, 3)
-        AND created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
-        AND pair_name = '{pair_name}'
-      GROUP BY 1, 2
-    ),
-    rebate_data AS (
-      SELECT
-        date_trunc('hour', created_at + INTERVAL '8 hour') + 
-          INTERVAL '10 min' * floor(extract(minute from created_at + INTERVAL '8 hour') / 10) AS interval_start,
-        SUM(amount * coin_price) AS rebate_amount
-      FROM public.user_cashbooks
-      WHERE remark = '给邀请人返佣'
-        AND created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
-      GROUP BY 1
-    )
-    SELECT
-      tp.interval_start AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore' AS timestamp_sg,
-      tp.pair_name,
-      CASE
-        WHEN COALESCE(cd.open_collateral, 0) = 0 THEN 0
-        ELSE (COALESCE(pd.trading_pnl, 0) + 
-              COALESCE(pd.taker_fee, 0) + 
-              COALESCE(pd.funding_pnl, 0) + 
-              COALESCE(pd.sl_fee, 0) - 
-              COALESCE(rd.rebate_amount, 0)) / 
-             cd.open_collateral
-      END AS house_edge,
-      COALESCE(pd.trading_pnl, 0) + 
-        COALESCE(pd.taker_fee, 0) + 
-        COALESCE(pd.funding_pnl, 0) + 
-        COALESCE(pd.sl_fee, 0) - 
-        COALESCE(rd.rebate_amount, 0) AS pnl,
-      COALESCE(cd.open_collateral, 0) AS open_collateral
-    FROM time_pairs tp
-    LEFT JOIN pnl_data pd ON tp.interval_start = pd.interval_start AND tp.pair_name = pd.pair_name
-    LEFT JOIN collateral_data cd ON tp.interval_start = cd.interval_start AND tp.pair_name = cd.pair_name
-    LEFT JOIN rebate_data rd ON tp.interval_start = rd.interval_start
-    ORDER BY timestamp_sg DESC
-    """
+    all_results = {}
     
-    # Simple query to get all price data with 2-minute intervals for volatility calculation
-    # This will allow us to get 5 price points for each 10-minute window
-    volatility_query = f"""
-    WITH all_time_intervals AS (
-      -- Generate all 2-minute intervals for the past 24 hours
-      SELECT 
-        generate_series(
-          date_trunc('hour', '{start_time_utc}'::timestamp) + 
-          INTERVAL '2 min' * floor(EXTRACT(MINUTE FROM '{start_time_utc}'::timestamp) / 2),
-          '{end_time_utc}'::timestamp,
-          INTERVAL '2 minutes'
-        ) AS interval_start,
+    # Process in smaller batches
+    for i in range(0, len(selected_pairs), batch_size):
+        batch_pairs = selected_pairs[i:i+batch_size]
+        pairs_str = "', '".join(batch_pairs)
         
-        -- Group these 2-minute intervals into their parent 10-minute intervals
-        date_trunc('hour', generate_series(
-          date_trunc('hour', '{start_time_utc}'::timestamp) + 
-          INTERVAL '2 min' * floor(EXTRACT(MINUTE FROM '{start_time_utc}'::timestamp) / 2),
-          '{end_time_utc}'::timestamp,
-          INTERVAL '2 minutes'
-        )) + 
-        INTERVAL '10 min' * floor(EXTRACT(MINUTE FROM generate_series(
-          date_trunc('hour', '{start_time_utc}'::timestamp) + 
-          INTERVAL '2 min' * floor(EXTRACT(MINUTE FROM '{start_time_utc}'::timestamp) / 2),
-          '{end_time_utc}'::timestamp,
-          INTERVAL '2 minutes'
-        )) / 10) AS parent_interval
-    ),
-    
-    -- Get the last price (closing price) for each 2-minute interval
-    interval_prices AS (
-      SELECT
-        ati.interval_start,
-        ati.parent_interval,
-        (
-          SELECT deal_price 
-          FROM public.trade_fill_fresh 
-          WHERE created_at < ati.interval_start + INTERVAL '2 minutes'
-            AND created_at >= ati.interval_start
-            AND pair_name = '{pair_name}'
-          ORDER BY created_at DESC
-          LIMIT 1
-        ) AS closing_price
-      FROM all_time_intervals ati
-    )
-    
-    -- Get all prices at 2-minute intervals, grouped by 10-minute parent intervals
-    SELECT
-      parent_interval AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore' AS timestamp_sg,
-      array_agg(closing_price ORDER BY interval_start) FILTER (WHERE closing_price IS NOT NULL) AS price_array,
-      count(closing_price) FILTER (WHERE closing_price IS NOT NULL) AS price_count
-    FROM
-      interval_prices
-    GROUP BY
-      parent_interval
-    ORDER BY
-      parent_interval DESC
-    """
-    
-    try:
-        # Get edge data
-        edge_df = pd.read_sql(edge_query, engine)
+        # Edge query modified to handle multiple pairs
+        edge_query = f"""
+        WITH time_intervals AS (
+          SELECT 
+            generate_series(
+              date_trunc('hour', '{start_time_utc}'::timestamp) + 
+              INTERVAL '10 min' * floor(EXTRACT(MINUTE FROM '{start_time_utc}'::timestamp) / 10),
+              '{end_time_utc}'::timestamp,
+              INTERVAL '10 minutes'
+            ) AS interval_start
+        ),
+        pair_names AS (
+          SELECT unnest(ARRAY['{pairs_str}']) AS pair_name
+        ),
+        time_pairs AS (
+          SELECT 
+            t.interval_start,
+            p.pair_name
+          FROM time_intervals t
+          CROSS JOIN pair_names p
+        ),
+        pnl_data AS (
+          SELECT
+            date_trunc('hour', created_at + INTERVAL '8 hour') + 
+              INTERVAL '10 min' * floor(extract(minute from created_at + INTERVAL '8 hour') / 10) AS interval_start,
+            pair_name,
+            SUM(-1 * taker_pnl * collateral_price) AS trading_pnl,
+            SUM(CASE WHEN taker_fee_mode = 1 AND taker_way IN (1, 3) THEN taker_fee * collateral_price ELSE 0 END) AS taker_fee,
+            SUM(CASE WHEN taker_way = 0 THEN -1 * funding_fee * collateral_price ELSE 0 END) AS funding_pnl,
+            SUM(taker_sl_fee * collateral_price + maker_sl_fee) AS sl_fee
+          FROM public.trade_fill_fresh
+          WHERE created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
+            AND pair_name IN ('{pairs_str}')
+          GROUP BY 1, 2
+        ),
+        collateral_data AS (
+          SELECT
+            date_trunc('hour', created_at + INTERVAL '8 hour') + 
+              INTERVAL '10 min' * floor(extract(minute from created_at + INTERVAL '8 hour') / 10) AS interval_start,
+            pair_name,
+            SUM(deal_vol * collateral_price) AS open_collateral
+          FROM public.trade_fill_fresh
+          WHERE taker_fee_mode = 2 AND taker_way IN (1, 3)
+            AND created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
+            AND pair_name IN ('{pairs_str}')
+          GROUP BY 1, 2
+        ),
+        rebate_data AS (
+          SELECT
+            date_trunc('hour', created_at + INTERVAL '8 hour') + 
+              INTERVAL '10 min' * floor(extract(minute from created_at + INTERVAL '8 hour') / 10) AS interval_start,
+            SUM(amount * coin_price) AS rebate_amount
+          FROM public.user_cashbooks
+          WHERE remark = '给邀请人返佣'
+            AND created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
+          GROUP BY 1
+        )
+        SELECT
+          tp.interval_start AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore' AS timestamp_sg,
+          tp.pair_name,
+          CASE
+            WHEN COALESCE(cd.open_collateral, 0) = 0 THEN 0
+            ELSE (COALESCE(pd.trading_pnl, 0) + 
+                  COALESCE(pd.taker_fee, 0) + 
+                  COALESCE(pd.funding_pnl, 0) + 
+                  COALESCE(pd.sl_fee, 0) - 
+                  COALESCE(rd.rebate_amount, 0)) / 
+                 cd.open_collateral
+          END AS house_edge,
+          COALESCE(pd.trading_pnl, 0) + 
+            COALESCE(pd.taker_fee, 0) + 
+            COALESCE(pd.funding_pnl, 0) + 
+            COALESCE(pd.sl_fee, 0) - 
+            COALESCE(rd.rebate_amount, 0) AS pnl,
+          COALESCE(cd.open_collateral, 0) AS open_collateral
+        FROM time_pairs tp
+        LEFT JOIN pnl_data pd ON tp.interval_start = pd.interval_start AND tp.pair_name = pd.pair_name
+        LEFT JOIN collateral_data cd ON tp.interval_start = cd.interval_start AND tp.pair_name = cd.pair_name
+        LEFT JOIN rebate_data rd ON tp.interval_start = rd.interval_start
+        ORDER BY tp.pair_name, timestamp_sg DESC
+        """
         
-        # Format timestamps and create time_label for edge data
-        edge_df['timestamp_sg'] = pd.to_datetime(edge_df['timestamp_sg'])
-        edge_df['time_label'] = edge_df['timestamp_sg'].dt.strftime('%H:%M')
-        
-        # Rename house_edge to edge for consistency
-        edge_df.rename(columns={'house_edge': 'edge'}, inplace=True)
-        
-        # Get volatility data (price arrays at 2-minute intervals)
-        vol_df = pd.read_sql(volatility_query, engine)
-        
-        # Format timestamps
-        vol_df['timestamp_sg'] = pd.to_datetime(vol_df['timestamp_sg'])
-        vol_df['time_label'] = vol_df['timestamp_sg'].dt.strftime('%H:%M')
-        
-        # Calculate volatility for each 10-minute window - FIXED for decimal.Decimal issue
-        def calculate_sub_period_volatility(row):
-            # Convert PostgreSQL array to Python list
-            if row['price_array'] is None:
-                return None
-                
-            # Parse the array
-            if isinstance(row['price_array'], str):
-                # Strip curly braces and split
-                prices_str = row['price_array'].strip('{}').split(',')
-                
-                # Explicitly convert all prices to float
-                prices = []
-                for p in prices_str:
-                    if p and p != 'NULL' and p != 'None':
-                        try:
-                            # Force conversion to float to handle decimal.Decimal
-                            prices.append(float(p))
-                        except (ValueError, TypeError):
-                            pass  # Skip any values that can't be converted
-            else:
-                # Handle list/array directly - still need to ensure all values are float
-                prices = []
-                for p in row['price_array']:
-                    if p is not None:
-                        try:
-                            prices.append(float(p))
-                        except (ValueError, TypeError):
-                            pass
+        # Improved volatility query for multiple pairs
+        volatility_query = f"""
+        WITH all_time_intervals AS (
+          -- Generate all 2-minute intervals for the past 24 hours for each pair
+          SELECT 
+            generate_series(
+              date_trunc('hour', '{start_time_utc}'::timestamp) + 
+              INTERVAL '2 min' * floor(EXTRACT(MINUTE FROM '{start_time_utc}'::timestamp) / 2),
+              '{end_time_utc}'::timestamp,
+              INTERVAL '2 minutes'
+            ) AS interval_start,
             
-            # Need at least 2 prices to calculate volatility
-            if len(prices) < 2:
-                return None
-                
-            # Calculate log returns
-            try:
-                # Ensure we're working with numpy array of floats
-                prices_array = np.array(prices, dtype=float)
-                log_returns = np.diff(np.log(prices_array))
-                
-                # Standard deviation of returns
-                std_dev = np.std(log_returns)
-                
-                # Annualize: assuming 5 2-minute periods per 10 minutes
-                # 5 periods/10 min * 6 10-min periods/hour * 24 hours/day * 365 days/year
-                annualized_vol = std_dev * np.sqrt(5 * 6 * 24 * 365)
-                
-                return annualized_vol
-            except Exception as e:
-                print(f"Error in volatility calculation for {pair_name}: {e}")
-                print(f"Sample prices: {prices[:5]}...")
-                return None
+            -- Group these 2-minute intervals into their parent 10-minute intervals
+            date_trunc('hour', generate_series(
+              date_trunc('hour', '{start_time_utc}'::timestamp) + 
+              INTERVAL '2 min' * floor(EXTRACT(MINUTE FROM '{start_time_utc}'::timestamp) / 2),
+              '{end_time_utc}'::timestamp,
+              INTERVAL '2 minutes'
+            )) + 
+            INTERVAL '10 min' * floor(EXTRACT(MINUTE FROM generate_series(
+              date_trunc('hour', '{start_time_utc}'::timestamp) + 
+              INTERVAL '2 min' * floor(EXTRACT(MINUTE FROM '{start_time_utc}'::timestamp) / 2),
+              '{end_time_utc}'::timestamp,
+              INTERVAL '2 minutes'
+            )) / 10) AS parent_interval,
+            
+            -- Add pair to the matrix
+            unnest(ARRAY['{pairs_str}']) AS pair_name
+        ),
         
-        # Apply volatility calculation
-        vol_df['volatility'] = vol_df.apply(calculate_sub_period_volatility, axis=1)
+        -- Get all trades for the requested pairs in the time range
+        pair_trades AS (
+          SELECT 
+            created_at,
+            pair_name,
+            deal_price
+          FROM 
+            public.trade_fill_fresh
+          WHERE 
+            created_at BETWEEN '{start_time_utc}' AND '{end_time_utc}'
+            AND pair_name IN ('{pairs_str}')
+        ),
         
-        # Merge edge and volatility data
-        result_df = pd.merge(
-            edge_df,
-            vol_df[['time_label', 'volatility']],
-            on='time_label',
-            how='left'
+        -- Join trades to time intervals
+        interval_prices AS (
+          SELECT
+            ati.interval_start,
+            ati.parent_interval,
+            ati.pair_name,
+            (
+              SELECT t.deal_price 
+              FROM pair_trades t
+              WHERE t.created_at < ati.interval_start + INTERVAL '2 minutes'
+                AND t.created_at >= ati.interval_start
+                AND t.pair_name = ati.pair_name
+              ORDER BY t.created_at DESC
+              LIMIT 1
+            ) AS closing_price
+          FROM all_time_intervals ati
         )
         
-        return result_df
+        -- Get all prices at 2-minute intervals, grouped by 10-minute parent intervals and pair
+        SELECT
+          parent_interval AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore' AS timestamp_sg,
+          pair_name,
+          array_agg(closing_price ORDER BY interval_start) FILTER (WHERE closing_price IS NOT NULL) AS price_array,
+          count(closing_price) FILTER (WHERE closing_price IS NOT NULL) AS price_count
+        FROM
+          interval_prices
+        GROUP BY
+          parent_interval, pair_name
+        ORDER BY
+          pair_name, parent_interval DESC
+        """
+        
+        try:
+            # Execute the edge query with timeout
+            with engine.connect().execution_options(timeout=60) as conn:
+                edge_df = pd.read_sql(edge_query, conn)
+                
+                # Format timestamps and create time_label for edge data
+                edge_df['timestamp_sg'] = pd.to_datetime(edge_df['timestamp_sg'])
+                edge_df['time_label'] = edge_df['timestamp_sg'].dt.strftime('%H:%M')
+                
+                # Rename house_edge to edge for consistency
+                edge_df.rename(columns={'house_edge': 'edge'}, inplace=True)
+            
+            # Execute the volatility query with timeout
+            with engine.connect().execution_options(timeout=60) as conn:
+                vol_df = pd.read_sql(volatility_query, conn)
+                
+                # Format timestamps
+                vol_df['timestamp_sg'] = pd.to_datetime(vol_df['timestamp_sg'])
+                vol_df['time_label'] = vol_df['timestamp_sg'].dt.strftime('%H:%M')
+            
+            # Process each pair in the batch
+            for pair in batch_pairs:
+                # Filter data for this specific pair
+                pair_edge_df = edge_df[edge_df['pair_name'] == pair].copy()
+                pair_vol_df = vol_df[vol_df['pair_name'] == pair].copy()
+                
+                # Calculate volatility with improved method
+                volatility_results = []
+                
+                for _, row in pair_vol_df.iterrows():
+                    try:
+                        price_array = row['price_array']
+                        price_count = row['price_count']
+                        timestamp = row['timestamp_sg']
+                        time_label = row['time_label']
+                        
+                        # Convert PostgreSQL array to Python list
+                        if price_array is None or price_count < 3:
+                            volatility = None
+                        else:
+                            # Parse the array
+                            if isinstance(price_array, str):
+                                # Strip curly braces and split
+                                prices_str = price_array.strip('{}').split(',')
+                                
+                                # Explicitly convert all prices to float
+                                prices = []
+                                for p in prices_str:
+                                    if p and p != 'NULL' and p != 'None':
+                                        try:
+                                            prices.append(float(p))
+                                        except (ValueError, TypeError):
+                                            pass
+                            else:
+                                # Handle list/array directly
+                                prices = []
+                                for p in price_array:
+                                    if p is not None:
+                                        try:
+                                            prices.append(float(p))
+                                        except (ValueError, TypeError):
+                                            pass
+                            
+                            # Calculate returns (not log returns) between consecutive prices
+                            if len(prices) >= 3:  # Need at least 3 price points
+                                prices_array = np.array(prices, dtype=float)
+                                returns = np.diff(prices_array) / prices_array[:-1]
+                                
+                                # Standard deviation of returns
+                                std_dev = np.std(returns)
+                                
+                                # Annualize based on actual number of intervals
+                                actual_intervals = len(returns)
+                                # Scale to annual vol (assuming 5 intervals per 10min window, 6 per hour, 24 hours, 365 days)
+                                intervals_per_year = (5 * 6 * 24 * 365) / actual_intervals
+                                annualized_vol = std_dev * np.sqrt(intervals_per_year)
+                                
+                                volatility = annualized_vol
+                            else:
+                                volatility = None
+                        
+                        # Add to results
+                        volatility_results.append({
+                            'timestamp_sg': timestamp,
+                            'time_label': time_label,
+                            'volatility': volatility
+                        })
+                        
+                    except Exception as e:
+                        logger.error(f"Error in volatility calculation for {pair}: {e}")
+                        volatility_results.append({
+                            'timestamp_sg': row['timestamp_sg'],
+                            'time_label': row['time_label'],
+                            'volatility': None
+                        })
+                
+                # Convert volatility results to dataframe
+                vol_results_df = pd.DataFrame(volatility_results)
+                
+                # Merge edge and volatility data
+                if not pair_edge_df.empty and not vol_results_df.empty:
+                    result_df = pd.merge(
+                        pair_edge_df,
+                        vol_results_df[['time_label', 'volatility']],
+                        on='time_label',
+                        how='left'
+                    )
+                else:
+                    # Use edge data if available, otherwise create empty dataframe
+                    if not pair_edge_df.empty:
+                        result_df = pair_edge_df.copy()
+                        result_df['volatility'] = None
+                    else:
+                        # Create empty dataframe with required columns
+                        result_df = pd.DataFrame(columns=[
+                            'timestamp_sg', 'pair_name', 'edge', 'pnl', 
+                            'open_collateral', 'time_label', 'volatility'
+                        ])
+                
+                # Store results for this pair
+                all_results[pair] = result_df
+        
+        except Exception as e:
+            logger.error(f"Error processing batch {batch_pairs}: {e}")
+            # Create empty dataframes for pairs that failed
+            for pair in batch_pairs:
+                if pair not in all_results:
+                    all_results[pair] = pd.DataFrame(columns=[
+                        'timestamp_sg', 'pair_name', 'edge', 'pnl', 
+                        'open_collateral', 'time_label', 'volatility'
+                    ])
     
-    except Exception as e:
-        st.error(f"Error processing {pair_name}: {e}")
-        print(f"Detailed error for {pair_name}: {str(e)}")
-        return None
+    return all_results
 
-# NEW FUNCTION: Fetch market spread data for pairs
+# Batch fetch market spread data
 @st.cache_data(ttl=600)
-def fetch_market_spread_data(pair_name):
+def batch_fetch_market_spread_data(selected_pairs, start_time_sg, now_sg, batch_size=5):
     # Convert to UTC for database query
     start_time_utc = start_time_sg.astimezone(pytz.utc)
     end_time_utc = now_sg.astimezone(pytz.utc)
     
-    query = f"""
-    WITH time_intervals AS (
-      SELECT
-        generate_series(
-          date_trunc('hour', '{start_time_utc}'::timestamp) + 
-          INTERVAL '10 min' * floor(EXTRACT(MINUTE FROM '{start_time_utc}'::timestamp) / 10),
-          '{end_time_utc}'::timestamp,
-          INTERVAL '10 minutes'
-        ) AS slot
-    ),
+    all_results = {}
     
-    sg_time_slots AS (
-      SELECT 
-        slot,
-        (slot AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') AS slot_sg
-      FROM time_intervals
-    ),
-    
-    spread_data AS (
-      SELECT 
-        date_trunc('hour', time_group + INTERVAL '8 hour') + 
-        INTERVAL '10 min' * FLOOR(EXTRACT(MINUTE FROM time_group + INTERVAL '8 hour')::INT / 10) AS time_slot_sg,
-        AVG(fee1) as avg_spread
-      FROM 
-        oracle_exchange_fee
-      WHERE 
-        time_group > NOW() - INTERVAL '1 day'
-        AND pair_name = '{pair_name}'
-        AND source IN ('binanceFuture', 'gateFuture', 'hyperliquidFuture')
-      GROUP BY 
-        time_slot_sg
-    )
-    
-    SELECT
-      ts.slot_sg AS timestamp_sg,
-      COALESCE(s.avg_spread, NULL) AS avg_spread
-    FROM
-      sg_time_slots ts
-    LEFT JOIN
-      spread_data s ON ts.slot_sg = s.time_slot_sg
-    ORDER BY
-      ts.slot DESC  -- Order by time descending (newest first)
-    """
-    
-    try:
-        df = pd.read_sql(query, engine)
+    # Process in smaller batches
+    for i in range(0, len(selected_pairs), batch_size):
+        batch_pairs = selected_pairs[i:i+batch_size]
+        pairs_str = "', '".join(batch_pairs)
         
-        # Format timestamp and create time_label
-        df['timestamp_sg'] = pd.to_datetime(df['timestamp_sg'])
-        df['time_label'] = df['timestamp_sg'].dt.strftime('%H:%M')
+        query = f"""
+        WITH time_intervals AS (
+          SELECT
+            generate_series(
+              date_trunc('hour', '{start_time_utc}'::timestamp) + 
+              INTERVAL '10 min' * floor(EXTRACT(MINUTE FROM '{start_time_utc}'::timestamp) / 10),
+              '{end_time_utc}'::timestamp,
+              INTERVAL '10 minutes'
+            ) AS slot
+        ),
         
-        return df
+        sg_time_slots AS (
+          SELECT 
+            slot,
+            (slot AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') AS slot_sg
+          FROM time_intervals
+        ),
+        
+        pair_matrix AS (
+          SELECT 
+            ts.slot_sg,
+            p.pair_name
+          FROM sg_time_slots ts
+          CROSS JOIN (SELECT unnest(ARRAY['{pairs_str}']) AS pair_name) p
+        ),
+        
+        spread_data AS (
+          SELECT 
+            date_trunc('hour', time_group + INTERVAL '8 hour') + 
+            INTERVAL '10 min' * FLOOR(EXTRACT(MINUTE FROM time_group + INTERVAL '8 hour')::INT / 10) AS time_slot_sg,
+            pair_name,
+            AVG(fee1) as avg_spread
+          FROM 
+            oracle_exchange_fee
+          WHERE 
+            time_group > NOW() - INTERVAL '1 day'
+            AND pair_name IN ('{pairs_str}')
+            AND source IN ('binanceFuture', 'gateFuture', 'hyperliquidFuture')
+          GROUP BY 
+            time_slot_sg, pair_name
+        )
+        
+        SELECT
+          pm.slot_sg AS timestamp_sg,
+          pm.pair_name,
+          COALESCE(s.avg_spread, NULL) AS avg_spread
+        FROM
+          pair_matrix pm
+        LEFT JOIN
+          spread_data s ON pm.slot_sg = s.time_slot_sg AND pm.pair_name = s.pair_name
+        ORDER BY
+          pm.pair_name, pm.slot_sg DESC
+        """
+        
+        try:
+            # Execute the query with timeout
+            with engine.connect().execution_options(timeout=60) as conn:
+                df = pd.read_sql(query, conn)
+                
+                # Format timestamp and create time_label
+                df['timestamp_sg'] = pd.to_datetime(df['timestamp_sg'])
+                df['time_label'] = df['timestamp_sg'].dt.strftime('%H:%M')
+                
+                # Split results by pair
+                for pair in batch_pairs:
+                    pair_df = df[df['pair_name'] == pair].copy()
+                    all_results[pair] = pair_df
+                    
+        except Exception as e:
+            logger.error(f"Error fetching spreads for batch {batch_pairs}: {e}")
+            # Create empty dataframes for pairs that failed
+            for pair in batch_pairs:
+                if pair not in all_results:
+                    all_results[pair] = pd.DataFrame(columns=[
+                        'timestamp_sg', 'pair_name', 'avg_spread', 'time_label'
+                    ])
     
-    except Exception as e:
-        st.error(f"Error fetching spreads for {pair_name}: {e}")
-        return None
+    return all_results
 
-# Function to create spread matrix with pairs as columns and time as rows
-def create_transposed_spread_matrix():
+# Function to create edge matrix with pairs as columns
+def create_transposed_edge_matrix(pair_data, time_labels, date_labels, selected_pairs):
     # Create a DataFrame with time slots as rows and pairs as columns
-    # Initialize with a list of time labels from our time slots (latest first)
-    matrix_data = {
-        'time_slot': time_labels,
-        'date': date_labels
-    }
-    
-    # Add data for each pair (using the pre-fetched spread_data)
-    for pair in selected_pairs:
-        if pair in spread_data:
-            pair_df = spread_data[pair]
-            
-            # Create a series with spread values indexed by time_label
-            spread_by_time = pd.Series(
-                pair_df['avg_spread'].values,
-                index=pair_df['time_label']
-            )
-            
-            # Add this pair's data to the matrix
-            matrix_data[pair] = [spread_by_time.get(time, None) for time in time_labels]
-    
-    # Convert to DataFrame
-    df = pd.DataFrame(matrix_data)
-    
-    # Calculate data density for each pair to determine order
-    data_counts = {}
-    for pair in selected_pairs:
-        if pair in df.columns and pair not in ['time_slot', 'date']:
-            # Count non-null values for this pair
-            data_counts[pair] = df[pair].notna().sum()
-    
-    # Sort pairs by data density (highest first)
-    sorted_pairs = sorted(data_counts.keys(), key=lambda p: data_counts[p], reverse=True)
-    
-    # Reorder columns: first time_slot and date, then pairs by data density
-    reordered_columns = ['time_slot', 'date'] + sorted_pairs
-    
-    # Return reordered DataFrame where pairs exist
-    return df[reordered_columns]
-
-# Function to display spread matrix with custom formatting and date separators
-def display_spread_matrix(spread_df):
-    # Create a DataFrame with formatted values
-    formatted_df = spread_df.copy()
-    
-    # Process each numeric column
-    for col in formatted_df.columns:
-        if col not in ['time_slot', 'date']:
-            # Format values as strings with basis points representation (1bp = 0.01%)
-            formatted_df[col] = formatted_df[col].apply(
-                lambda x: f"{x*10000:.2f}" if isinstance(x, (int, float)) and not pd.isna(x) else ""
-            )
-    
-    # Add row numbers for better reference
-    formatted_df = formatted_df.reset_index()
-    
-    # Create date separators
-    date_changes = []
-    current_date = None
-    
-    for idx, row in formatted_df.iterrows():
-        if row['date'] != current_date:
-            date_changes.append(idx)
-            current_date = row['date']
-    
-    # Display using st.dataframe with custom configuration
-    st.dataframe(
-        formatted_df,
-        height=600,
-        use_container_width=True,
-        column_config={
-            "index": st.column_config.NumberColumn("#", width="small"),
-            "time_slot": st.column_config.TextColumn("Time", width="small"),
-            "date": st.column_config.TextColumn("Date", width="small")
-        }
-    )
-    
-    # Display date change indicators
-    if date_changes:
-        date_info = ", ".join([f"Row #{idx}" for idx in date_changes[1:]])
-        if date_info:
-            st.info(f"📅 Date changes at: {date_info}")
-    
-    return formatted_df
-
-# Show pairs selected
-st.write(f"Displaying data for {len(selected_pairs)} pairs")
-
-# Progress bar
-progress_bar = st.progress(0)
-status_text = st.empty()
-
-# Fetch data for all selected pairs
-pair_data = {}
-spread_data = {}  # Add storage for spread data too
-for i, pair in enumerate(selected_pairs):
-    progress_bar.progress(i / len(selected_pairs))
-    status_text.text(f"Processing {pair} ({i+1}/{len(selected_pairs)})")
-    
-    # Fetch edge and volatility data
-    data = calculate_edge_volatility(pair)
-    if data is not None:
-        pair_data[pair] = data
-    
-    # Fetch spread data
-    spread = fetch_market_spread_data(pair)
-    if spread is not None:
-        spread_data[pair] = spread
-
-progress_bar.progress(1.0)
-status_text.text(f"Processed {len(pair_data)}/{len(selected_pairs)} pairs")
-
-# Function to create edge matrix with pairs as columns and time as rows
-def create_transposed_edge_matrix():
-    # Create a DataFrame with time slots as rows and pairs as columns
-    # Initialize with a list of time labels from our time slots (latest first)
     matrix_data = {
         'time_slot': time_labels,
         'date': date_labels
@@ -530,13 +541,20 @@ def create_transposed_edge_matrix():
             pair_df = pair_data[pair]
             
             # Create a series with edge values indexed by time_label
-            edge_by_time = pd.Series(
-                pair_df['edge'].values,
-                index=pair_df['time_label']
-            )
-            
-            # Add this pair's data to the matrix
-            matrix_data[pair] = [edge_by_time.get(time, None) for time in time_labels]
+            if not pair_df.empty:
+                edge_by_time = pd.Series(
+                    pair_df['edge'].values,
+                    index=pair_df['time_label']
+                )
+                
+                # Add this pair's data to the matrix
+                matrix_data[pair] = [edge_by_time.get(time, None) for time in time_labels]
+            else:
+                # No data for this pair
+                matrix_data[pair] = [None] * len(time_labels)
+        else:
+            # Pair not in data
+            matrix_data[pair] = [None] * len(time_labels)
     
     # Convert to DataFrame
     df = pd.DataFrame(matrix_data)
@@ -549,16 +567,17 @@ def create_transposed_edge_matrix():
             data_counts[pair] = df[pair].notna().sum()
     
     # Sort pairs by data density (highest first)
-    sorted_pairs = sorted(data_counts.keys(), key=lambda p: data_counts[p], reverse=True)
+    sorted_pairs = sorted(data_counts.keys(), key=lambda p: data_counts.get(p, 0), reverse=True)
     
     # Reorder columns: first time_slot and date, then pairs by data density
     reordered_columns = ['time_slot', 'date'] + sorted_pairs
+    avail_columns = [col for col in reordered_columns if col in df.columns]
     
     # Return reordered DataFrame
-    return df[reordered_columns]
+    return df[avail_columns]
 
 # Function to create volatility matrix with pairs as columns
-def create_transposed_volatility_matrix():
+def create_transposed_volatility_matrix(pair_data, time_labels, date_labels, selected_pairs):
     # Similar structure as edge matrix
     matrix_data = {
         'time_slot': time_labels,
@@ -570,13 +589,20 @@ def create_transposed_volatility_matrix():
             pair_df = pair_data[pair]
             
             # Create a series with volatility values indexed by time_label
-            vol_by_time = pd.Series(
-                pair_df['volatility'].values,
-                index=pair_df['time_label']
-            )
-            
-            # Add this pair's data to the matrix
-            matrix_data[pair] = [vol_by_time.get(time, None) for time in time_labels]
+            if not pair_df.empty:
+                vol_by_time = pd.Series(
+                    pair_df['volatility'].values,
+                    index=pair_df['time_label']
+                )
+                
+                # Add this pair's data to the matrix
+                matrix_data[pair] = [vol_by_time.get(time, None) for time in time_labels]
+            else:
+                # No data for this pair
+                matrix_data[pair] = [None] * len(time_labels)
+        else:
+            # Pair not in data
+            matrix_data[pair] = [None] * len(time_labels)
     
     # Convert to DataFrame
     df = pd.DataFrame(matrix_data)
@@ -589,25 +615,75 @@ def create_transposed_volatility_matrix():
             data_counts[pair] = df[pair].notna().sum()
     
     # Sort pairs by data density (highest first)
-    sorted_pairs = sorted(data_counts.keys(), key=lambda p: data_counts[p], reverse=True)
+    sorted_pairs = sorted(data_counts.keys(), key=lambda p: data_counts.get(p, 0), reverse=True)
     
     # Reorder columns: first time_slot and date, then pairs by data density
     reordered_columns = ['time_slot', 'date'] + sorted_pairs
+    avail_columns = [col for col in reordered_columns if col in df.columns]
     
     # Return reordered DataFrame
-    return df[reordered_columns]
+    return df[avail_columns]
 
-# Function to display edge matrix with custom formatting and date separators
-def display_edge_matrix(edge_df):
+# Function to create spread matrix with pairs as columns
+def create_transposed_spread_matrix(spread_data, time_labels, date_labels, selected_pairs):
+    # Create a DataFrame with time slots as rows and pairs as columns
+    matrix_data = {
+        'time_slot': time_labels,
+        'date': date_labels
+    }
+    
+    # Add data for each pair
+    for pair in selected_pairs:
+        if pair in spread_data:
+            pair_df = spread_data[pair]
+            
+            # Create a series with spread values indexed by time_label
+            if not pair_df.empty:
+                spread_by_time = pd.Series(
+                    pair_df['avg_spread'].values,
+                    index=pair_df['time_label']
+                )
+                
+                # Add this pair's data to the matrix
+                matrix_data[pair] = [spread_by_time.get(time, None) for time in time_labels]
+            else:
+                # No data for this pair
+                matrix_data[pair] = [None] * len(time_labels)
+        else:
+            # Pair not in data
+            matrix_data[pair] = [None] * len(time_labels)
+    
+    # Convert to DataFrame
+    df = pd.DataFrame(matrix_data)
+    
+    # Calculate data density for each pair to determine order
+    data_counts = {}
+    for pair in selected_pairs:
+        if pair in df.columns and pair not in ['time_slot', 'date']:
+            # Count non-null values for this pair
+            data_counts[pair] = df[pair].notna().sum()
+    
+    # Sort pairs by data density (highest first)
+    sorted_pairs = sorted(data_counts.keys(), key=lambda p: data_counts.get(p, 0), reverse=True)
+    
+    # Reorder columns: first time_slot and date, then pairs by data density
+    reordered_columns = ['time_slot', 'date'] + sorted_pairs
+    avail_columns = [col for col in reordered_columns if col in df.columns]
+    
+    # Return reordered DataFrame
+    return df[avail_columns]
+
+# Function to display matrix with custom formatting
+def display_matrix(df, format_func, height=600):
     # Create a DataFrame with formatted values
-    formatted_df = edge_df.copy()
+    formatted_df = df.copy()
     
     # Process each numeric column
     for col in formatted_df.columns:
         if col not in ['time_slot', 'date']:
-            # Format values as strings with appropriate coloring and percentage
+            # Format values using the provided function
             formatted_df[col] = formatted_df[col].apply(
-                lambda x: f"{x*100:.1f}%" if isinstance(x, (int, float)) and not pd.isna(x) else ""
+                lambda x: format_func(x) if not pd.isna(x) else ""
             )
     
     # Add row numbers for better reference
@@ -625,7 +701,7 @@ def display_edge_matrix(edge_df):
     # Display using st.dataframe with custom configuration
     st.dataframe(
         formatted_df,
-        height=600,
+        height=height,
         use_container_width=True,
         column_config={
             "index": st.column_config.NumberColumn("#", width="small"),
@@ -639,53 +715,26 @@ def display_edge_matrix(edge_df):
         date_info = ", ".join([f"Row #{idx}" for idx in date_changes[1:]])
         if date_info:
             st.info(f"📅 Date changes at: {date_info}")
-    
-    return formatted_df
 
-# Function to display volatility matrix with custom formatting and date separators
-def display_volatility_matrix(vol_df):
-    # Create a DataFrame with formatted values
-    formatted_df = vol_df.copy()
+# Show pairs selected
+st.write(f"Displaying data for {len(selected_pairs)} pairs")
+
+# Progress bar
+progress_bar = st.progress(0)
+status_text = st.empty()
+
+status_text.text("Fetching edge and volatility data...")
+# Batch process all selected pairs (smaller batches to avoid timeout)
+with st.spinner('Processing data...'):
+    batch_size = 3  # Smaller batch size to reduce load
+    pair_data = batch_fetch_edge_volatility(selected_pairs, start_time_sg, now_sg, batch_size)
+    progress_bar.progress(0.5)
     
-    # Process each numeric column
-    for col in formatted_df.columns:
-        if col not in ['time_slot', 'date']:
-            # Format values as strings with percentage
-            formatted_df[col] = formatted_df[col].apply(
-                lambda x: f"{x*100:.1f}%" if isinstance(x, (int, float)) and not pd.isna(x) else ""
-            )
+    status_text.text("Fetching market spread data...")
+    spread_data = batch_fetch_market_spread_data(selected_pairs, start_time_sg, now_sg, batch_size)
+    progress_bar.progress(1.0)
     
-    # Add row numbers for better reference
-    formatted_df = formatted_df.reset_index()
-    
-    # Create date separators
-    date_changes = []
-    current_date = None
-    
-    for idx, row in formatted_df.iterrows():
-        if row['date'] != current_date:
-            date_changes.append(idx)
-            current_date = row['date']
-    
-    # Display using st.dataframe with column configuration
-    st.dataframe(
-        formatted_df,
-        height=600,
-        use_container_width=True,
-        column_config={
-            "index": st.column_config.NumberColumn("#", width="small"),
-            "time_slot": st.column_config.TextColumn("Time", width="small"),
-            "date": st.column_config.TextColumn("Date", width="small")
-        }
-    )
-    
-    # Display date change indicators
-    if date_changes:
-        date_info = ", ".join([f"Row #{idx}" for idx in date_changes[1:]])
-        if date_info:
-            st.info(f"📅 Date changes at: {date_info}")
-    
-    return formatted_df
+    status_text.text(f"Processed {len(pair_data)}/{len(selected_pairs)} pairs")
 
 # Create tabs
 tab1, tab2, tab3 = st.tabs(["Edge", "Volatility", "Spreads"])
@@ -697,11 +746,15 @@ if pair_data:
         st.markdown("### Edge = (Trading PNL + Taker Fee + Funding PNL + SL Fee - Rebate Amount) / Open Collateral")
         
         # Create edge matrix with pairs as columns
-        edge_df = create_transposed_edge_matrix()
+        edge_df = create_transposed_edge_matrix(pair_data, time_labels, date_labels, selected_pairs)
         
-        if not edge_df.empty:
-            # Display the matrix without complex styling
-            display_edge_matrix(edge_df)
+        if not edge_df.empty and len(edge_df.columns) > 2:  # Check if we have actual pair data columns
+            # Format function for edge values
+            def format_edge(x):
+                return f"{x*100:.1f}%"
+            
+            # Display the matrix with edge formatting
+            display_matrix(edge_df, format_edge)
             
             # Legend
             st.markdown("""
@@ -720,14 +773,18 @@ if pair_data:
     # Tab 2: Volatility Matrix
     with tab2:
         st.markdown("## Volatility Matrix (10min timeframe, Last 24 hours, Singapore Time)")
-        st.markdown("### Annualized Volatility = StdDev(Log Returns) * sqrt(trading periods per year)")
+        st.markdown("### Annualized Volatility based on 2-minute price intervals")
         
         # Create volatility matrix with pairs as columns
-        vol_df = create_transposed_volatility_matrix()
+        vol_df = create_transposed_volatility_matrix(pair_data, time_labels, date_labels, selected_pairs)
         
-        if not vol_df.empty:
-            # Display the table without complex styling
-            display_volatility_matrix(vol_df)
+        if not vol_df.empty and len(vol_df.columns) > 2:  # Check if we have actual pair data columns
+            # Format function for volatility values
+            def format_volatility(x):
+                return f"{x*100:.1f}%"
+            
+            # Display the matrix with volatility formatting
+            display_matrix(vol_df, format_volatility)
             
             # Legend
             st.markdown("""
@@ -739,12 +796,13 @@ if pair_data:
             <span style='background-color:rgba(255, 0, 0, 0.9);color:white;padding:2px 6px;border-radius:3px;'>High (>150%)</span>
             """, unsafe_allow_html=True)
             
-            # Added explanation of the simple volatility calculation
+            # Explanation of the volatility calculation
             st.markdown("""
-            **Notes on Volatility Calculation:**
-            - Uses five 2-minute intervals within each 10-minute window
-            - Calculates standard deviation of returns between these intervals
-            - Empty cells indicate insufficient price data for calculation
+            **Notes on Improved Volatility Calculation:**
+            - Uses 2-minute price intervals within each 10-minute window
+            - Calculates standard deviation of price returns (not log returns)
+            - Annualizes based on the actual number of observed intervals
+            - Empty cells indicate insufficient price data for calculation (need at least 3 price points)
             """)
         else:
             st.warning("No volatility data available for selected pairs.")
@@ -757,11 +815,15 @@ if pair_data:
         # Check if we have spread data
         if spread_data:
             # Create market spreads matrix
-            spread_df = create_transposed_spread_matrix()
+            spread_df = create_transposed_spread_matrix(spread_data, time_labels, date_labels, selected_pairs)
             
-            if not spread_df.empty:
-                # Display the matrix
-                display_spread_matrix(spread_df)
+            if not spread_df.empty and len(spread_df.columns) > 2:  # Check if we have actual pair data columns
+                # Format function for spread values
+                def format_spread(x):
+                    return f"{x*10000:.2f}"
+                
+                # Display the matrix with spread formatting
+                display_matrix(spread_df, format_spread)
                 
                 # Legend
                 st.markdown("""
@@ -786,3 +848,49 @@ if pair_data:
 
 else:
     st.warning("No data available for selected pairs. Try selecting different pairs or refreshing the data.")
+
+# Add metrics display
+if st.checkbox("Show Pair Performance Metrics"):
+    st.subheader("Pair Performance Metrics (Last 24 Hours)")
+    
+    # Compute metrics for each pair
+    metrics_data = []
+    
+    for pair in selected_pairs:
+        if pair in pair_data and not pair_data[pair].empty:
+            df = pair_data[pair]
+            
+            # Calculate metrics
+            avg_edge = df['edge'].mean() if 'edge' in df.columns else None
+            avg_vol = df['volatility'].mean() if 'volatility' in df.columns else None
+            
+            # Calculate edge/vol ratio (risk-adjusted return)
+            edge_vol_ratio = None
+            if avg_edge is not None and avg_vol is not None and avg_vol > 0:
+                edge_vol_ratio = avg_edge / avg_vol
+            
+            # Get average spread if available
+            avg_spread = None
+            if pair in spread_data and not spread_data[pair].empty:
+                avg_spread = spread_data[pair]['avg_spread'].mean()
+            
+            # Add to metrics data
+            metrics_data.append({
+                'Pair': pair,
+                'Avg Edge': f"{avg_edge*100:.2f}%" if avg_edge is not None else "N/A",
+                'Avg Volatility': f"{avg_vol*100:.2f}%" if avg_vol is not None else "N/A",
+                'Edge/Vol Ratio': f"{edge_vol_ratio:.4f}" if edge_vol_ratio is not None else "N/A",
+                'Avg Spread (bps)': f"{avg_spread*10000:.2f}" if avg_spread is not None else "N/A"
+            })
+    
+    # Display metrics table
+    if metrics_data:
+        metrics_df = pd.DataFrame(metrics_data)
+        st.dataframe(metrics_df, use_container_width=True)
+    else:
+        st.warning("No metrics data available.")
+
+# Add execution time tracker
+st.sidebar.markdown("### Performance Info")
+st.sidebar.write(f"Processed {len(selected_pairs)} pairs")
+st.sidebar.write(f"Data cached for 10 minutes")
