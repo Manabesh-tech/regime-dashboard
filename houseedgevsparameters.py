@@ -973,7 +973,7 @@ def create_parameter_plots(pair_name):
 
 # Function to create fee plot for a specific pair
 def create_fee_plot(pair_name):
-    """Create a plot of fee history for 0.1% price move for a specific pair."""
+    """Create a plot of fee percentage history for 0.1% price move for a specific pair."""
     # Ensure pair state is initialized
     init_pair_state(pair_name)
     
@@ -988,12 +988,12 @@ def create_fee_plot(pair_name):
     fig, ax = plt.subplots(figsize=(10, 5))
     
     # Plot fee line
-    ax.plot(fee_times, fees, 'r-', marker='o', label='Fee for 0.1% Move')
+    ax.plot(fee_times, fees, 'r-', marker='o', label='Fee % for 0.1% Move')
     
     # Set title and labels
-    ax.set_title(f'Fee for 0.1% Price Move - {pair_name}')
+    ax.set_title(f'Fee % for 0.1% Price Move - {pair_name}')
     ax.set_xlabel('Time')
-    ax.set_ylabel('Fee Amount')
+    ax.set_ylabel('Fee Percentage (%)')
     
     # Add grid
     ax.grid(True, alpha=0.3)
@@ -1524,11 +1524,16 @@ def render_pair_detail(pair_name):
         st.markdown(f"**Position Multiplier:** {st.session_state.pair_data[pair_name]['position_multiplier']:.1f}")
     
     # Show current fee for 0.1% move
+    # Show current fee for 0.1% move
     with col5:
-        if st.session_state.pair_data[pair_name].get('current_fee_percentage') is not None:
-            st.markdown(f"**Fee for 0.1% Move:** {st.session_state.pair_data[pair_name]['current_fee_percentage'][0]:.2f}%")
-        else:
-            st.markdown("**Fee for 0.1% Move:** N/A")
+      current_fee = st.session_state.pair_data[pair_name].get('current_fee_percentage')
+      if current_fee is not None:
+        # Handle if it's accidentally still a tuple
+        if isinstance(current_fee, (tuple, list)):
+            current_fee = current_fee[0] if current_fee else 0
+        st.markdown(f"**Fee for 0.1% Move:** {current_fee:.2f}%")
+      else:
+        st.markdown("**Fee for 0.1% Move:** N/A")
     
     # Create tabbed view for detailed analytics
     detail_tabs = st.tabs(["Edge History", "Parameter History", "Fee Analysis", "PM Sensitivity"])
