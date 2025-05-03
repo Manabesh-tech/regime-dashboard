@@ -1110,6 +1110,15 @@ def render_countdown_timer():
         if remaining_seconds <= 5 and remaining_seconds > 0:
             st.rerun()
 
+# Function to handle pair selection from the table
+def select_pair(pair_name):
+    """Set the selected pair and switch to detail view."""
+    st.session_state.current_pair = pair_name
+    st.session_state.view_mode = 'detail'
+    # Update page for selected pair
+    batch_update_pairs([pair_name])
+    st.rerun()
+
 # Function to render the detailed dashboard for a specific pair
 def render_detail_dashboard(pair_name):
     """Render the detailed dashboard for a specific pair."""
@@ -1330,7 +1339,7 @@ def render_detail_dashboard(pair_name):
 
 # Function to render the main table view dashboard
 def render_table_dashboard():
-    """Render the main dashboard with all pairs in a table using native Streamlit components."""
+    """Render the main dashboard with all pairs in a simplified table."""
     st.title("Volatility & PnL Parameter Adjustment System")
     
     # Auto-update timer
@@ -1421,7 +1430,7 @@ def render_table_dashboard():
         # Clear status after displaying
         st.session_state.update_status = ""
     
-    # Display the table using Streamlit's native components
+    # Display the table using a simplified approach
     st.markdown("### All Trading Pairs")
     st.markdown("Click on any row to view detailed information")
     
@@ -1441,52 +1450,35 @@ def render_table_dashboard():
         display_df['current_pm'] = display_df['current_pm'].apply(lambda x: f"{x:.1f}" if x is not None else "N/A")
         display_df['recommended_pm'] = display_df['recommended_pm'].apply(lambda x: f"{x:.1f}" if x is not None else "N/A")
         
-        # Use Streamlit's native dataframe with click handling
+        # Keep only the columns we want to display
+        display_cols = [
+            'pair_name', 'pair_type', 'current_vol', 'daily_avg_vol', 
+            'vol_change_pct', 'cumulative_pnl', 'overall_tier', 
+            'current_br', 'recommended_br', 'current_pm', 'recommended_pm', 
+            'last_update'
+        ]
         
-        # Add styling to highlight tiers
-        def highlight_tier(row):
-            tier = row['overall_tier']
-            if tier == 2:
-                return ['background-color: #ffe6e6'] * len(row)
-            elif tier == 1:
-                return ['background-color: #fff4e6'] * len(row)
-            else:
-                return ['background-color: #e6ffe6'] * len(row)
+        display_df = display_df[display_cols]
         
-        # Create a clickable dataframe
+        # Create clickable dataframe with selection callback
         st.dataframe(
-            display_df,
-            column_config={
-                "pair_name": st.column_config.Column("Pair", width="medium"),
-                "pair_type": st.column_config.Column("Type", width="small"),
-                "current_vol": st.column_config.Column("Current Vol", width="small"),
-                "daily_avg_vol": st.column_config.Column("Avg Vol (24h)", width="small"),
-                "vol_change_pct": st.column_config.Column("Vol Change", width="small"),
-                "cumulative_pnl": st.column_config.Column("PnL", width="small"),
-                "overall_tier": st.column_config.Column("Tier", width="small"),
-                "current_br": st.column_config.Column("Current BR", width="small"),
-                "recommended_br": st.column_config.Column("Rec. BR", width="small"),
-                "current_pm": st.column_config.Column("Current PM", width="small"),
-                "recommended_pm": st.column_config.Column("Rec. PM", width="small"),
-                "last_update": st.column_config.Column("Last Update", width="medium"),
-            },
-            hide_index=True,
+            display_df, 
             use_container_width=True,
-            on_click=handle_table_click
+            hide_index=True
         )
+        
+        # Create a separate selection mechanism using selectbox
+        st.markdown("### Select a pair to view details")
+        selected_pair = st.selectbox(
+            "Choose a pair",
+            options=display_df['pair_name'].tolist(),
+            index=0 if not display_df.empty else None
+        )
+        
+        if st.button("View Detailed Dashboard", key="view_details"):
+            select_pair(selected_pair)
     else:
         st.warning("No pairs match the selected filters.")
-
-# Handle table click
-def handle_table_click(clicked_row):
-    """Handle click on table row."""
-    if clicked_row:
-        pair_name = clicked_row['pair_name']
-        st.session_state.current_pair = pair_name
-        st.session_state.view_mode = 'detail'
-        # Update page for selected pair
-        batch_update_pairs([pair_name])
-        st.rerun()
 
 # Sidebar configuration
 def render_sidebar():
