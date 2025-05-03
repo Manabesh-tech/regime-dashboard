@@ -1011,11 +1011,26 @@ def time_until_next_update():
     return 300 - elapsed_seconds  # Time remaining in seconds
 
 # Update all pairs function
-def update_all_pairs():
-    """Update data for all monitored pairs."""
-    pairs_updated = 0
+def update_all_pairs(filter_type=None, search_term=None):
+    """Update data for all monitored pairs with optional filtering.
+    
+    Args:
+        filter_type: Optional string ('major' or 'alt') to filter by pair type
+        search_term: Optional string to filter pairs by name
+    """
     # Get available pairs
     available_pairs = fetch_pairs()
+    
+    # Apply filters if specified
+    if filter_type == 'major':
+        available_pairs = [p for p in available_pairs if st.session_state.is_major_pairs.get(p, False)]
+    elif filter_type == 'alt':
+        available_pairs = [p for p in available_pairs if not st.session_state.is_major_pairs.get(p, False)]
+    
+    if search_term:
+        available_pairs = [p for p in available_pairs if search_term.lower() in p.lower()]
+    
+    pairs_updated = 0
     
     # Update progress bar
     progress_bar = st.progress(0)
@@ -1490,8 +1505,18 @@ def render_table_dashboard():
     
     with col2:
         if st.button("Update All Pairs", type="primary"):
-            with st.spinner("Updating all pairs..."):
-                pairs_updated = update_all_pairs()
+            # Get current filter settings
+            filter_type = None
+            if pair_type_filter == "Major Only":
+                filter_type = "major"
+            elif pair_type_filter == "Alt Only":
+                filter_type = "alt"
+            
+            # Use search term if provided
+            search_filter = search_term if search_term else None
+            
+            with st.spinner(f"Updating {'filtered' if filter_type or search_filter else 'all'} pairs..."):
+                pairs_updated = update_all_pairs(filter_type=filter_type, search_term=search_filter)
             st.success(f"Updated {pairs_updated} pairs successfully!")
             st.rerun()
     
@@ -1589,8 +1614,17 @@ def main():
     
     # Check if auto-update is needed
     if check_auto_update():
-        st.session_state.update_status = "Auto-updating all pairs..."
-        update_all_pairs()
+        # Get the current view mode and filters
+        if st.session_state.view_mode == 'table':
+            # If we're on the table view, try to get the current filters
+            # Default to updating all pairs if we can't determine the filters
+            st.session_state.update_status = "Auto-updating pairs..."
+            update_all_pairs()  # Will update all pairs by default
+        else:
+            # We're in detail view, just update the current pair
+            current_pair = st.session_state.current_pair
+            if current_pair:
+                update_pair_data(current_pair)
         st.rerun()
     
     # Sidebar configuration
