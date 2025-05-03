@@ -52,13 +52,12 @@ except Exception as e:
     st.stop()
 
 # --- UI Setup ---
-st.set_option('deprecation.showPyplotGlobalUse', False)
 st.title("5-Minute Volatility Table")
 st.subheader("All Trading Pairs - Last 12 Hours (Singapore Time)")
 
 # Define parameters for the 5-minute timeframe
 timeframe = "5min"
-lookback_hours = 12  # 12 hours instead of 24
+lookback_hours = 12  # Fixed at 12 hours
 rolling_window = 10  # Reduced window size for 5min data to improve calculation speed
 expected_points = 144  # Expected data points per pair over 12 hours (12 hours * 12 5-min periods per hour)
 singapore_timezone = pytz.timezone('Asia/Singapore')
@@ -135,17 +134,18 @@ def build_query_for_partition_tables(tables, pair_name, start_time, end_time):
     union_parts = []
     
     for table in tables:
-        # Query for Surf data (source_type = 0) with explicit timezone handling
+        # Query for Surf data (source_type = 0)
+        # Use a simpler, more direct query to avoid timezone complications
         query = f"""
         SELECT 
             pair_name,
-            created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore' AS timestamp,
+            created_at + INTERVAL '8 hour' AS timestamp,
             final_price
         FROM 
             public.{table}
         WHERE 
-            created_at >= '{start_time}'::timestamp AT TIME ZONE 'Asia/Singapore' AT TIME ZONE 'UTC'
-            AND created_at <= '{end_time}'::timestamp AT TIME ZONE 'Asia/Singapore' AT TIME ZONE 'UTC'
+            created_at >= '{start_time}'::timestamp - INTERVAL '8 hour'
+            AND created_at <= '{end_time}'::timestamp - INTERVAL '8 hour'
             AND source_type = 0
             AND pair_name = '{pair_name}'
         """
@@ -177,7 +177,7 @@ def fetch_trading_pairs():
 all_tokens = fetch_trading_pairs()
 
 # UI Controls - OPTIMIZED layout for better user experience
-col1, col2, col3 = st.columns([2, 1, 1])
+col1, col2 = st.columns([3, 1])
 
 with col1:
     # Let user select tokens to display (or select all)
@@ -194,99 +194,9 @@ with col1:
 
 with col2:
     # Add a refresh button
-    if st.button("Refresh Data"):
+    if st.button("Refresh Data", type="primary", use_container_width=True):
         st.cache_data.clear()
         st.experimental_rerun()
-
-with col3:
-    # Add option to adjust lookback period
-    lookback_option = st.selectbox(
-        "Lookback Period",
-        options=[6, 12, 24],
-        index=1,  # Default to 12 hours
-        format_func=lambda x: f"{x} hours"
-    )
-    lookback_hours = lookback_option
-
-# Add a debug expander to the UI
-with st.expander("Debug Information", expanded=False):
-    st.subheader("Time Range Information")
-    st.write(f"Current Singapore Time: {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
-    st.write(f"Requested Lookback Hours: {lookback_hours}")
-    st.write(f"Query Start Time: {(now_sg - timedelta(hours=lookback_hours)).strftime('%Y-%m-%d %H:%M:%S')}")
-    
-    # Add a button to show available partition tables
-    if st.button("Check Available Partition Tables"):
-        start_time_sg = now_sg - timedelta(hours=lookback_hours)
-        partition_tables = get_partition_tables(conn, start_time_sg, now_sg)
-        
-        if partition_tables:
-            st.success(f"Found {len(partition_tables)} partition tables:")
-            st.write(partition_tables)
-            
-            # Query for the first and last timestamp in each table
-            for table in partition_tables:
-                try:
-                    query = f"""
-                    SELECT MIN(created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') as min_time,
-                           MAX(created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore') as max_time,
-                           COUNT(*) as record_count
-                    FROM public.{table}
-                    WHERE source_type = 0
-                    """
-                    df = pd.read_sql_query(query, conn)
-                    st.write(f"Table: {table}")
-                    st.write(f"  Time range: {df['min_time'][0]} to {df['max_time'][0]}")
-                    st.write(f"  Record count: {df['record_count'][0]}")
-                except Exception as e:
-                    st.error(f"Error querying table {table}: {e}")
-        else:
-            st.error("No partition tables found for the specified time range.")
-    
-    # Add a button to test data for a specific token
-    test_token = st.text_input("Test token (e.g., BTC/USDT)", "BTC/USDT")
-    if st.button("Test Data Availability"):
-        start_time_sg = now_sg - timedelta(hours=lookback_hours)
-        start_time = start_time_sg.strftime("%Y-%m-%d %H:%M:%S")
-        end_time = now_sg.strftime("%Y-%m-%d %H:%M:%S")
-        
-        partition_tables = get_partition_tables(conn, start_time_sg, now_sg)
-        if partition_tables:
-            query = build_query_for_partition_tables(
-                partition_tables,
-                pair_name=test_token,
-                start_time=start_time,
-                end_time=end_time
-            )
-            
-            try:
-                df = pd.read_sql_query(query, conn)
-                df['timestamp'] = pd.to_datetime(df['timestamp'])
-                
-                if not df.empty:
-                    min_time = df['timestamp'].min()
-                    max_time = df['timestamp'].max()
-                    actual_hours = (max_time - min_time).total_seconds() / 3600
-                    
-                    st.success(f"Found {len(df)} records for {test_token}")
-                    st.write(f"Time range: {min_time} to {max_time} ({actual_hours:.1f} hours)")
-                    
-                    # Sample of the data
-                    st.write("Sample data (first 5 rows):")
-                    st.dataframe(df.head())
-                    
-                    # Count of records per hour
-                    df['hour'] = df['timestamp'].dt.floor('H')
-                    hourly_counts = df.groupby('hour').size().reset_index(name='count')
-                    hourly_counts.columns = ['Hour', 'Record Count']
-                    st.write("Records per hour:")
-                    st.dataframe(hourly_counts)
-                else:
-                    st.error(f"No data found for {test_token} in the specified time range.")
-            except Exception as e:
-                st.error(f"Error testing data availability: {e}")
-        else:
-            st.error("No partition tables found for the specified time range.")
 
 if not selected_tokens:
     st.warning("Please select at least one token")
@@ -354,33 +264,30 @@ def generate_aligned_time_blocks(current_time, hours_back=12):
 aligned_time_blocks = generate_aligned_time_blocks(now_sg, lookback_hours)
 time_block_labels = [block[2] for block in aligned_time_blocks]
 
-# Fetch and calculate volatility for a token with 5min timeframe - OPTIMIZED query
+# Fetch and calculate volatility for a token with 5min timeframe
 @st.cache_data(ttl=300, show_spinner="Calculating volatility metrics...")
 def fetch_and_calculate_volatility(token):
     # Get current time in Singapore timezone
     now_utc = datetime.now(pytz.utc)
     now_sg = now_utc.astimezone(singapore_timezone)
     
-    # Extend the lookback period by 50% to ensure we get enough data
-    extended_lookback = int(lookback_hours * 1.5)
+    # Try to get data for a longer period than we need (24 hours instead of 12)
+    # This gives us a better chance to capture the full 12 hours we want
+    extended_lookback = 24  # Use 24 hours to ensure we get 12 hours
     start_time_sg = now_sg - timedelta(hours=extended_lookback)
     
     # Convert for database query
     start_time = start_time_sg.strftime("%Y-%m-%d %H:%M:%S")
     end_time = now_sg.strftime("%Y-%m-%d %H:%M:%S")
 
-    # Get relevant partition tables - search additional days if needed
-    partition_tables = get_partition_tables(conn, start_time_sg, now_sg)
+    # Get relevant partition tables for this time range plus the previous day
+    # This ensures we get all the data even if near day boundaries
+    extra_day_start = start_time_sg - timedelta(days=1)
+    partition_tables = get_partition_tables(conn, extra_day_start, now_sg)
     
     if not partition_tables:
-        # Try looking back one more day to find tables
-        alt_start_time_sg = start_time_sg - timedelta(days=1)
-        partition_tables = get_partition_tables(conn, alt_start_time_sg, now_sg)
-        if partition_tables:
-            print(f"[{token}] Found partition tables by extending search to {alt_start_time_sg.strftime('%Y-%m-%d')}")
-        else:
-            print(f"[{token}] No partition tables found for the specified date range")
-            return None
+        print(f"[{token}] No partition tables found for the specified date range")
+        return None
     
     # Build query using partition tables
     query = build_query_for_partition_tables(
@@ -399,38 +306,44 @@ def fetch_and_calculate_volatility(token):
             print(f"[{token}] No data found.")
             return None
 
-        # Additional validation for timestamps
+        # Process timestamps
         df['timestamp'] = pd.to_datetime(df['timestamp'])
-        df = df.set_index('timestamp').sort_index()
         
-        # Work directly with timestamps for 5min resampling
+        # Work directly with the data
+        df = df.set_index('timestamp').sort_index()
         price_data = df['final_price'].dropna()
+        
         if price_data.empty:
             print(f"[{token}] No data after cleaning.")
             return None
         
-        # Use more robust resampling with explicit timezone
-        # This ensures time blocks align properly with Singapore time
-        five_min_ohlc = price_data.resample('5min', closed='left', label='left').ohlc().dropna()
+        # Resample to exactly 5min intervals
+        five_min_ohlc = price_data.resample('5min').ohlc().dropna()
         
         if five_min_ohlc.empty:
             print(f"[{token}] No 5-min data after resampling.")
             return None
         
-        # Calculate rolling volatility directly on 5-minute close prices
+        # Calculate rolling volatility on 5-minute close prices
         five_min_ohlc['realized_vol'] = five_min_ohlc['close'].rolling(window=rolling_window).apply(
             lambda x: calculate_volatility_metrics(x)['realized_vol']
         )
         
         # Get exactly the requested number of hours worth of data
+        # 12 hours = 144 five-minute intervals (12 * 12)
         blocks_needed = lookback_hours * 12  # Number of 5-minute blocks in lookback period
         
-        # Take only the most recent blocks_needed points, or all if less than that
+        # Take only the most recent blocks_needed points
         recent_data = five_min_ohlc.tail(blocks_needed)
+        
+        # Check if we have enough data
+        if len(recent_data) < blocks_needed * 0.5:  # If we have less than 50% of expected points
+            print(f"[{token}] Warning: Only found {len(recent_data)} data points out of {blocks_needed} expected")
+        
         last_period_vol = recent_data['realized_vol']
         
         if last_period_vol.empty:
-            print(f"[{token}] No 5-min volatility data.")
+            print(f"[{token}] No volatility data.")
             return None
         
         last_period_vol = last_period_vol.to_frame()
@@ -539,8 +452,9 @@ if token_results:
         else:  # Extreme volatility - red
             return 'background-color: rgba(255, 0, 0, 0.7); color: white'
     
+    # Style the table
     styled_table = vol_table.style.applymap(color_cells)
-    st.markdown(f"## Volatility Table (5min timeframe, Last {lookback_hours} hours, Singapore Time)")
+    st.markdown(f"## Volatility Table (5min timeframe, Last 12 hours, Singapore Time)")
     st.markdown("### Color Legend: <span style='color:green'>Low Vol</span>, <span style='color:#aaaa00'>Medium Vol</span>, <span style='color:orange'>High Vol</span>, <span style='color:red'>Extreme Vol</span>", unsafe_allow_html=True)
     st.markdown("Values shown as annualized volatility percentage")
     
@@ -549,7 +463,7 @@ if token_results:
     st.dataframe(styled_table, height=max_height, use_container_width=True)
     
     # Create ranking table based on average volatility
-    st.subheader(f"Volatility Ranking ({lookback_hours}-Hour Average, Descending Order)")
+    st.subheader(f"Volatility Ranking (12-Hour Average, Descending Order)")
     
     ranking_data = []
     for token, df in token_results.items():
@@ -663,7 +577,7 @@ if token_results:
     
     # Average Volatility Distribution - OPTIMIZED with simple metrics display
     # Using columns to make it more compact
-    st.subheader(f"{lookback_hours}-Hour Average Volatility Overview (Singapore Time)")
+    st.subheader(f"12-Hour Average Volatility Overview (Singapore Time)")
     
     # OPTIMIZATION: Place metrics in a more compact layout
     col1, col2 = st.columns(2)
@@ -705,7 +619,7 @@ if token_results:
             
             fig = go.Figure(data=[go.Pie(labels=labels, values=values, marker=dict(colors=colors, line=dict(color='#000000', width=2)), textinfo='label+percent', hole=.3)])
             fig.update_layout(
-                title=f"{lookback_hours}-Hour Average Volatility Distribution",
+                title=f"12-Hour Average Volatility Distribution",
                 height=300,
                 font=dict(color="#000000", size=12),
                 margin=dict(l=10, r=10, t=40, b=10),
