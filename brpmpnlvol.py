@@ -3,10 +3,11 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
-import psycopg2
 import pytz
 from sqlalchemy import create_engine, text
 import matplotlib.pyplot as plt
+import threading
+import time
 
 # Page configuration
 st.set_page_config(
@@ -130,6 +131,14 @@ st.markdown("""
     .reset-button:hover {
         background-color: #d32f2f;
     }
+    .update-timer {
+        background-color: #f0f0f0;
+        padding: 10px;
+        border-radius: 5px;
+        margin-bottom: 10px;
+        text-align: center;
+        font-weight: bold;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -149,6 +158,12 @@ def init_session_state():
 
     if 'current_pair' not in st.session_state:
         st.session_state.current_pair = None
+        
+    if 'last_auto_update' not in st.session_state:
+        st.session_state.last_auto_update = datetime.now(SG_TZ)
+        
+    if 'auto_update_enabled' not in st.session_state:
+        st.session_state.auto_update_enabled = True
 
     # Configuration values
     if 'vol_threshold_1' not in st.session_state:
@@ -160,11 +175,11 @@ def init_session_state():
     if 'parameter_adjustment_pct' not in st.session_state:
         st.session_state.parameter_adjustment_pct = 20  # Default: 20% adjustment
     
-    if 'pnl_threshold_btc_1' not in st.session_state:
-        st.session_state.pnl_threshold_btc_1 = -200  # Default -200 for BTC
+    if 'pnl_threshold_major_1' not in st.session_state:
+        st.session_state.pnl_threshold_major_1 = -200  # Default -200 for major pairs
     
-    if 'pnl_threshold_btc_2' not in st.session_state:
-        st.session_state.pnl_threshold_btc_2 = -400  # Default -400 for BTC
+    if 'pnl_threshold_major_2' not in st.session_state:
+        st.session_state.pnl_threshold_major_2 = -400  # Default -400 for major pairs
     
     if 'pnl_threshold_alt_1' not in st.session_state:
         st.session_state.pnl_threshold_alt_1 = -100  # Default -100 for alts
@@ -172,8 +187,16 @@ def init_session_state():
     if 'pnl_threshold_alt_2' not in st.session_state:
         st.session_state.pnl_threshold_alt_2 = -200  # Default -200 for alts
     
-    if 'is_btc_pairs' not in st.session_state:
-        st.session_state.is_btc_pairs = {"BTC/USDT": True}  # Default BTC setting
+    if 'is_major_pairs' not in st.session_state:
+        st.session_state.is_major_pairs = {
+            "BTC/USDT": True,
+            "ETH/USDT": True,
+            "BNB/USDT": True,
+            "SOL/USDT": True,
+            "XRP/USDT": True,
+            "ADA/USDT": True,
+            "DOGE/USDT": True
+        }  # Default major pairs
 
     st.session_state.initialized = True
 
@@ -193,6 +216,17 @@ def check_daily_reset():
         
         # Update last reset date
         st.session_state.last_daily_reset = today
+        return True
+    return False
+
+# Check if auto-update is needed
+def check_auto_update():
+    now = get_sg_time()
+    last_update = st.session_state.last_auto_update
+    time_diff = (now - last_update).total_seconds() / 60
+    
+    if time_diff >= 5 and st.session_state.auto_update_enabled:
+        st.session_state.last_auto_update = now
         return True
     return False
 
@@ -324,9 +358,19 @@ def init_pair_state(pair_name):
             'parameter_history': []  # List of (timestamp, buffer_rate, position_multiplier, reason) tuples
         }
         
-        # Determine if this is a BTC pair or alt
-        if pair_name not in st.session_state.is_btc_pairs:
-            st.session_state.is_btc_pairs[pair_name] = pair_name == "BTC/USDT"
+        # Determine if this is a major pair
+        if pair_name not in st.session_state.is_major_pairs:
+            # Check if it matches common major pair patterns
+            is_major = (
+                pair_name == "BTC/USDT" or 
+                pair_name == "ETH/USDT" or 
+                pair_name == "BNB/USDT" or 
+                pair_name == "SOL/USDT" or
+                pair_name == "XRP/USDT" or
+                pair_name == "ADA/USDT" or
+                pair_name == "DOGE/USDT"
+            )
+            st.session_state.is_major_pairs[pair_name] = is_major
 
 # Calculate 5-minute realized volatility for a specific pair
 def calculate_volatility(pair_name, hours=24):
@@ -349,30 +393,87 @@ def calculate_volatility(pair_name, hours=24):
         start_str = start_time_utc.strftime('%Y-%m-%d %H:%M:%S')
         end_str = now_utc.strftime('%Y-%m-%d %H:%M:%S')
         
-        # Query for price data (adjust table name as needed)
-        query = f"""
-        SELECT 
-            created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore' AS timestamp,
-            final_price
-        FROM 
-            public.oracle_price_log
-        WHERE 
-            created_at BETWEEN '{start_str}'::timestamp AND '{end_str}'::timestamp
-            AND pair_name = '{pair_name}'
-            AND source_type = 0
-        ORDER BY 
-            created_at
-        """
+        # Check if oracle_price_log_partition tables exist
+        engine = init_connection()
+        if not engine:
+            return None, None, None
         
-        price_df = pd.read_sql(query, engine)
+        # Get all partition tables for the time range
+        # Similar to your volatility plotting code
+        dates = []
+        current_date = start_time_sg.replace(tzinfo=None)
+        end_date = now_sg.replace(tzinfo=None)
+        while current_date <= end_date:
+            dates.append(current_date.strftime("%Y%m%d"))
+            current_date += timedelta(days=1)
+        
+        table_names = [f"oracle_price_log_partition_{date}" for date in dates]
+        
+        # Check which tables exist
+        with engine.connect() as connection:
+            if table_names:
+                table_list_str = "', '".join(table_names)
+                query = f"""
+                    SELECT table_name 
+                    FROM information_schema.tables 
+                    WHERE table_schema = 'public' 
+                    AND table_name IN ('{table_list_str}')
+                """
+                result = connection.execute(text(query))
+                existing_tables = [row[0] for row in result]
+        
+        if not existing_tables:
+            # Fallback to using the regular oracle_price_log table
+            query = f"""
+            SELECT 
+                created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Singapore' AS timestamp,
+                final_price
+            FROM 
+                public.oracle_price_log
+            WHERE 
+                created_at BETWEEN '{start_str}'::timestamp AND '{end_str}'::timestamp
+                AND pair_name = '{pair_name}'
+                AND source_type = 0
+            ORDER BY 
+                created_at
+            """
+            
+            price_df = pd.read_sql(query, engine)
+        else:
+            # Use partition tables
+            union_parts = []
+            for table in existing_tables:
+                # Add 8 hours to convert to Singapore time
+                query_part = f"""
+                SELECT 
+                    pair_name,
+                    created_at + INTERVAL '8 hour' AS timestamp,
+                    final_price
+                FROM 
+                    public.{table}
+                WHERE 
+                    created_at >= '{start_str}'::timestamp - INTERVAL '8 hour'
+                    AND created_at <= '{end_str}'::timestamp - INTERVAL '8 hour'
+                    AND source_type = 0
+                    AND pair_name = '{pair_name}'
+                """
+                union_parts.append(query_part)
+            
+            full_query = " UNION ".join(union_parts) + " ORDER BY timestamp"
+            price_df = pd.read_sql(full_query, engine)
         
         if price_df.empty:
             st.warning(f"No price data found for {pair_name} in the specified time period.")
             return None, None, None
         
-        # Convert timestamp to pandas datetime
+        # Convert timestamp to pandas datetime if it's not already
         price_df['timestamp'] = pd.to_datetime(price_df['timestamp'])
         price_df = price_df.set_index('timestamp').sort_index()
+        
+        # Make sure we have the final_price column
+        price_column = 'final_price'
+        if price_column not in price_df.columns and len(price_df.columns) > 0:
+            price_column = price_df.columns[0]  # Use the first available column
         
         # Resample to 5-minute intervals
         vol_data = []
@@ -391,7 +492,7 @@ def calculate_volatility(pair_name, hours=24):
             
             if len(window_data) >= 2:  # Need at least 2 points for volatility
                 # Calculate log returns
-                log_returns = np.diff(np.log(window_data['final_price'].values))
+                log_returns = np.diff(np.log(window_data[price_column].values))
                 
                 # Annualize: seconds in year / seconds in 5 minutes
                 annualization_factor = np.sqrt(31536000 / 300)
@@ -535,14 +636,14 @@ def update_pair_data(pair_name):
         st.session_state.pair_data[pair_name]['pnl_cumulative'] += period_pnl
         cumulative_pnl = st.session_state.pair_data[pair_name]['pnl_cumulative']
         
-        # Determine PnL adjustment tier based on pair type (BTC or altcoin)
+        # Determine PnL adjustment tier based on pair type (major or altcoin)
         old_tier = st.session_state.pair_data[pair_name]['pnl_adjustment_tier']
         
-        if st.session_state.is_btc_pairs.get(pair_name, False):
-            # BTC thresholds
-            if cumulative_pnl <= st.session_state.pnl_threshold_btc_2:
+        if st.session_state.is_major_pairs.get(pair_name, False):
+            # Major pair thresholds
+            if cumulative_pnl <= st.session_state.pnl_threshold_major_2:
                 new_tier = 2
-            elif cumulative_pnl <= st.session_state.pnl_threshold_btc_1:
+            elif cumulative_pnl <= st.session_state.pnl_threshold_major_1:
                 new_tier = 1
             else:
                 new_tier = 0
@@ -735,9 +836,9 @@ def create_pnl_plot(pair_name):
     )
     
     # Add threshold lines
-    is_btc = st.session_state.is_btc_pairs.get(pair_name, False)
-    threshold1 = st.session_state.pnl_threshold_btc_1 if is_btc else st.session_state.pnl_threshold_alt_1
-    threshold2 = st.session_state.pnl_threshold_btc_2 if is_btc else st.session_state.pnl_threshold_alt_2
+    is_major = st.session_state.is_major_pairs.get(pair_name, False)
+    threshold1 = st.session_state.pnl_threshold_major_1 if is_major else st.session_state.pnl_threshold_alt_1
+    threshold2 = st.session_state.pnl_threshold_major_2 if is_major else st.session_state.pnl_threshold_alt_2
     
     fig.add_trace(
         go.Scatter(
@@ -820,25 +921,64 @@ def create_parameter_history_plot(pair_name):
     
     return br_fig, pm_fig
 
+# Calculate time until next auto-update
+def time_until_next_update():
+    """Calculate time until next auto-update."""
+    if not st.session_state.auto_update_enabled:
+        return None
+    
+    now = get_sg_time()
+    last_update = st.session_state.last_auto_update
+    elapsed_seconds = (now - last_update).total_seconds()
+    
+    if elapsed_seconds >= 300:  # 5 minutes in seconds
+        return 0
+    
+    return 300 - elapsed_seconds  # Time remaining in seconds
+
 # Function to render main dashboard
 def render_dashboard(pair_name):
     """Render the main dashboard for a specific pair."""
     st.markdown(f"## Parameter Dashboard: {pair_name}")
     
-    # Data refreshing
-    refresh_col, reset_col = st.columns([3, 1])
+    # Auto-update status and timer
+    remaining_seconds = time_until_next_update()
+    if remaining_seconds is not None:
+        minutes, seconds = divmod(int(remaining_seconds), 60)
+        st.markdown(f"""
+        <div class="update-timer">
+            Next auto-update in: {minutes:02d}:{seconds:02d}
+        </div>
+        """, unsafe_allow_html=True)
     
-    with refresh_col:
-        if st.button("Refresh Data", key=f"refresh_{pair_name}"):
+    # Data refreshing controls
+    col1, col2, col3 = st.columns([1, 1, 1])
+    
+    with col1:
+        if st.button("Manual Update", key=f"refresh_{pair_name}", type="primary"):
             update_pair_data(pair_name)
-            st.success("Data refreshed successfully!")
+            st.session_state.last_auto_update = get_sg_time()  # Reset auto-update timer
+            st.success("Data updated successfully!")
             st.rerun()
     
-    with reset_col:
+    with col2:
         if st.button("Reset PnL", key=f"reset_pnl_{pair_name}"):
             reset_pnl(pair_name)
             st.success("PnL reset successfully!")
             st.rerun()
+    
+    with col3:
+        auto_update = st.checkbox(
+            "Auto-update (5 min)", 
+            value=st.session_state.auto_update_enabled,
+            key=f"auto_update_{pair_name}"
+        )
+        st.session_state.auto_update_enabled = auto_update
+    
+    # Display pair type (Major or Alt)
+    is_major = st.session_state.is_major_pairs.get(pair_name, False)
+    pair_type = "Major" if is_major else "Alt"
+    st.markdown(f"**Pair Type**: {pair_type} (PnL Thresholds: {st.session_state.pnl_threshold_major_1}/{st.session_state.pnl_threshold_major_2 if is_major else st.session_state.pnl_threshold_alt_1}/{st.session_state.pnl_threshold_alt_2})")
     
     # Current metrics section
     st.markdown("### Current Metrics")
@@ -878,9 +1018,9 @@ def render_dashboard(pair_name):
     
     with col2:
         cumulative_pnl = st.session_state.pair_data[pair_name].get('pnl_cumulative', 0)
-        is_btc = st.session_state.is_btc_pairs.get(pair_name, False)
-        threshold1 = st.session_state.pnl_threshold_btc_1 if is_btc else st.session_state.pnl_threshold_alt_1
-        threshold2 = st.session_state.pnl_threshold_btc_2 if is_btc else st.session_state.pnl_threshold_alt_2
+        is_major = st.session_state.is_major_pairs.get(pair_name, False)
+        threshold1 = st.session_state.pnl_threshold_major_1 if is_major else st.session_state.pnl_threshold_alt_1
+        threshold2 = st.session_state.pnl_threshold_major_2 if is_major else st.session_state.pnl_threshold_alt_2
         
         pnl_class = "indicator-green"
         if cumulative_pnl <= threshold2:
@@ -1017,6 +1157,13 @@ def main():
     if check_daily_reset():
         st.success("Daily PnL reset completed.")
     
+    # Check if auto-update is needed
+    if check_auto_update():
+        selected_pair = st.session_state.current_pair
+        if selected_pair:
+            update_pair_data(selected_pair)
+            st.rerun()
+    
     # Set page title
     st.title("Volatility & PnL Parameter Adjustment System")
     
@@ -1030,10 +1177,15 @@ def main():
         st.error("No trading pairs found. Please check database connection.")
         return
     
+    # Default to BTC/USDT if available
+    default_index = 0
+    if "BTC/USDT" in available_pairs:
+        default_index = available_pairs.index("BTC/USDT")
+    
     selected_pair = st.sidebar.selectbox(
         "Select Trading Pair",
         available_pairs,
-        index=0 if "BTC/USDT" not in available_pairs else available_pairs.index("BTC/USDT")
+        index=default_index
     )
     
     # Set current pair
@@ -1042,13 +1194,13 @@ def main():
     # Initialize pair if needed
     init_pair_state(selected_pair)
     
-    # Pair type selection (BTC or Alt)
-    is_btc = st.sidebar.checkbox(
-        "This is a BTC pair",
-        value=st.session_state.is_btc_pairs.get(selected_pair, False),
-        key=f"is_btc_{selected_pair}"
+    # Pair type selection (Major or Alt)
+    is_major = st.sidebar.checkbox(
+        "This is a major pair",
+        value=st.session_state.is_major_pairs.get(selected_pair, False),
+        key=f"is_major_{selected_pair}"
     )
-    st.session_state.is_btc_pairs[selected_pair] = is_btc
+    st.session_state.is_major_pairs[selected_pair] = is_major
     
     # Adjustment settings
     st.sidebar.markdown("### Adjustment Settings")
@@ -1073,19 +1225,19 @@ def main():
     )
     
     # PnL threshold settings
-    st.sidebar.markdown("#### PnL Thresholds for BTC Pairs")
-    pnl_threshold_btc_1 = st.sidebar.number_input(
-        "PnL Threshold 1 (BTC)",
-        value=st.session_state.pnl_threshold_btc_1,
+    st.sidebar.markdown("#### PnL Thresholds for Major Pairs")
+    pnl_threshold_major_1 = st.sidebar.number_input(
+        "PnL Threshold 1 (Major)",
+        value=st.session_state.pnl_threshold_major_1,
         step=50,
-        help="PnL threshold to trigger Tier 1 adjustment for BTC pairs"
+        help="PnL threshold to trigger Tier 1 adjustment for major pairs"
     )
     
-    pnl_threshold_btc_2 = st.sidebar.number_input(
-        "PnL Threshold 2 (BTC)",
-        value=min(st.session_state.pnl_threshold_btc_2, pnl_threshold_btc_1 - 50),
+    pnl_threshold_major_2 = st.sidebar.number_input(
+        "PnL Threshold 2 (Major)",
+        value=min(st.session_state.pnl_threshold_major_2, pnl_threshold_major_1 - 50),
         step=50,
-        help="PnL threshold to trigger Tier 2 adjustment for BTC pairs"
+        help="PnL threshold to trigger Tier 2 adjustment for major pairs"
     )
     
     st.sidebar.markdown("#### PnL Thresholds for Alt Pairs")
@@ -1116,8 +1268,8 @@ def main():
     # Update session state with new settings
     st.session_state.vol_threshold_1 = vol_threshold_1
     st.session_state.vol_threshold_2 = vol_threshold_2
-    st.session_state.pnl_threshold_btc_1 = pnl_threshold_btc_1
-    st.session_state.pnl_threshold_btc_2 = pnl_threshold_btc_2
+    st.session_state.pnl_threshold_major_1 = pnl_threshold_major_1
+    st.session_state.pnl_threshold_major_2 = pnl_threshold_major_2
     st.session_state.pnl_threshold_alt_1 = pnl_threshold_alt_1
     st.session_state.pnl_threshold_alt_2 = pnl_threshold_alt_2
     st.session_state.parameter_adjustment_pct = parameter_adjustment_pct
@@ -1142,6 +1294,7 @@ def main():
     if st.sidebar.button("Update Data Now", key="update_data"):
         with st.spinner("Updating data..."):
             update_pair_data(selected_pair)
+        st.session_state.last_auto_update = get_sg_time()  # Reset auto-update timer
         st.sidebar.success("Data updated successfully!")
         st.rerun()
     
