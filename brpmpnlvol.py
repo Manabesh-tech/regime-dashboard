@@ -61,9 +61,6 @@ st.markdown("""
         margin-bottom: 15px;
         border: 1px solid #e0e0e0;
     }
-    .pair-card:hover {
-        box-shadow: 0 4px 8px rgba(0,0,0,0.1);
-    }
     .metric-row {
         display: flex;
         justify-content: space-between;
@@ -136,44 +133,6 @@ st.markdown("""
         margin-bottom: 10px;
         text-align: center;
         font-weight: bold;
-    }
-    /* Data table styling */
-    .pairs-table {
-        width: 100%;
-        border-collapse: collapse;
-    }
-    .pairs-table th {
-        background-color: #f0f2f6;
-        padding: 8px;
-        text-align: left;
-        position: sticky;
-        top: 0;
-        z-index: 1;
-    }
-    .pairs-table td {
-        padding: 8px;
-        border-bottom: 1px solid #ddd;
-    }
-    .pairs-table tr:hover {
-        background-color: #f5f5f5;
-        cursor: pointer;
-    }
-    /* Color indicators for the table */
-    .table-tier-0 {
-        background-color: rgba(230, 255, 230, 0.5);
-    }
-    .table-tier-1 {
-        background-color: rgba(255, 244, 230, 0.5);
-    }
-    .table-tier-2 {
-        background-color: rgba(255, 230, 230, 0.5);
-    }
-    /* Format for clickable rows */
-    .clickable-row {
-        cursor: pointer;
-    }
-    .clickable-row:hover {
-        background-color: #f0f0f0;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -284,7 +243,8 @@ def check_auto_update():
         return True
     return False
 
-# Database connection functions
+# Database connection functions - with caching to improve performance
+@st.cache_resource(ttl=3600)  # Cache for 1 hour
 def init_connection():
     """Initialize database connection using Streamlit secrets."""
     try:
@@ -314,7 +274,8 @@ def init_connection():
             st.error(f"Alternative connection failed: {e2}")
             return None
 
-# Fetch available trading pairs
+# Fetch available trading pairs - cache the results to avoid repeated database calls
+@st.cache_data(ttl=300)  # Cache for 5 minutes
 def fetch_pairs():
     """Fetch all active trading pairs from the database."""
     engine = init_connection()
@@ -339,96 +300,112 @@ def fetch_pairs():
         st.error(f"Error fetching pairs: {e}")
         return []
 
-# Fetch current parameters for a specific pair
-def fetch_current_parameters(pair_name):
-    """Fetch current parameters for a specific pair from the database."""
+# Fetch current parameters for multiple pairs at once to reduce database calls
+@st.cache_data(ttl=300)  # Cache for 5 minutes
+def fetch_current_parameters_batch(pair_names):
+    """Fetch current parameters for multiple pairs from the database."""
     engine = init_connection()
     if not engine:
         st.error("Failed to connect to database. Check your connection settings.")
-        return {
-            "buffer_rate": 0.001,
-            "position_multiplier": 1000
-        }
+        return {}
+    
+    # Default parameters
+    default_params = {
+        "buffer_rate": 0.001,
+        "position_multiplier": 1000
+    }
+    
+    if not pair_names:
+        return {}
     
     try:
+        # Create a comma-separated list of pair names
+        pair_list = "', '".join(pair_names)
+        
         query = f"""
         SELECT
+            pair_name,
             (leverage_config::jsonb->0->>'buffer_rate')::numeric AS buffer_rate,
             position_multiplier
         FROM
             public.trade_pool_pairs
         WHERE
-            pair_name = '{pair_name}'
+            pair_name IN ('{pair_list}')
             AND status = 1
         """
         
         df = pd.read_sql(query, engine)
-        if df.empty:
-            st.warning(f"No parameter data found for {pair_name}. Using default values.")
-            return {
-                "buffer_rate": 0.001,
-                "position_multiplier": 1000
-            }
         
         # Convert to dictionary
-        params = {
-            "buffer_rate": float(df['buffer_rate'].iloc[0]),
-            "position_multiplier": float(df['position_multiplier'].iloc[0])
-        }
+        params_dict = {}
+        for pair_name in pair_names:
+            pair_df = df[df['pair_name'] == pair_name]
+            if not pair_df.empty:
+                params_dict[pair_name] = {
+                    "buffer_rate": float(pair_df['buffer_rate'].iloc[0]),
+                    "position_multiplier": float(pair_df['position_multiplier'].iloc[0])
+                }
+            else:
+                params_dict[pair_name] = default_params.copy()
         
-        return params
+        return params_dict
     except Exception as e:
-        st.error(f"Error fetching parameters for {pair_name}: {e}")
-        return {
-            "buffer_rate": 0.001,
-            "position_multiplier": 1000
-        }
+        st.error(f"Error fetching parameters: {e}")
+        return {pair_name: default_params.copy() for pair_name in pair_names}
 
-# Initialize a new pair in session state
-def init_pair_state(pair_name):
-    """Initialize session state for a specific pair."""
+# Initialize multiple pairs at once to reduce database calls
+def init_pairs_batch(pair_names):
+    """Initialize session state for multiple pairs at once."""
     if 'pair_data' not in st.session_state:
         st.session_state.pair_data = {}
     
-    if pair_name not in st.session_state.pair_data:
-        # Get current parameters
-        params = fetch_current_parameters(pair_name)
-        
-        # Initialize pair data
-        st.session_state.pair_data[pair_name] = {
-            'initialized': True,
-            'buffer_rate': params["buffer_rate"],
-            'position_multiplier': params["position_multiplier"],
-            'base_buffer_rate': params["buffer_rate"],  # Store original values as base
-            'base_position_multiplier': params["position_multiplier"],
-            'volatility_history': [],  # List of (timestamp, volatility) tuples
-            'daily_avg_volatility': None,
-            'current_volatility': None,
-            'vol_adjustment_tier': 0,  # 0: normal, 1: tier 1 adjustment, 2: tier 2 adjustment
-            'pnl_history': [],  # List of (timestamp, pnl) tuples
-            'pnl_cumulative': 0,  # Running PnL total
-            'pnl_adjustment_tier': 0,  # 0: normal, 1: tier 1 adjustment, 2: tier 2 adjustment
-            'last_update_time': get_sg_time(),
-            'parameter_history': [],  # List of (timestamp, buffer_rate, position_multiplier, reason) tuples
-            'recommended_buffer_rate': params["buffer_rate"],  # Added recommended values
-            'recommended_position_multiplier': params["position_multiplier"]
-        }
-        
-        # Determine if this is a major pair
-        if pair_name not in st.session_state.is_major_pairs:
-            # Check if it matches common major pair patterns
-            is_major = (
-                pair_name == "BTC/USDT" or 
-                pair_name == "ETH/USDT" or 
-                pair_name == "BNB/USDT" or 
-                pair_name == "SOL/USDT" or
-                pair_name == "XRP/USDT" or
-                pair_name == "ADA/USDT" or
-                pair_name == "DOGE/USDT"
-            )
-            st.session_state.is_major_pairs[pair_name] = is_major
+    # Fetch parameters for all pairs at once
+    params_batch = fetch_current_parameters_batch(pair_names)
+    
+    for pair_name in pair_names:
+        if pair_name not in st.session_state.pair_data:
+            # Get parameters for this pair
+            params = params_batch.get(pair_name, {
+                "buffer_rate": 0.001,
+                "position_multiplier": 1000
+            })
+            
+            # Initialize pair data
+            st.session_state.pair_data[pair_name] = {
+                'initialized': True,
+                'buffer_rate': params["buffer_rate"],
+                'position_multiplier': params["position_multiplier"],
+                'base_buffer_rate': params["buffer_rate"],  # Store original values as base
+                'base_position_multiplier': params["position_multiplier"],
+                'volatility_history': [],  # List of (timestamp, volatility) tuples
+                'daily_avg_volatility': None,
+                'current_volatility': None,
+                'vol_adjustment_tier': 0,  # 0: normal, 1: tier 1 adjustment, 2: tier 2 adjustment
+                'pnl_history': [],  # List of (timestamp, pnl) tuples
+                'pnl_cumulative': 0,  # Running PnL total
+                'pnl_adjustment_tier': 0,  # 0: normal, 1: tier 1 adjustment, 2: tier 2 adjustment
+                'last_update_time': get_sg_time(),
+                'parameter_history': [],  # List of (timestamp, buffer_rate, position_multiplier, reason) tuples
+                'recommended_buffer_rate': params["buffer_rate"],  # Added recommended values
+                'recommended_position_multiplier': params["position_multiplier"]
+            }
+            
+            # Determine if this is a major pair
+            if pair_name not in st.session_state.is_major_pairs:
+                # Check if it matches common major pair patterns
+                is_major = (
+                    pair_name == "BTC/USDT" or 
+                    pair_name == "ETH/USDT" or 
+                    pair_name == "BNB/USDT" or 
+                    pair_name == "SOL/USDT" or
+                    pair_name == "XRP/USDT" or
+                    pair_name == "ADA/USDT" or
+                    pair_name == "DOGE/USDT"
+                )
+                st.session_state.is_major_pairs[pair_name] = is_major
 
-# Calculate volatility
+# Optimized volatility calculation with caching
+@st.cache_data(ttl=300)  # Cache for 5 minutes
 def calculate_volatility(pair_name, hours=24):
     """Calculate and return the volatility data for a pair."""
     engine = init_connection()
@@ -517,7 +494,6 @@ def calculate_volatility(pair_name, hours=24):
             price_df = pd.read_sql(full_query, engine)
         
         if price_df.empty:
-            st.warning(f"No price data found for {pair_name} in the specified time period.")
             return None, None, None
         
         # Convert timestamp to pandas datetime
@@ -556,7 +532,6 @@ def calculate_volatility(pair_name, hours=24):
                 })
         
         if not result:
-            st.warning(f"Could not calculate volatility for {pair_name}")
             return None, None, None
         
         # Create DataFrame
@@ -574,7 +549,8 @@ def calculate_volatility(pair_name, hours=24):
         st.error(f"Error calculating volatility for {pair_name}: {e}")
         return None, None, None
 
-# Calculate PnL for a specific pair
+# Optimized PnL calculation with caching
+@st.cache_data(ttl=300)  # Cache for 5 minutes
 def calculate_pnl(pair_name, hours=24):
     """Calculate PnL for a specific pair for the last specified hours."""
     engine = init_connection()
@@ -631,103 +607,109 @@ def calculate_pnl(pair_name, hours=24):
         st.error(f"Error calculating PnL for {pair_name}: {e}")
         return None, 0
 
-# Update pair volatility and PnL data
-def update_pair_data(pair_name):
-    """Update volatility and PnL data for a specific pair."""
-    # Ensure pair state is initialized
-    init_pair_state(pair_name)
+# Batch update for multiple pairs to improve efficiency
+def batch_update_pairs(pair_names):
+    """Update volatility and PnL data for multiple pairs efficiently."""
+    if not pair_names:
+        return
+    
+    # Initialize all pairs first in batch
+    init_pairs_batch(pair_names)
     
     # Get current time
     current_time = get_sg_time()
     
-    # Calculate volatility
-    vol_df, current_vol, daily_avg = calculate_volatility(pair_name)
-    
-    # Update volatility information
-    if vol_df is not None and current_vol is not None and daily_avg is not None:
-        st.session_state.pair_data[pair_name]['volatility_history'].append((current_time, current_vol))
-        st.session_state.pair_data[pair_name]['current_volatility'] = current_vol
-        st.session_state.pair_data[pair_name]['daily_avg_volatility'] = daily_avg
-        
-        # Calculate percent increase from daily average
-        if daily_avg > 0:
-            vol_increase_pct = ((current_vol - daily_avg) / daily_avg) * 100
-        else:
-            vol_increase_pct = 0
-        
-        # Determine volatility adjustment tier
-        old_tier = st.session_state.pair_data[pair_name]['vol_adjustment_tier']
-        
-        if vol_increase_pct >= st.session_state.vol_threshold_2:
-            new_tier = 2
-        elif vol_increase_pct >= st.session_state.vol_threshold_1:
-            new_tier = 1
-        else:
-            new_tier = 0
-        
-        st.session_state.pair_data[pair_name]['vol_adjustment_tier'] = new_tier
-        
-        # Log tier change
-        if old_tier != new_tier:
-            reason = f"Volatility {'increased' if new_tier > old_tier else 'decreased'} (Current: {current_vol:.4f}, Daily Avg: {daily_avg:.4f}, Change: {vol_increase_pct:.2f}%)"
-            st.session_state.pair_data[pair_name]['parameter_history'].append((
-                current_time, 
-                st.session_state.pair_data[pair_name]['buffer_rate'],
-                st.session_state.pair_data[pair_name]['position_multiplier'],
-                reason
-            ))
-    
-    # Calculate PnL
-    pnl_df, period_pnl = calculate_pnl(pair_name)
-    
-    # Update PnL information
-    if pnl_df is not None:
-        st.session_state.pair_data[pair_name]['pnl_history'].append((current_time, period_pnl))
-        
-        # Update cumulative PnL
-        st.session_state.pair_data[pair_name]['pnl_cumulative'] += period_pnl
-        cumulative_pnl = st.session_state.pair_data[pair_name]['pnl_cumulative']
-        
-        # Determine PnL adjustment tier based on pair type (major or altcoin)
-        old_tier = st.session_state.pair_data[pair_name]['pnl_adjustment_tier']
-        
-        if st.session_state.is_major_pairs.get(pair_name, False):
-            # Major pair thresholds
-            if cumulative_pnl <= st.session_state.pnl_threshold_major_2:
-                new_tier = 2
-            elif cumulative_pnl <= st.session_state.pnl_threshold_major_1:
-                new_tier = 1
-            else:
-                new_tier = 0
-        else:
-            # Alt thresholds
-            if cumulative_pnl <= st.session_state.pnl_threshold_alt_2:
-                new_tier = 2
-            elif cumulative_pnl <= st.session_state.pnl_threshold_alt_1:
-                new_tier = 1
-            else:
-                new_tier = 0
-        
-        st.session_state.pair_data[pair_name]['pnl_adjustment_tier'] = new_tier
-        
-        # Log tier change
-        if old_tier != new_tier:
-            reason = f"PnL {'decreased' if new_tier > old_tier else 'increased'} (Cumulative PnL: {cumulative_pnl:.2f})"
-            st.session_state.pair_data[pair_name]['parameter_history'].append((
-                current_time, 
-                st.session_state.pair_data[pair_name]['buffer_rate'],
-                st.session_state.pair_data[pair_name]['position_multiplier'],
-                reason
-            ))
-    
-    # Update last update time
-    st.session_state.pair_data[pair_name]['last_update_time'] = current_time
-    
-    # Calculate recommended parameters
-    calculate_recommended_parameters(pair_name)
-    
-    # Apply parameter adjustments based on current tiers
-    adjust_parameters(pair_name)
+    # Process all pairs
+    with st.spinner(f"Updating {len(pair_names)} pairs..."):
+        for pair_name in pair_names:
+            # Calculate volatility
+            vol_df, current_vol, daily_avg = calculate_volatility(pair_name)
+            
+            # Update volatility information
+            if vol_df is not None and current_vol is not None and daily_avg is not None:
+                st.session_state.pair_data[pair_name]['volatility_history'].append((current_time, current_vol))
+                st.session_state.pair_data[pair_name]['current_volatility'] = current_vol
+                st.session_state.pair_data[pair_name]['daily_avg_volatility'] = daily_avg
+                
+                # Calculate percent increase from daily average
+                if daily_avg > 0:
+                    vol_increase_pct = ((current_vol - daily_avg) / daily_avg) * 100
+                else:
+                    vol_increase_pct = 0
+                
+                # Determine volatility adjustment tier
+                old_tier = st.session_state.pair_data[pair_name]['vol_adjustment_tier']
+                
+                if vol_increase_pct >= st.session_state.vol_threshold_2:
+                    new_tier = 2
+                elif vol_increase_pct >= st.session_state.vol_threshold_1:
+                    new_tier = 1
+                else:
+                    new_tier = 0
+                
+                st.session_state.pair_data[pair_name]['vol_adjustment_tier'] = new_tier
+                
+                # Log tier change
+                if old_tier != new_tier:
+                    reason = f"Volatility {'increased' if new_tier > old_tier else 'decreased'} (Current: {current_vol:.4f}, Daily Avg: {daily_avg:.4f}, Change: {vol_increase_pct:.2f}%)"
+                    st.session_state.pair_data[pair_name]['parameter_history'].append((
+                        current_time, 
+                        st.session_state.pair_data[pair_name]['buffer_rate'],
+                        st.session_state.pair_data[pair_name]['position_multiplier'],
+                        reason
+                    ))
+            
+            # Calculate PnL
+            pnl_df, period_pnl = calculate_pnl(pair_name)
+            
+            # Update PnL information
+            if pnl_df is not None:
+                st.session_state.pair_data[pair_name]['pnl_history'].append((current_time, period_pnl))
+                
+                # Update cumulative PnL
+                st.session_state.pair_data[pair_name]['pnl_cumulative'] += period_pnl
+                cumulative_pnl = st.session_state.pair_data[pair_name]['pnl_cumulative']
+                
+                # Determine PnL adjustment tier based on pair type (major or altcoin)
+                old_tier = st.session_state.pair_data[pair_name]['pnl_adjustment_tier']
+                
+                if st.session_state.is_major_pairs.get(pair_name, False):
+                    # Major pair thresholds
+                    if cumulative_pnl <= st.session_state.pnl_threshold_major_2:
+                        new_tier = 2
+                    elif cumulative_pnl <= st.session_state.pnl_threshold_major_1:
+                        new_tier = 1
+                    else:
+                        new_tier = 0
+                else:
+                    # Alt thresholds
+                    if cumulative_pnl <= st.session_state.pnl_threshold_alt_2:
+                        new_tier = 2
+                    elif cumulative_pnl <= st.session_state.pnl_threshold_alt_1:
+                        new_tier = 1
+                    else:
+                        new_tier = 0
+                
+                st.session_state.pair_data[pair_name]['pnl_adjustment_tier'] = new_tier
+                
+                # Log tier change
+                if old_tier != new_tier:
+                    reason = f"PnL {'decreased' if new_tier > old_tier else 'increased'} (Cumulative PnL: {cumulative_pnl:.2f})"
+                    st.session_state.pair_data[pair_name]['parameter_history'].append((
+                        current_time, 
+                        st.session_state.pair_data[pair_name]['buffer_rate'],
+                        st.session_state.pair_data[pair_name]['position_multiplier'],
+                        reason
+                    ))
+            
+            # Update last update time
+            st.session_state.pair_data[pair_name]['last_update_time'] = current_time
+            
+            # Calculate recommended parameters
+            calculate_recommended_parameters(pair_name)
+            
+            # Apply parameter adjustments based on current tiers
+            adjust_parameters(pair_name)
 
 # Calculate recommended parameters based on volatility and PnL tiers
 def calculate_recommended_parameters(pair_name):
@@ -799,6 +781,18 @@ def reset_pnl(pair_name):
         
         return True
     return False
+
+# Reset all PnL - improved to handle batches
+def reset_all_pnl(pairs=None):
+    """Reset PnL for all pairs or a specific list of pairs."""
+    reset_count = 0
+    pairs_to_reset = pairs if pairs else st.session_state.pair_data.keys()
+    
+    for pair_name in pairs_to_reset:
+        if reset_pnl(pair_name):
+            reset_count += 1
+    
+    return reset_count
 
 # Function to create volatility plot
 def create_volatility_plot(pair_name):
@@ -1010,58 +1004,29 @@ def time_until_next_update():
     
     return 300 - elapsed_seconds  # Time remaining in seconds
 
-# Update all pairs function
-def update_all_pairs(filter_type=None, search_term=None):
-    """Update data for all monitored pairs with optional filtering.
-    
-    Args:
-        filter_type: Optional string ('major' or 'alt') to filter by pair type
-        search_term: Optional string to filter pairs by name
-    """
+# Optimized function to generate pairs table data
+@st.cache_data(ttl=30)  # Short cache to ensure UI responsiveness
+def generate_pairs_table_data(filter_type=None, tier_filter=None, search_term=None):
+    """Generate data for the pairs table with filtering."""
     # Get available pairs
     available_pairs = fetch_pairs()
     
-    # Apply filters if specified
+    # Apply pair type filter
     if filter_type == 'major':
         available_pairs = [p for p in available_pairs if st.session_state.is_major_pairs.get(p, False)]
     elif filter_type == 'alt':
         available_pairs = [p for p in available_pairs if not st.session_state.is_major_pairs.get(p, False)]
     
+    # Apply search filter
     if search_term:
         available_pairs = [p for p in available_pairs if search_term.lower() in p.lower()]
     
-    pairs_updated = 0
-    
-    # Update progress bar
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    for i, pair_name in enumerate(available_pairs):
-        status_text.text(f"Updating {pair_name}... ({i+1}/{len(available_pairs)})")
-        init_pair_state(pair_name)
-        update_pair_data(pair_name)
-        pairs_updated += 1
-        progress_bar.progress((i + 1) / len(available_pairs))
-    
-    # Reset auto-update timer
-    st.session_state.last_auto_update = get_sg_time()
-    status_text.text(f"Updated {pairs_updated} pairs successfully!")
-    
-    return pairs_updated
-
-# Function to generate pairs table data
-def generate_pairs_table_data():
-    """Generate data for the pairs table."""
-    # Get available pairs
-    available_pairs = fetch_pairs()
-    
     # Initialize pairs if needed
-    for pair_name in available_pairs:
-        if pair_name not in st.session_state.pair_data:
-            init_pair_state(pair_name)
+    init_pairs_batch(available_pairs)
     
     # Generate table data
     table_data = []
+    
     for pair_name in available_pairs:
         pair_data = st.session_state.pair_data.get(pair_name, {})
         
@@ -1093,6 +1058,10 @@ def generate_pairs_table_data():
         pnl_tier = pair_data.get('pnl_adjustment_tier', 0)
         overall_tier = max(vol_tier, pnl_tier)
         
+        # Apply tier filter if specified
+        if tier_filter is not None and overall_tier != tier_filter:
+            continue
+        
         # Get last update time
         last_update = pair_data.get('last_update_time', None)
         last_update_str = last_update.strftime('%Y-%m-%d %H:%M:%S') if last_update else "Never"
@@ -1119,7 +1088,7 @@ def generate_pairs_table_data():
 
 # Properly working countdown timer using JavaScript
 def render_countdown_timer():
-    """Render a JavaScript-based countdown timer that actually works."""
+    """Render a JavaScript-based countdown timer."""
     remaining_seconds = time_until_next_update()
     if remaining_seconds is not None:
         # Calculate minutes and seconds for initial display
@@ -1129,143 +1098,17 @@ def render_countdown_timer():
         now_sg = get_sg_time()
         next_update_time = now_sg + timedelta(seconds=remaining_seconds)
         
-        # Create HTML for the timer with JavaScript
-        timer_html = f"""
+        st.markdown(f"""
         <div class="update-timer">
-            <div id="current-time">Current time (SGT): {now_sg.strftime('%H:%M:%S')}</div>
-            <div id="countdown">Next auto-update in: <span id="minutes">{minutes:02d}</span>:<span id="seconds">{seconds:02d}</span></div>
+            <div>Current time (SGT): {now_sg.strftime('%H:%M:%S')}</div>
+            <div>Next auto-update in: {minutes:02d}:{seconds:02d}</div>
             <div>Next update at: {next_update_time.strftime('%H:%M:%S')}</div>
         </div>
+        """, unsafe_allow_html=True)
         
-        <script>
-            // JavaScript for countdown timer
-            var countdownElement = document.getElementById('countdown');
-            var minutesElement = document.getElementById('minutes');
-            var secondsElement = document.getElementById('seconds');
-            
-            // Get the target timestamp 
-            var totalSeconds = {int(remaining_seconds)};
-            
-            // Clear any existing interval
-            if (window.countdownInterval) {{
-                clearInterval(window.countdownInterval);
-            }}
-            
-            // Update function
-            function updateCountdown() {{
-                totalSeconds--;
-                
-                if (totalSeconds <= 0) {{
-                    clearInterval(window.countdownInterval);
-                    // Auto refresh the page when timer reaches zero
-                    window.location.reload();
-                    return;
-                }}
-                
-                var minutes = Math.floor(totalSeconds / 60);
-                var seconds = totalSeconds % 60;
-                
-                // Format with leading zeros
-                minutesElement.textContent = minutes.toString().padStart(2, '0');
-                secondsElement.textContent = seconds.toString().padStart(2, '0');
-            }}
-            
-            // Start the countdown
-            window.countdownInterval = setInterval(updateCountdown, 1000);
-        </script>
-        """
-        
-        st.markdown(timer_html, unsafe_allow_html=True)
-        
-        # Fallback meta refresh tag when we're close to refresh time
+        # Use Streamlit's auto-refresh for simplicity
         if remaining_seconds <= 5 and remaining_seconds > 0:
-            refresh_in = max(1, int(remaining_seconds)) 
-            st.markdown(f'<meta http-equiv="refresh" content="{refresh_in}">', unsafe_allow_html=True)
-
-# Generate clickable table
-def render_clickable_table(df):
-    """Render a clickable table with pair data."""
-    # Format the DataFrame for display
-    display_df = df.copy()
-    
-    # Format percentage columns
-    display_df['current_vol'] = display_df['current_vol'].apply(lambda x: f"{x:.2f}%" if x is not None else "N/A")
-    display_df['daily_avg_vol'] = display_df['daily_avg_vol'].apply(lambda x: f"{x:.2f}%" if x is not None else "N/A")
-    display_df['vol_change_pct'] = display_df['vol_change_pct'].apply(lambda x: f"{x:+.2f}%" if x is not None else "N/A")
-    
-    # Format numeric columns
-    display_df['cumulative_pnl'] = display_df['cumulative_pnl'].apply(lambda x: f"{x:.2f}" if x is not None else "N/A")
-    display_df['current_br'] = display_df['current_br'].apply(lambda x: f"{x:.6f}" if x is not None else "N/A")
-    display_df['recommended_br'] = display_df['recommended_br'].apply(lambda x: f"{x:.6f}" if x is not None else "N/A")
-    display_df['current_pm'] = display_df['current_pm'].apply(lambda x: f"{x:.1f}" if x is not None else "N/A")
-    display_df['recommended_pm'] = display_df['recommended_pm'].apply(lambda x: f"{x:.1f}" if x is not None else "N/A")
-    
-    # Use tier for conditional formatting in the table
-    def get_row_class(tier):
-        if tier == 2:
-            return "table-tier-2"
-        elif tier == 1:
-            return "table-tier-1"
-        else:
-            return "table-tier-0"
-    
-    # Create HTML table with event listeners for row clicks
-    table_html = """
-    <div style="max-height: 600px; overflow-y: auto;">
-    <table class="pairs-table">
-        <thead>
-            <tr>
-                <th>Pair</th>
-                <th>Type</th>
-                <th>Current Vol</th>
-                <th>24h Avg Vol</th>
-                <th>Vol Change</th>
-                <th>PnL</th>
-                <th>Tier</th>
-                <th>Current BR</th>
-                <th>Recommended BR</th>
-                <th>Current PM</th>
-                <th>Recommended PM</th>
-                <th>Last Update</th>
-            </tr>
-        </thead>
-        <tbody>
-    """
-    
-    # Add rows with click handlers and conditional formatting
-    for i, row in display_df.iterrows():
-        row_class = get_row_class(row['overall_tier'])
-        table_html += f"""
-        <tr class="clickable-row {row_class}" onclick="selectPair('{row['pair_name']}')">
-            <td><strong>{row['pair_name']}</strong></td>
-            <td>{row['pair_type']}</td>
-            <td>{row['current_vol']}</td>
-            <td>{row['daily_avg_vol']}</td>
-            <td>{row['vol_change_pct']}</td>
-            <td>{row['cumulative_pnl']}</td>
-            <td>{row['overall_tier']}</td>
-            <td>{row['current_br']}</td>
-            <td>{row['recommended_br']}</td>
-            <td>{row['current_pm']}</td>
-            <td>{row['recommended_pm']}</td>
-            <td>{row['last_update']}</td>
-        </tr>
-        """
-    
-    table_html += """
-        </tbody>
-    </table>
-    </div>
-    
-    <script>
-    function selectPair(pairName) {
-        // Set selected pair and redirect
-        window.location.href = "?selected_pair=" + encodeURIComponent(pairName);
-    }
-    </script>
-    """
-    
-    st.markdown(table_html, unsafe_allow_html=True)
+            st.rerun()
 
 # Function to render the detailed dashboard for a specific pair
 def render_detail_dashboard(pair_name):
@@ -1289,7 +1132,7 @@ def render_detail_dashboard(pair_name):
     
     with col2:
         if st.button("Update Data", key=f"update_{pair_name}", type="primary"):
-            update_pair_data(pair_name)
+            batch_update_pairs([pair_name])
             st.success("Data updated successfully!")
             st.rerun()
     
@@ -1487,14 +1330,11 @@ def render_detail_dashboard(pair_name):
 
 # Function to render the main table view dashboard
 def render_table_dashboard():
-    """Render the main dashboard with all pairs in a table."""
+    """Render the main dashboard with all pairs in a table using native Streamlit components."""
     st.title("Volatility & PnL Parameter Adjustment System")
     
     # Auto-update timer
     render_countdown_timer()
-    
-    # Generate table data first
-    table_df = generate_pairs_table_data()
     
     # Add filtering options
     st.markdown("### Filter Options")
@@ -1509,49 +1349,42 @@ def render_table_dashboard():
         )
         
         # Store the current filter in session state for auto-update
+        filter_type = None
         if pair_type_filter == "Major Only":
-            st.session_state.current_filter_type = "major"
+            filter_type = "major"
         elif pair_type_filter == "Alt Only":
-            st.session_state.current_filter_type = "alt"
-        else:
-            st.session_state.current_filter_type = None
+            filter_type = "alt"
     
     with col2:
         # Filter by tier
-        tier_filter = st.selectbox(
+        tier_filter_options = ["All", "Tier 0 (Normal)", "Tier 1", "Tier 2"]
+        tier_filter_selection = st.selectbox(
             "Adjustment Tier",
-            ["All", "Tier 0 (Normal)", "Tier 1", "Tier 2"]
+            tier_filter_options
         )
+        
+        # Convert to numeric tier
+        tier_filter = None
+        if tier_filter_selection == "Tier 0 (Normal)":
+            tier_filter = 0
+        elif tier_filter_selection == "Tier 1":
+            tier_filter = 1
+        elif tier_filter_selection == "Tier 2":
+            tier_filter = 2
     
     with col3:
         # Search by pair name
         search_term = st.text_input("Search Pair Name")
-        # Store the search term in session state for auto-update
-        st.session_state.current_search_term = search_term if search_term else None
     
-    # Apply filters to table data
-    filtered_df = table_df.copy()
-    
-    # Apply pair type filter
-    if pair_type_filter == "Major Only":
-        filtered_df = filtered_df[filtered_df['pair_type'] == "Major"]
-    elif pair_type_filter == "Alt Only":
-        filtered_df = filtered_df[filtered_df['pair_type'] == "Alt"]
-    
-    # Apply tier filter
-    if tier_filter == "Tier 0 (Normal)":
-        filtered_df = filtered_df[filtered_df['overall_tier'] == 0]
-    elif tier_filter == "Tier 1":
-        filtered_df = filtered_df[filtered_df['overall_tier'] == 1]
-    elif tier_filter == "Tier 2":
-        filtered_df = filtered_df[filtered_df['overall_tier'] == 2]
-    
-    # Apply search filter
-    if search_term:
-        filtered_df = filtered_df[filtered_df['pair_name'].str.contains(search_term, case=False)]
+    # Generate filtered table data
+    filtered_df = generate_pairs_table_data(
+        filter_type=filter_type, 
+        tier_filter=tier_filter, 
+        search_term=search_term
+    )
     
     # Update buttons
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3 = st.columns(3)
     
     with col1:
         auto_update = st.checkbox(
@@ -1562,33 +1395,25 @@ def render_table_dashboard():
     
     with col2:
         if st.button("Update All Pairs", type="primary"):
-            # Get filter type based on pair_type_filter
-            filter_type = None
-            if pair_type_filter == "Major Only":
-                filter_type = "major"
-            elif pair_type_filter == "Alt Only":
-                filter_type = "alt"
+            # Get all pairs that match the current filters
+            available_pairs = filtered_df['pair_name'].tolist() if not filtered_df.empty else []
             
-            # Use search term if provided
-            search_filter = search_term if search_term else None
+            with st.spinner(f"Updating {len(available_pairs)} pairs..."):
+                # Use batch update for better performance
+                batch_update_pairs(available_pairs)
             
-            with st.spinner(f"Updating {'filtered' if filter_type or search_filter else 'all'} pairs..."):
-                pairs_updated = update_all_pairs(filter_type=filter_type, search_term=search_filter)
-            st.success(f"Updated {pairs_updated} pairs successfully!")
+            st.success(f"Updated {len(available_pairs)} pairs successfully!")
             st.rerun()
     
     with col3:
         if st.button("Reset All PnL"):
             with st.spinner("Resetting PnL for all pairs..."):
-                reset_count = 0
-                for pair in st.session_state.pair_data:
-                    if reset_pnl(pair):
-                        reset_count += 1
+                # Get filtered pairs
+                pairs_to_reset = filtered_df['pair_name'].tolist() if not filtered_df.empty else []
+                reset_count = reset_all_pnl(pairs_to_reset)
+            
             st.success(f"Reset PnL for {reset_count} pairs!")
             st.rerun()
-    
-    with col4:
-        st.write("")  # Empty space for alignment
     
     # Display the status message
     if st.session_state.update_status:
@@ -1596,55 +1421,76 @@ def render_table_dashboard():
         # Clear status after displaying
         st.session_state.update_status = ""
     
-    # Display the table
+    # Display the table using Streamlit's native components
     st.markdown("### All Trading Pairs")
     st.markdown("Click on any row to view detailed information")
     
     if not filtered_df.empty:
-        render_clickable_table(filtered_df)
+        # Format the data for better display
+        display_df = filtered_df.copy()
+        
+        # Format percentage columns
+        display_df['current_vol'] = display_df['current_vol'].apply(lambda x: f"{x:.2f}%" if x is not None else "N/A")
+        display_df['daily_avg_vol'] = display_df['daily_avg_vol'].apply(lambda x: f"{x:.2f}%" if x is not None else "N/A")
+        display_df['vol_change_pct'] = display_df['vol_change_pct'].apply(lambda x: f"{x:+.2f}%" if x is not None else "N/A")
+        
+        # Format numeric columns
+        display_df['cumulative_pnl'] = display_df['cumulative_pnl'].apply(lambda x: f"{x:.2f}" if x is not None else "N/A")
+        display_df['current_br'] = display_df['current_br'].apply(lambda x: f"{x:.6f}" if x is not None else "N/A")
+        display_df['recommended_br'] = display_df['recommended_br'].apply(lambda x: f"{x:.6f}" if x is not None else "N/A")
+        display_df['current_pm'] = display_df['current_pm'].apply(lambda x: f"{x:.1f}" if x is not None else "N/A")
+        display_df['recommended_pm'] = display_df['recommended_pm'].apply(lambda x: f"{x:.1f}" if x is not None else "N/A")
+        
+        # Use Streamlit's native dataframe with click handling
+        
+        # Add styling to highlight tiers
+        def highlight_tier(row):
+            tier = row['overall_tier']
+            if tier == 2:
+                return ['background-color: #ffe6e6'] * len(row)
+            elif tier == 1:
+                return ['background-color: #fff4e6'] * len(row)
+            else:
+                return ['background-color: #e6ffe6'] * len(row)
+        
+        # Create a clickable dataframe
+        st.dataframe(
+            display_df,
+            column_config={
+                "pair_name": st.column_config.Column("Pair", width="medium"),
+                "pair_type": st.column_config.Column("Type", width="small"),
+                "current_vol": st.column_config.Column("Current Vol", width="small"),
+                "daily_avg_vol": st.column_config.Column("Avg Vol (24h)", width="small"),
+                "vol_change_pct": st.column_config.Column("Vol Change", width="small"),
+                "cumulative_pnl": st.column_config.Column("PnL", width="small"),
+                "overall_tier": st.column_config.Column("Tier", width="small"),
+                "current_br": st.column_config.Column("Current BR", width="small"),
+                "recommended_br": st.column_config.Column("Rec. BR", width="small"),
+                "current_pm": st.column_config.Column("Current PM", width="small"),
+                "recommended_pm": st.column_config.Column("Rec. PM", width="small"),
+                "last_update": st.column_config.Column("Last Update", width="medium"),
+            },
+            hide_index=True,
+            use_container_width=True,
+            on_click=handle_table_click
+        )
     else:
         st.warning("No pairs match the selected filters.")
 
-# Handle pair selection from table
-def handle_pair_selection():
-    """Handle pair selection from the table."""
-    # Check for form submission via query params
-    query_params = st.query_params
-    if 'selected_pair' in query_params:
-        selected_pair = query_params['selected_pair']
-        st.session_state.current_pair = selected_pair
+# Handle table click
+def handle_table_click(clicked_row):
+    """Handle click on table row."""
+    if clicked_row:
+        pair_name = clicked_row['pair_name']
+        st.session_state.current_pair = pair_name
         st.session_state.view_mode = 'detail'
         # Update page for selected pair
-        update_pair_data(selected_pair)
-        # Clear query params
-        st.query_params.clear()
+        batch_update_pairs([pair_name])
         st.rerun()
 
-# Main application
-def main():
-    # Initialize session state
-    init_session_state()
-    
-    # Check if daily reset is needed
-    if check_daily_reset():
-        st.success("Daily PnL reset completed.")
-    
-    # Check if auto-update is needed
-    if check_auto_update():
-        # Get the current view mode and filters
-        if st.session_state.view_mode == 'table':
-            # If we're on the table view, try to get the current filters
-            # Default to updating all pairs if we can't determine the filters
-            st.session_state.update_status = "Auto-updating pairs..."
-            update_all_pairs()  # Will update all pairs by default
-        else:
-            # We're in detail view, just update the current pair
-            current_pair = st.session_state.current_pair
-            if current_pair:
-                update_pair_data(current_pair)
-        st.rerun()
-    
-    # Sidebar configuration
+# Sidebar configuration
+def render_sidebar():
+    """Render sidebar configuration options."""
     st.sidebar.title("Configuration")
     
     # Volatility threshold settings
@@ -1726,6 +1572,59 @@ def main():
             adjust_parameters(pair_name)
         st.sidebar.success("Settings applied to all pairs!")
         st.rerun()
+
+# Main application
+def main():
+    # Initialize session state
+    init_session_state()
+    
+    # Check if daily reset is needed
+    if check_daily_reset():
+        st.success("Daily PnL reset completed.")
+    
+    # Check if auto-update is needed
+    if check_auto_update():
+        # Get the current view mode
+        if st.session_state.view_mode == 'table':
+            # If we're on the table view, update all pairs
+            st.session_state.update_status = "Auto-updating pairs..."
+            
+            # Get available pairs
+            available_pairs = fetch_pairs()
+            
+            # Limit the number of pairs to update to improve performance
+            # This helps avoid timeout issues during auto-refresh
+            max_pairs_to_update = 20
+            if len(available_pairs) > max_pairs_to_update:
+                # Prioritize major pairs and pairs with higher tiers
+                major_pairs = [p for p in available_pairs if st.session_state.is_major_pairs.get(p, False)]
+                major_pairs = major_pairs[:max_pairs_to_update]
+                
+                if len(major_pairs) < max_pairs_to_update:
+                    # Add some alt pairs if we have room
+                    alt_pairs = [p for p in available_pairs if not st.session_state.is_major_pairs.get(p, False)]
+                    alt_pairs = alt_pairs[:max_pairs_to_update-len(major_pairs)]
+                    pairs_to_update = major_pairs + alt_pairs
+                else:
+                    pairs_to_update = major_pairs[:max_pairs_to_update]
+                    
+                batch_update_pairs(pairs_to_update)
+                st.session_state.update_status = f"Auto-updated {len(pairs_to_update)} pairs. Full update recommended."
+            else:
+                # Update all pairs if the number is manageable
+                batch_update_pairs(available_pairs)
+                st.session_state.update_status = f"Auto-updated all {len(available_pairs)} pairs."
+        else:
+            # We're in detail view, just update the current pair
+            current_pair = st.session_state.current_pair
+            if current_pair:
+                batch_update_pairs([current_pair])
+                st.session_state.update_status = f"Auto-updated {current_pair}."
+        
+        st.rerun()
+    
+    # Render sidebar
+    render_sidebar()
     
     # View selection
     if st.session_state.view_mode == 'detail' and st.session_state.current_pair:
@@ -1734,8 +1633,6 @@ def main():
     else:
         # Render table view
         render_table_dashboard()
-        # Handle pair selection
-        handle_pair_selection()
 
 if __name__ == "__main__":
     main()
