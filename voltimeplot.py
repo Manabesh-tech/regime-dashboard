@@ -1,10 +1,9 @@
-# Save this as pages/06_5min_Volatility_Plot.py in your Streamlit app folder
+# Save this as pages/06_Better_Volatility_Plot.py in your Streamlit app folder
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 import psycopg2
 import pytz
@@ -14,7 +13,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 st.set_page_config(
-    page_title="5min Volatility Plot",
+    page_title="5min Volatility Plot - Improved",
     page_icon="📈",
     layout="wide"
 )
@@ -53,14 +52,12 @@ except Exception as e:
     st.stop()
 
 # --- UI Setup ---
-st.title("5-Minute Volatility Plot")
+st.title("5-Minute Volatility Time Plot (Improved)")
 st.subheader("Single Token - Last 24 Hours (Singapore Time)")
 
-# Define parameters for the 5-minute timeframe
+# Define parameters
 timeframe = "5min"
-lookback_hours = 24  # Changed to 24 hours
-rolling_window = 10  # Reduced window size for 5min data
-expected_points = 288  # Expected data points per pair over 24 hours (24 hours * 12 5-min periods per hour)
+lookback_hours = 24
 singapore_timezone = pytz.timezone('Asia/Singapore')
 
 # Get current time in Singapore timezone
@@ -68,16 +65,12 @@ now_utc = datetime.now(pytz.utc)
 now_sg = now_utc.astimezone(singapore_timezone)
 st.write(f"Current Singapore Time: {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
 
-# Set extreme volatility threshold
-extreme_vol_threshold = 1.0  # 100% annualized volatility
-
-# Function to get partition tables based on date range - OPTIMIZED to query fewer tables
+# Function to get partition tables based on date range
 def get_partition_tables(conn, start_date, end_date):
     """
     Get list of partition tables that need to be queried based on date range.
     Returns a list of table names (oracle_price_log_partition_YYYYMMDD)
     """
-    # Convert to datetime objects if they're strings
     if isinstance(start_date, str):
         start_date = pd.to_datetime(start_date)
     if isinstance(end_date, str) and end_date:
@@ -104,7 +97,6 @@ def get_partition_tables(conn, start_date, end_date):
     cursor = conn.cursor()
     existing_tables = []
     
-    # Query to check all tables at once
     if table_names:
         table_list_str = "', '".join(table_names)
         cursor.execute(f"""
@@ -129,7 +121,7 @@ def build_query_for_partition_tables(tables, pair_name, start_time, end_time):
     Build a complete UNION query for multiple partition tables.
     This creates a complete, valid SQL query with correct WHERE clauses.
     
-    The query now keeps ALL 1-second data points for more accurate volatility calculation.
+    The query keeps ALL 1-second data points for accurate volatility calculation.
     """
     if not tables:
         return ""
@@ -138,8 +130,6 @@ def build_query_for_partition_tables(tables, pair_name, start_time, end_time):
     
     for table in tables:
         # Query for Surf data (source_type = 0)
-        # Use a simpler, more direct query to avoid timezone complications
-        # Keep ALL data points (1-second level) for intraperiod volatility calculation
         query = f"""
         SELECT 
             pair_name,
@@ -177,11 +167,8 @@ def fetch_trading_pairs():
         st.error(f"Error fetching trading pairs: {e}")
         return ["BTC/USDT", "ETH/USDT"]  # Default pairs if database query fails
 
-# Get all available tokens from DB by fetching active trading pairs
+# Get all available tokens from DB
 all_tokens = fetch_trading_pairs()
-
-# Function to calculate volatility metrics - OPTIMIZED calculation
-# This function is no longer used with the new approach
 
 # Volatility classification function
 def classify_volatility(vol):
@@ -196,28 +183,7 @@ def classify_volatility(vol):
     else:
         return ("EXTREME", 4, "Extreme volatility")
 
-# Function to generate aligned 5-minute time blocks for the past 24 hours
-def generate_aligned_time_blocks(current_time, hours_back=24):
-    """
-    Generate fixed 5-minute time blocks for past X hours,
-    aligned with standard 5-minute intervals
-    """
-    # Round down to the nearest 5-minute mark
-    minute = current_time.minute
-    rounded_minute = (minute // 5) * 5
-    latest_complete_block_end = current_time.replace(minute=rounded_minute, second=0, microsecond=0)
-    
-    # Generate block labels for display
-    blocks = []
-    for i in range(hours_back * 12):  # 24 hours of 5-minute blocks = 288 blocks
-        block_end = latest_complete_block_end - timedelta(minutes=i*5)
-        block_start = block_end - timedelta(minutes=5)
-        block_label = f"{block_start.strftime('%H:%M')}"
-        blocks.append((block_start, block_end, block_label))
-    
-    return blocks
-
-# UI Controls - OPTIMIZED layout for better user experience
+# UI Controls
 col1, col2 = st.columns([3, 1])
 
 with col1:
@@ -243,7 +209,6 @@ def fetch_and_calculate_volatility(token, lookback_hours=24):
     now_sg = now_utc.astimezone(singapore_timezone)
     
     # Try to get data for a longer period than we need (36 hours instead of 24)
-    # This gives us a better chance to capture the full 24 hours we want
     extended_lookback = lookback_hours + 12
     start_time_sg = now_sg - timedelta(hours=extended_lookback)
     
@@ -251,8 +216,7 @@ def fetch_and_calculate_volatility(token, lookback_hours=24):
     start_time = start_time_sg.strftime("%Y-%m-%d %H:%M:%S")
     end_time = now_sg.strftime("%Y-%m-%d %H:%M:%S")
 
-    # Get relevant partition tables for this time range plus the previous day
-    # This ensures we get all the data even if near day boundaries
+    # Get relevant partition tables
     extra_day_start = start_time_sg - timedelta(days=1)
     partition_tables = get_partition_tables(conn, extra_day_start, now_sg)
     
@@ -270,6 +234,7 @@ def fetch_and_calculate_volatility(token, lookback_hours=24):
     
     try:
         print(f"[{token}] Executing query across {len(partition_tables)} partition tables")
+        st.info(f"Fetching 1-second level data for {token} from {len(partition_tables)} partition tables...")
         df = pd.read_sql_query(query, conn)
         print(f"[{token}] Query executed. DataFrame shape: {df.shape}")
 
@@ -282,8 +247,6 @@ def fetch_and_calculate_volatility(token, lookback_hours=24):
         
         # Work directly with the data
         df = df.set_index('timestamp').sort_index()
-        
-        # Keep all the 1-second data points for computing intraperiod volatility
         raw_price_data = df['final_price'].dropna()
         
         if raw_price_data.empty:
@@ -295,8 +258,10 @@ def fetch_and_calculate_volatility(token, lookback_hours=24):
         end_date = raw_price_data.index.max().ceil('5min')
         five_min_periods = pd.date_range(start=start_date, end=end_date, freq='5min')
         
-        # Create a DataFrame to store OHLC and volatility for each 5-minute period
-        five_min_data = pd.DataFrame(index=five_min_periods)
+        # Progress bar for volatility calculation
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        status_text.text("Calculating 5-minute volatility for each time window...")
         
         # Function to calculate volatility for a 5-minute window using 1-second data
         def calculate_intraperiod_volatility(prices):
@@ -312,9 +277,7 @@ def fetch_and_calculate_volatility(token, lookback_hours=24):
                 log_returns = np.diff(np.log(prices))
                 
                 # Seconds per year = 60 * 60 * 24 * 365 = 31,536,000
-                # If we're using 1-second data, we annualize by sqrt(31536000)
                 # Number of seconds in 5 minutes = 300
-                # Adjustment factor: We want to express the 5-min volatility as annual vol
                 annualization_factor = np.sqrt(31536000 / 300)
                 
                 # Calculate standard deviation and annualize
@@ -332,7 +295,11 @@ def fetch_and_calculate_volatility(token, lookback_hours=24):
         volatility_data = []
         ohlc_data = []
         
-        for start_time, end_time in period_boundaries:
+        for i, (start_time, end_time) in enumerate(period_boundaries):
+            # Update progress
+            progress = (i + 1) / len(period_boundaries)
+            progress_bar.progress(progress)
+            
             # Get data for this 5-minute window
             window_data = raw_price_data[(raw_price_data.index >= start_time) & 
                                         (raw_price_data.index < end_time)]
@@ -346,13 +313,21 @@ def fetch_and_calculate_volatility(token, lookback_hours=24):
                     'close': window_data.iloc[-1]
                 }
                 
-                # Calculate volatility using all 1-second points in this window
+                # Calculate volatility using all points in this window
                 vol = calculate_intraperiod_volatility(window_data.values)
                 
                 volatility_data.append((start_time, vol))
                 ohlc_data.append((start_time, ohlc))
+                
+                # Show detailed progress
+                if i % 10 == 0:
+                    status_text.text(f"Processing window {i+1}/{len(period_boundaries)}: {start_time.strftime('%Y-%m-%d %H:%M')} - {end_time.strftime('%H:%M')}")
         
-        # Create DataFrames from the collected data
+        # Clear progress indicators
+        progress_bar.empty()
+        status_text.empty()
+        
+        # Create DataFrames from collected data
         vol_df = pd.DataFrame(volatility_data, columns=['timestamp', 'realized_vol']).set_index('timestamp')
         
         # Create OHLC DataFrame
@@ -369,14 +344,10 @@ def fetch_and_calculate_volatility(token, lookback_hours=24):
         
         # Get exactly the requested number of hours worth of data
         # 24 hours = 288 five-minute intervals (24 * 12)
-        blocks_needed = lookback_hours * 12  # Number of 5-minute blocks in lookback period
+        blocks_needed = lookback_hours * 12
         
         # Take only the most recent blocks_needed points
         recent_data = result_df.tail(blocks_needed)
-        
-        # Check if we have enough data
-        if len(recent_data) < blocks_needed * 0.5:  # If we have less than 50% of expected points
-            print(f"[{token}] Warning: Only found {len(recent_data)} data points out of {blocks_needed} expected")
         
         # Classify volatility
         recent_data['vol_info'] = recent_data['realized_vol'].apply(classify_volatility)
@@ -384,7 +355,7 @@ def fetch_and_calculate_volatility(token, lookback_hours=24):
         recent_data['vol_desc'] = recent_data['vol_info'].apply(lambda x: x[2])
         
         # Flag extreme volatility events
-        recent_data['is_extreme'] = recent_data['realized_vol'] >= extreme_vol_threshold
+        recent_data['is_extreme'] = recent_data['realized_vol'] >= 1.0
         
         print(f"[{token}] Successful Volatility Calculation")
         return recent_data
@@ -392,82 +363,82 @@ def fetch_and_calculate_volatility(token, lookback_hours=24):
         st.error(f"Error processing {token}: {e}")
         print(f"[{token}] Error processing: {e}")
         return None
-    except Exception as e:
-        st.error(f"Error processing {selected_token}: {e}")
-        print(f"[{token}] Error processing: {e}")
-        return None
 
 # Process the selected token
 with st.spinner(f"Calculating volatility for {selected_token}..."):
     vol_data = fetch_and_calculate_volatility(selected_token, lookback_hours)
 
-# Create the plots
+# Create a dedicated volatility plot
 if vol_data is not None and not vol_data.empty:
-    # Create a two-part figure with price and volatility
-    fig = make_subplots(
-        rows=2, 
-        cols=1, 
-        shared_xaxes=True,
-        vertical_spacing=0.1,
-        subplot_titles=(f"{selected_token} Price (USDT)", f"{selected_token} Annualized Volatility (5min, %)"),
-        row_heights=[0.6, 0.4]
-    )
-    
-    # Add price candlestick chart
-    fig.add_trace(
-        go.Candlestick(
-            x=vol_data.index,
-            open=vol_data['open'],
-            high=vol_data['high'],
-            low=vol_data['low'],
-            close=vol_data['close'],
-            name="Price"
-        ),
-        row=1, 
-        col=1
-    )
-    
     # Convert to percentage for easier reading
     vol_data_pct = vol_data.copy()
     vol_data_pct['realized_vol'] = vol_data_pct['realized_vol'] * 100
     
+    # Get volatility metrics for chart labels
+    avg_vol = vol_data_pct['realized_vol'].mean()
+    max_vol = vol_data_pct['realized_vol'].max()
+    current_vol = vol_data_pct['realized_vol'].iloc[-1]
+    
     # Create color mapping for volatility levels
-    colors = []
+    vol_colors = []
     for val in vol_data_pct['realized_vol']:
         if pd.isna(val):
-            colors.append('rgba(100, 100, 100, 0.8)')  # Gray for missing
+            vol_colors.append('rgba(100, 100, 100, 0.8)')  # Gray for missing
         elif val < 30:  # Low volatility
-            colors.append('rgba(0, 255, 0, 0.8)')
+            vol_colors.append('rgba(0, 200, 0, 0.8)')
         elif val < 60:  # Medium volatility
-            colors.append('rgba(255, 255, 0, 0.8)')
+            vol_colors.append('rgba(255, 200, 0, 0.8)')
         elif val < 100:  # High volatility
-            colors.append('rgba(255, 165, 0, 0.8)')
+            vol_colors.append('rgba(255, 100, 0, 0.8)')
         else:  # Extreme volatility
-            colors.append('rgba(255, 0, 0, 0.8)')
+            vol_colors.append('rgba(255, 0, 0, 0.8)')
     
-    # Add volatility bar chart
-    fig.add_trace(
-        go.Bar(
-            x=vol_data_pct.index,
-            y=vol_data_pct['realized_vol'],
-            marker_color=colors,
-            name="Volatility",
-            hovertemplate="%{x}<br>Vol: %{y:.1f}%<extra></extra>"
-        ),
-        row=2, 
-        col=1
+    # Calculate minimum y-axis range to ensure visibility
+    # If max vol is very low, still show up to at least 20% for visibility
+    y_max = max(100, max_vol * 1.2)  # Ensure at least up to 100%
+    if max_vol < 20:
+        y_max = 20
+    
+    y_min = 0  # Start at zero
+    
+    # VOLATILITY PLOT (MAIN)
+    fig = go.Figure()
+    
+    # Title with key metrics
+    plot_title = (
+        f"{selected_token} Annualized Volatility (5min) - 24h<br>"
+        f"<span style='font-size: 14px; color: gray;'>Current: {current_vol:.1f}%, "
+        f"Avg: {avg_vol:.1f}%, Max: {max_vol:.1f}%</span>"
     )
     
-    # Add volatility threshold lines
+    # Create time labels for better readability
+    time_labels = vol_data_pct.index.strftime('%H:%M<br>%m/%d')
+    
+    # Add volatility line chart with color-coded markers
+    fig.add_trace(
+        go.Scatter(
+            x=vol_data_pct.index,
+            y=vol_data_pct['realized_vol'],
+            mode='lines+markers',
+            line=dict(color='rgba(100, 100, 180, 0.7)', width=3),
+            marker=dict(
+                color=vol_colors, 
+                size=8,
+                line=dict(width=1, color='rgba(0,0,0,0.5)')
+            ),
+            name="Volatility",
+            hovertemplate="<b>%{x}</b><br>Vol: %{y:.1f}%<extra></extra>"
+        )
+    )
+    
+    # Add threshold lines for volatility regimes
     fig.add_shape(
         type="line",
         x0=vol_data_pct.index.min(),
         x1=vol_data_pct.index.max(),
         y0=30,
         y1=30,
-        line=dict(color="rgba(0, 255, 0, 0.5)", width=1, dash="dash"),
-        row=2, 
-        col=1
+        line=dict(color="rgba(0, 200, 0, 0.5)", width=1.5, dash="dash"),
     )
     
     fig.add_shape(
@@ -476,9 +447,7 @@ if vol_data is not None and not vol_data.empty:
         x1=vol_data_pct.index.max(),
         y0=60,
         y1=60,
-        line=dict(color="rgba(255, 255, 0, 0.5)", width=1, dash="dash"),
-        row=2, 
-        col=1
+        line=dict(color="rgba(255, 200, 0, 0.5)", width=1.5, dash="dash"),
     )
     
     fig.add_shape(
@@ -487,9 +456,7 @@ if vol_data is not None and not vol_data.empty:
         x1=vol_data_pct.index.max(),
         y0=100,
         y1=100,
-        line=dict(color="rgba(255, 0, 0, 0.5)", width=1, dash="dash"),
-        row=2, 
-        col=1
+        line=dict(color="rgba(255, 0, 0, 0.5)", width=1.5, dash="dash"),
     )
     
     # Add annotations for the threshold lines
@@ -498,10 +465,9 @@ if vol_data is not None and not vol_data.empty:
         y=30,
         text="30% - Low",
         showarrow=False,
-        font=dict(size=10, color="green"),
+        font=dict(size=12, color="green"),
         xanchor="left",
-        row=2, 
-        col=1
+        bgcolor="rgba(255,255,255,0.7)"
     )
     
     fig.add_annotation(
@@ -509,10 +475,9 @@ if vol_data is not None and not vol_data.empty:
         y=60,
         text="60% - Medium",
         showarrow=False,
-        font=dict(size=10, color="yellow"),
+        font=dict(size=12, color="darkorange"),
         xanchor="left",
-        row=2, 
-        col=1
+        bgcolor="rgba(255,255,255,0.7)"
     )
     
     fig.add_annotation(
@@ -520,62 +485,71 @@ if vol_data is not None and not vol_data.empty:
         y=100,
         text="100% - Extreme",
         showarrow=False,
-        font=dict(size=10, color="red"),
+        font=dict(size=12, color="red"),
         xanchor="left",
-        row=2, 
-        col=1
+        bgcolor="rgba(255,255,255,0.7)"
     )
     
-    # Update layout
+    # Update layout for better readability
     fig.update_layout(
-        title=f"{selected_token} - 24 Hour Price and Volatility (5min bars, Singapore Time)",
-        xaxis_rangeslider_visible=False,
-        height=800,
-        width=1000,
+        title=dict(
+            text=plot_title,
+            font=dict(size=20)
+        ),
+        height=600,
+        margin=dict(l=20, r=20, t=80, b=20),
         showlegend=False,
         hovermode="x unified",
         xaxis=dict(
-            type="date",
-            tickformat="%H:%M\n%m/%d",
-            tickangle=-45,
-        ),
-        yaxis2=dict(
-            title="Annualized Volatility (%)",
-            side="right",
+            title="Time (Singapore)",
             showgrid=True,
+            gridcolor='rgba(200,200,200,0.3)',
+            tickvals=vol_data_pct.index[::12],  # Show every hour
+            ticktext=vol_data_pct.index[::12].strftime('%H:%M<br>%m/%d'),
+            tickangle=-45,
+            tickfont=dict(size=12),
+        ),
+        yaxis=dict(
+            title="Annualized Volatility (%)",
+            range=[y_min, y_max],  # Set fixed range for better visibility
+            showgrid=True,
+            gridcolor='rgba(200,200,200,0.3)',
             zeroline=True,
             zerolinecolor='rgba(0,0,0,0.2)',
-        )
+            titlefont=dict(size=16),
+            tickfont=dict(size=14),
+        ),
+        plot_bgcolor='rgba(250,250,250,0.9)',
+        paper_bgcolor='white',
+        font=dict(family="Arial, sans-serif", size=14, color="black"),
     )
     
     # Display the figure
     st.plotly_chart(fig, use_container_width=True)
     
-    # Display statistics
-    st.subheader(f"Volatility Statistics for {selected_token} (Last 24 Hours)")
+    # Display key statistics in a more prominent way
+    st.subheader("Volatility Statistics")
     
     # Calculate key metrics
-    avg_vol = vol_data['realized_vol'].mean() * 100
-    max_vol = vol_data['realized_vol'].max() * 100
-    min_vol = vol_data['realized_vol'].min() * 100
-    current_vol = vol_data['realized_vol'].iloc[-1] * 100
-    extreme_count = vol_data['is_extreme'].sum()
+    avg_vol = vol_data_pct['realized_vol'].mean()
+    max_vol = vol_data_pct['realized_vol'].max()
+    min_vol = vol_data_pct['realized_vol'].min()
+    current_vol = vol_data_pct['realized_vol'].iloc[-1]
+    extreme_count = vol_data_pct['is_extreme'].sum()
     
-    # Display metrics in columns
+    # Layout metrics in a clean grid
     col1, col2, col3, col4, col5 = st.columns(5)
     
-    # Function to determine color
+    # Function to get color based on volatility
     def get_vol_color(vol):
-        if pd.isna(vol):
-            return 'gray'
-        elif vol < 30:
-            return 'green'
+        if vol < 30:
+            return "green"
         elif vol < 60:
-            return 'yellow'
+            return "orange"
         elif vol < 100:
-            return 'orange'
+            return "darkorange"
         else:
-            return 'red'
+            return "red"
             
     col1.metric(
         "Current Vol", 
@@ -588,110 +562,95 @@ if vol_data is not None and not vol_data.empty:
     col4.metric("Minimum Vol", f"{min_vol:.1f}%")
     col5.metric("Extreme Events", f"{extreme_count}")
     
-    # Display volatility regime distribution
-    st.subheader("Volatility Regime Distribution")
+    # Show a table of the highest volatility periods
+    st.subheader("Highest Volatility Periods")
     
-    # Count occurrence of each regime
-    regime_counts = vol_data['vol_regime'].value_counts()
+    # Sort by volatility (highest first) and take top 10
+    high_vol_periods = vol_data_pct.sort_values(by='realized_vol', ascending=False).head(10).copy()
+    high_vol_periods['Time'] = high_vol_periods.index.strftime('%Y-%m-%d %H:%M')
+    high_vol_periods['Volatility (%)'] = high_vol_periods['realized_vol'].round(1)
+    high_vol_periods['Regime'] = high_vol_periods['vol_desc']
     
-    # Calculate percentages
-    total_points = len(vol_data)
-    regime_pct = {regime: count/total_points*100 for regime, count in regime_counts.items()}
+    # Select columns for display
+    display_df = high_vol_periods[['Time', 'Volatility (%)', 'Regime']].reset_index(drop=True)
     
-    # Create ordered dict for consistent display
-    ordered_regimes = ['LOW', 'MEDIUM', 'HIGH', 'EXTREME', 'UNKNOWN']
-    regime_colors = ['rgba(0,255,0,0.8)', 'rgba(255,255,0,0.8)', 'rgba(255,165,0,0.8)', 'rgba(255,0,0,0.8)', 'rgba(100,100,100,0.8)']
+    # Add row numbering
+    display_df.index = display_df.index + 1
     
-    # Prepare data for pie chart
-    pie_labels = []
-    pie_values = []
-    pie_colors = []
+    # Display the table
+    st.dataframe(display_df, height=400, use_container_width=True)
     
-    for regime, color in zip(ordered_regimes, regime_colors):
-        if regime in regime_counts:
-            pie_labels.append(f"{regime} ({regime_pct.get(regime, 0):.1f}%)")
-            pie_values.append(regime_counts.get(regime, 0))
-            pie_colors.append(color)
+    # Show a 5-minute OHLC chart of prices (cleaner than candlestick)
+    st.subheader(f"{selected_token} Price (Last 24 Hours)")
     
-    # Create pie chart
-    fig_pie = go.Figure(
-        data=[go.Pie(
-            labels=pie_labels, 
-            values=pie_values, 
-            marker=dict(colors=pie_colors),
-            textinfo='label+percent',
-            hole=.3
-        )]
+    # Create price chart
+    price_fig = go.Figure()
+    
+    # Add price line with high/low range as a shaded area
+    price_fig.add_trace(
+        go.Scatter(
+            x=vol_data.index,
+            y=vol_data['high'],
+            mode='lines',
+            line=dict(width=0),
+            showlegend=False,
+            hoverinfo='skip',
+            name="High"
+        )
     )
     
-    fig_pie.update_layout(
+    price_fig.add_trace(
+        go.Scatter(
+            x=vol_data.index,
+            y=vol_data['low'],
+            mode='lines',
+            line=dict(width=0),
+            fill='tonexty',
+            fillcolor='rgba(0, 100, 180, 0.2)',
+            showlegend=False,
+            hoverinfo='skip',
+            name="Low"
+        )
+    )
+    
+    price_fig.add_trace(
+        go.Scatter(
+            x=vol_data.index,
+            y=vol_data['close'],
+            mode='lines',
+            name="Price",
+            line=dict(color='rgba(0, 100, 180, 1)', width=2),
+            hovertemplate="<b>%{x}</b><br>Price: %{y:,.2f} USDT<extra></extra>"
+        )
+    )
+    
+    # Update layout
+    price_fig.update_layout(
         height=400,
-        width=600
+        margin=dict(l=20, r=20, t=50, b=20),
+        showlegend=False,
+        hovermode="x unified",
+        xaxis=dict(
+            title="Time (Singapore)",
+            showgrid=True,
+            gridcolor='rgba(200,200,200,0.3)',
+            tickvals=vol_data.index[::12],  # Show every hour
+            ticktext=vol_data.index[::12].strftime('%H:%M<br>%m/%d'),
+            tickangle=-45,
+        ),
+        yaxis=dict(
+            title="Price (USDT)",
+            showgrid=True,
+            gridcolor='rgba(200,200,200,0.3)',
+            zeroline=True,
+            zerolinecolor='rgba(0,0,0,0.2)',
+        ),
+        plot_bgcolor='rgba(250,250,250,0.9)',
+        paper_bgcolor='white',
     )
     
-    # Display side-by-side with some additional stats
-    col1, col2 = st.columns([1, 1])
-    
-    with col1:
-        st.plotly_chart(fig_pie, use_container_width=True)
-    
-    with col2:
-        # Display additional metrics
-        st.subheader("Daily Volatility Analysis")
-        
-        # Calculate daily equivalent volatility
-        daily_vol = avg_vol / np.sqrt(365)
-        
-        # Expected daily range based on volatility (assuming normal distribution)
-        # 68% of the time, price should move within ±1 standard deviation
-        one_day_move_68pct = daily_vol
-        # 95% of the time, price should move within ±2 standard deviations
-        one_day_move_95pct = daily_vol * 2
-        # 99.7% of the time, price should move within ±3 standard deviations
-        one_day_move_99pct = daily_vol * 3
-        
-        st.markdown(f"**Daily Volatility (24h Average):** {daily_vol:.2f}%")
-        st.markdown("**Expected Daily Price Movement:**")
-        st.markdown(f"- 68% of days: ±{one_day_move_68pct:.2f}%")
-        st.markdown(f"- 95% of days: ±{one_day_move_95pct:.2f}%")
-        st.markdown(f"- 99.7% of days: ±{one_day_move_99pct:.2f}%")
-        
-        # Calculate time spent in each volatility regime
-        time_in_regime = {
-            regime: count/total_points*24 for regime, count in regime_counts.items()
-        }
-        
-        st.markdown("**Hours per Day in Each Volatility Regime:**")
-        for regime in ordered_regimes:
-            if regime in time_in_regime:
-                color = get_vol_color(100 if regime == "EXTREME" else 
-                                     50 if regime == "MEDIUM" else 
-                                     80 if regime == "HIGH" else 
-                                     20 if regime == "LOW" else 0)
-                st.markdown(f"- <span style='color:{color}'>{regime}</span>: {time_in_regime.get(regime, 0):.1f} hours", unsafe_allow_html=True)
-
-    # Show extreme volatility events if any
-    if extreme_count > 0:
-        st.subheader("Extreme Volatility Events")
-        extreme_events = vol_data[vol_data['is_extreme']].copy()
-        extreme_events['realized_vol_pct'] = extreme_events['realized_vol'] * 100
-        extreme_events['time'] = extreme_events.index.strftime('%Y-%m-%d %H:%M')
-        
-        # Sort by volatility (highest first)
-        extreme_events = extreme_events.sort_values(by='realized_vol', ascending=False)
-        
-        # Create dataframe for display
-        display_df = pd.DataFrame({
-            'Time (SG)': extreme_events['time'],
-            'Volatility (%)': extreme_events['realized_vol_pct'].round(1),
-            'Price': extreme_events['close'].round(2)
-        })
-        
-        # Reset index
-        display_df = display_df.reset_index(drop=True)
-        
-        # Display the table
-        st.dataframe(display_df, use_container_width=True)
+    # Display the price chart
+    st.plotly_chart(price_fig, use_container_width=True)
     
     with st.expander("Understanding Volatility Metrics", expanded=False):
         st.markdown("""
