@@ -6,7 +6,6 @@ from datetime import datetime, timedelta
 import pytz
 from sqlalchemy import create_engine, text
 import matplotlib.pyplot as plt
-import threading
 import time
 
 # Page configuration
@@ -961,40 +960,24 @@ def render_dashboard(pair_name):
     remaining_seconds = time_until_next_update()
     if remaining_seconds is not None:
         minutes, seconds = divmod(int(remaining_seconds), 60)
+        
+        # Display current Singapore time and next update time
+        now_sg = get_sg_time()
+        next_update_time = now_sg + timedelta(seconds=remaining_seconds)
+        
         st.markdown(f"""
-                <div id="countdown" class="update-timer">
-            Next auto-update in: {minutes:02d}:{seconds:02d}
+        <div class="update-timer">
+            <div>Current time (SGT): {now_sg.strftime('%H:%M:%S')}</div>
+            <div>Next auto-update in: {minutes:02d}:{seconds:02d}</div>
+            <div>Next update at: {next_update_time.strftime('%H:%M:%S')}</div>
         </div>
-        <script>
-            // JavaScript countdown implementation
-            function startTimer(duration, display) {{
-                var timer = duration, minutes, seconds;
-                var interval = setInterval(function () {{
-                    minutes = parseInt(timer / 60, 10);
-                    seconds = parseInt(timer % 60, 10);
-                    
-                    minutes = minutes < 10 ? "0" + minutes : minutes;
-                    seconds = seconds < 10 ? "0" + seconds : seconds;
-                    
-                    display.textContent = "Next auto-update in: " + minutes + ":" + seconds;
-                    
-                    if (--timer < 0) {{
-                        clearInterval(interval);
-                        window.location.reload();  // Refresh the page when timer hits zero
-                    }}
-                }}, 1000);
-            }}
-            
-            // Start the timer as soon as the element is available
-            (function() {{
-                var countdownElement = document.getElementById('countdown');
-                if (countdownElement) {{
-                    var initialTime = {int(remaining_seconds)};
-                    startTimer(initialTime, countdownElement);
-                }}
-            }})();
-        </script>
         """, unsafe_allow_html=True)
+        
+        # Add auto-refresh meta tag if less than 10 seconds remaining
+        if remaining_seconds < 10 and remaining_seconds > 0:
+            # This will refresh the page after the specified seconds
+            refresh_in = max(1, int(remaining_seconds))
+            st.markdown(f'<meta http-equiv="refresh" content="{refresh_in}">', unsafe_allow_html=True)
     
     # Data refreshing controls
     col1, col2, col3 = st.columns([1, 1, 1])
