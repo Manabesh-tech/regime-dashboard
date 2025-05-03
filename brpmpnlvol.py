@@ -1599,15 +1599,15 @@ def render_table_dashboard():
 def handle_pair_selection():
     """Handle pair selection from the table."""
     # Check for form submission via query params
-    query_params = st.experimental_get_query_params()
+    query_params = st.query_params
     if 'selected_pair' in query_params:
-        selected_pair = query_params['selected_pair'][0]
+        selected_pair = query_params['selected_pair']
         st.session_state.current_pair = selected_pair
         st.session_state.view_mode = 'detail'
         # Update page for selected pair
         update_pair_data(selected_pair)
         # Clear query params
-        st.experimental_set_query_params()
+        st.query_params.clear()
         st.rerun()
 
 # Main application
