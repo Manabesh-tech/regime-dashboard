@@ -1493,6 +1493,53 @@ def render_table_dashboard():
     # Auto-update timer
     render_countdown_timer()
     
+    # Generate table data first so we can get filter options
+    table_df = generate_pairs_table_data()
+    
+    # Add filtering options
+    st.markdown("### Filter Options")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        # Filter by pair type
+        pair_type_filter = st.selectbox(
+            "Pair Type",
+            ["All", "Major Only", "Alt Only"]
+        )
+    
+    with col2:
+        # Filter by tier
+        tier_filter = st.selectbox(
+            "Adjustment Tier",
+            ["All", "Tier 0 (Normal)", "Tier 1", "Tier 2"]
+        )
+    
+    with col3:
+        # Search by pair name
+        search_term = st.text_input("Search Pair Name")
+    
+    # Apply filters to the table data
+    filtered_df = table_df.copy()
+    
+    # Apply pair type filter
+    if pair_type_filter == "Major Only":
+        filtered_df = filtered_df[filtered_df['pair_type'] == "Major"]
+    elif pair_type_filter == "Alt Only":
+        filtered_df = filtered_df[filtered_df['pair_type'] == "Alt"]
+    
+    # Apply tier filter
+    if tier_filter == "Tier 0 (Normal)":
+        filtered_df = filtered_df[filtered_df['overall_tier'] == 0]
+    elif tier_filter == "Tier 1":
+        filtered_df = filtered_df[filtered_df['overall_tier'] == 1]
+    elif tier_filter == "Tier 2":
+        filtered_df = filtered_df[filtered_df['overall_tier'] == 2]
+    
+    # Apply search filter
+    if search_term:
+        filtered_df = filtered_df[filtered_df['pair_name'].str.contains(search_term, case=False)]
+    
     # Update buttons
     col1, col2, col3, col4 = st.columns(4)
     
@@ -1539,52 +1586,12 @@ def render_table_dashboard():
         # Clear status after displaying
         st.session_state.update_status = ""
     
-    # Generate table data
-    table_df = generate_pairs_table_data()
-    
-    # Add filtering options
-    st.markdown("### Filter Options")
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        # Filter by pair type
-        pair_type_filter = st.selectbox(
-            "Pair Type",
-            ["All", "Major Only", "Alt Only"]
-        )
-        
-        if pair_type_filter == "Major Only":
-            table_df = table_df[table_df['pair_type'] == "Major"]
-        elif pair_type_filter == "Alt Only":
-            table_df = table_df[table_df['pair_type'] == "Alt"]
-    
-    with col2:
-        # Filter by tier
-        tier_filter = st.selectbox(
-            "Adjustment Tier",
-            ["All", "Tier 0 (Normal)", "Tier 1", "Tier 2"]
-        )
-        
-        if tier_filter == "Tier 0 (Normal)":
-            table_df = table_df[table_df['overall_tier'] == 0]
-        elif tier_filter == "Tier 1":
-            table_df = table_df[table_df['overall_tier'] == 1]
-        elif tier_filter == "Tier 2":
-            table_df = table_df[table_df['overall_tier'] == 2]
-    
-    with col3:
-        # Search by pair name
-        search_term = st.text_input("Search Pair Name")
-        if search_term:
-            table_df = table_df[table_df['pair_name'].str.contains(search_term, case=False)]
-    
     # Display the table
     st.markdown("### All Trading Pairs")
     st.markdown("Click on any row to view detailed information")
     
-    if not table_df.empty:
-        render_clickable_table(table_df)
+    if not filtered_df.empty:
+        render_clickable_table(filtered_df)
     else:
         st.warning("No pairs match the selected filters.")
 
