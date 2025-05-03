@@ -946,9 +946,38 @@ def render_dashboard(pair_name):
     if remaining_seconds is not None:
         minutes, seconds = divmod(int(remaining_seconds), 60)
         st.markdown(f"""
-        <div class="update-timer">
+        <div id="countdown" class="update-timer">
             Next auto-update in: {minutes:02d}:{seconds:02d}
         </div>
+        <script>
+            // JavaScript countdown implementation
+            function startTimer(duration, display) {
+                var timer = duration, minutes, seconds;
+                var interval = setInterval(function () {
+                    minutes = parseInt(timer / 60, 10);
+                    seconds = parseInt(timer % 60, 10);
+                    
+                    minutes = minutes < 10 ? "0" + minutes : minutes;
+                    seconds = seconds < 10 ? "0" + seconds : seconds;
+                    
+                    display.textContent = "Next auto-update in: " + minutes + ":" + seconds;
+                    
+                    if (--timer < 0) {
+                        clearInterval(interval);
+                        window.location.reload();  // Refresh the page when timer hits zero
+                    }
+                }, 1000);
+            }
+            
+            // Start the timer as soon as the element is available
+            (function() {
+                var countdownElement = document.getElementById('countdown');
+                if (countdownElement) {
+                    var initialTime = {int(remaining_seconds)};
+                    startTimer(initialTime, countdownElement);
+                }
+            })();
+        </script>
         """, unsafe_allow_html=True)
     
     # Data refreshing controls
