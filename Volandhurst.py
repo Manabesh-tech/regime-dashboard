@@ -58,7 +58,6 @@ st.subheader("All Trading Pairs - Last 12 Hours (Singapore Time)")
 # Define parameters for the 5-minute timeframe
 timeframe = "5min"
 lookback_hours = 12  # Fixed at 12 hours
-rolling_window = 10  # Reduced window size for 5min data to improve calculation speed
 expected_points = 144  # Expected data points per pair over 12 hours (12 hours * 12 5-min periods per hour)
 singapore_timezone = pytz.timezone('Asia/Singapore')
 
@@ -70,7 +69,7 @@ st.write(f"Current Singapore Time: {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
 # Set extreme volatility threshold
 extreme_vol_threshold = 1.0  # 100% annualized volatility
 
-# Function to get partition tables based on date range - OPTIMIZED to query fewer tables
+# Function to get partition tables based on date range
 def get_partition_tables(conn, start_date, end_date):
     """
     Get list of partition tables that need to be queried based on date range.
@@ -134,8 +133,7 @@ def build_query_for_partition_tables(tables, pair_name, start_time, end_time):
     union_parts = []
     
     for table in tables:
-        # Query for Surf data (source_type = 0)
-        # Use a simpler, more direct query to avoid timezone complications
+        # Query for Surf data (source_type = 0) with direct interval addition
         query = f"""
         SELECT 
             pair_name,
@@ -176,7 +174,7 @@ def fetch_trading_pairs():
 # Get all available tokens from DB by fetching active trading pairs
 all_tokens = fetch_trading_pairs()
 
-# UI Controls - OPTIMIZED layout for better user experience
+# UI Controls
 col1, col2 = st.columns([3, 1])
 
 with col1:
@@ -202,29 +200,27 @@ if not selected_tokens:
     st.warning("Please select at least one token")
     st.stop()
 
-# Function to calculate volatility metrics - OPTIMIZED calculation
-def calculate_volatility_metrics(price_series):
-    if price_series is None or len(price_series) < 2:
-        return {
-            'realized_vol': np.nan
-        }
+# Function to calculate volatility metrics
+def calculate_volatility_metrics(high, low):
+    if high is None or low is None or pd.isna(high) or pd.isna(low) or high <= 0 or low <= 0:
+        return np.nan
     
     try:
-        # Calculate log returns
-        log_returns = np.diff(np.log(price_series))
+        # Calculate price range within this 5-minute period
+        price_range = high - low
+        avg_price = (high + low) / 2
         
-        # Realized volatility - for 5min data, we need to adjust the annualization factor
-        # 5min = 12 periods per hour * 24 hours * 365 days = 105120 periods per year
-        realized_vol = np.std(log_returns) * np.sqrt(105120)  
+        # Normalize by average price to get percentage volatility
+        normalized_range = price_range / avg_price if avg_price > 0 else 0
         
-        return {
-            'realized_vol': realized_vol
-        }
+        # Annualize: multiply by sqrt(trading days in a year / periods in a day)
+        # Trading days: ~252, Periods in a day: 24 hours * 12 periods/hour = 288
+        annualized_vol = normalized_range * np.sqrt(252 * 288)
+        
+        return annualized_vol
     except Exception as e:
         print(f"Error in volatility calculation: {e}")
-        return {
-            'realized_vol': np.nan
-        }
+        return np.nan
 
 # Volatility classification function
 def classify_volatility(vol):
@@ -271,9 +267,8 @@ def fetch_and_calculate_volatility(token):
     now_utc = datetime.now(pytz.utc)
     now_sg = now_utc.astimezone(singapore_timezone)
     
-    # Try to get data for a longer period than we need (24 hours instead of 12)
-    # This gives us a better chance to capture the full 12 hours we want
-    extended_lookback = 24  # Use 24 hours to ensure we get 12 hours
+    # Request 15 hours to ensure we get at least 12 hours (25% extra)
+    extended_lookback = 15
     start_time_sg = now_sg - timedelta(hours=extended_lookback)
     
     # Convert for database query
@@ -324,9 +319,10 @@ def fetch_and_calculate_volatility(token):
             print(f"[{token}] No 5-min data after resampling.")
             return None
         
-        # Calculate rolling volatility on 5-minute close prices
-        five_min_ohlc['realized_vol'] = five_min_ohlc['close'].rolling(window=rolling_window).apply(
-            lambda x: calculate_volatility_metrics(x)['realized_vol']
+        # Calculate volatility for each 5-minute period using the OHLC data
+        five_min_ohlc['realized_vol'] = five_min_ohlc.apply(
+            lambda row: calculate_volatility_metrics(row['high'], row['low']), 
+            axis=1
         )
         
         # Get exactly the requested number of hours worth of data
@@ -337,7 +333,7 @@ def fetch_and_calculate_volatility(token):
         recent_data = five_min_ohlc.tail(blocks_needed)
         
         # Check if we have enough data
-        if len(recent_data) < blocks_needed * 0.5:  # If we have less than 50% of expected points
+        if len(recent_data) < blocks_needed * 0.8:  # If we have less than 80% of expected points
             print(f"[{token}] Warning: Only found {len(recent_data)} data points out of {blocks_needed} expected")
         
         last_period_vol = recent_data['realized_vol']
@@ -398,7 +394,7 @@ for i in range(0, len(selected_tokens), batch_size):
     progress_bar.progress(i / len(selected_tokens) if len(selected_tokens) > 0 else 0)
     status_text.text(f"Processing batch {i//batch_size + 1}/{(len(selected_tokens)-1)//batch_size + 1} ({len(batch)} tokens)")
     
-    # Process tokens in current batch (could be parallelized in a future version)
+    # Process tokens in current batch
     for token in batch:
         try:
             result = fetch_and_calculate_volatility(token)
@@ -412,7 +408,7 @@ for i in range(0, len(selected_tokens), batch_size):
 progress_bar.progress(1.0)
 status_text.text(f"Processed {len(token_results)}/{len(selected_tokens)} tokens successfully")
 
-# Create table for display - OPTIMIZED display for 5min data
+# Create table for display
 if token_results:
     # Create table data
     table_data = {}
@@ -458,7 +454,7 @@ if token_results:
     st.markdown("### Color Legend: <span style='color:green'>Low Vol</span>, <span style='color:#aaaa00'>Medium Vol</span>, <span style='color:orange'>High Vol</span>, <span style='color:red'>Extreme Vol</span>", unsafe_allow_html=True)
     st.markdown("Values shown as annualized volatility percentage")
     
-    # OPTIMIZATION: Set a maximum height for the table to avoid overwhelming the page
+    # Set a maximum height for the table
     max_height = min(700, 100 + 20 * len(ordered_times))  # Base height + rows
     st.dataframe(styled_table, height=max_height, use_container_width=True)
     
@@ -697,8 +693,8 @@ with st.expander("Understanding the Volatility Table", expanded=False):
     These are specific 5-minute periods where a token's annualized volatility exceeded 100%.
     
     **Technical details:**
-    - Volatility is calculated as the standard deviation of log returns, annualized to represent the expected price variation over a year
+    - Volatility is calculated using high-low price range within each 5-minute period
     - Values shown are in percentage (e.g., 50.0 means 50% annualized volatility)
-    - The calculation uses a rolling window of 10 price points for 5-minute data (versus 20 for 30-minute data)
+    - The volatility is annualized to represent the expected price variation over a year
     - Missing values (light gray cells) indicate insufficient data for calculation
     """)
