@@ -646,7 +646,7 @@ def main():
     try:
         available_pairs = get_available_pairs()
     except:
-        available_pairs = ["BTC", "SOL", "ETH", "DOGE", "XRP"]
+        available_pairs = ["BTC", "SOL", "ETH", "DOGE", "XRP", "PNUT","SUI"]
     
     # Pair selection
     col1, col2 = st.columns([2, 1])
