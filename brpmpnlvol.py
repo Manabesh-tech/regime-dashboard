@@ -134,6 +134,14 @@ st.markdown("""
         text-align: center;
         font-weight: bold;
     }
+    .auto-refresh-note {
+        font-size: 12px;
+        color: #666;
+        font-style: italic;
+    }
+    .stProgress > div > div {
+        transition: width 1s;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -160,9 +168,12 @@ def init_session_state():
     if 'auto_update_enabled' not in st.session_state:
         st.session_state.auto_update_enabled = True
         
-    # Add a force refresh counter to ensure timer updates
+    # Add refresh counters to assist with forcing updates
     if 'refresh_counter' not in st.session_state:
         st.session_state.refresh_counter = 0
+        
+    if 'last_mini_refresh' not in st.session_state:
+        st.session_state.last_mini_refresh = time.time()
 
     # Add view mode: 'table' or 'detail'
     if 'view_mode' not in st.session_state:
@@ -204,9 +215,6 @@ def init_session_state():
     if 'update_status' not in st.session_state:
         st.session_state.update_status = ""
         
-    if 'last_timer_check' not in st.session_state:
-        st.session_state.last_timer_check = get_sg_time()
-        
     # Add auto-refresh time tracking
     if 'next_refresh_time' not in st.session_state:
         st.session_state.next_refresh_time = get_sg_time() + timedelta(minutes=5)
@@ -219,6 +227,12 @@ def get_sg_time():
     now_utc = datetime.now(pytz.utc)
     now_sg = now_utc.astimezone(SG_TZ)
     return now_sg
+
+# Function to get cache key based on time window
+def get_cache_key():
+    """Generate a cache key that changes every minute to help with cache invalidation."""
+    now = get_sg_time()
+    return f"{now.hour}_{now.minute}"
 
 # Check if daily reset is needed
 def check_daily_reset():
@@ -234,28 +248,94 @@ def check_daily_reset():
         return True
     return False
 
-# Check if auto-update is needed - IMPROVED version that's more reliable
+# Improved auto-update check
 def check_auto_update():
+    """Check if it's time for an auto-update based on next_refresh_time."""
     if not st.session_state.auto_update_enabled:
         return False
         
     now = get_sg_time()
+    next_refresh = st.session_state.next_refresh_time
+    
+    # Ensure timezone awareness
+    if next_refresh.tzinfo is None:
+        next_refresh = pytz.utc.localize(next_refresh).astimezone(SG_TZ)
     
     # Check if it's time for a refresh
-    if now >= st.session_state.next_refresh_time:
-        # Schedule the next refresh
+    if now >= next_refresh:
+        # Update the next refresh time
         st.session_state.next_refresh_time = now + timedelta(minutes=5)
         st.session_state.last_auto_update = now
         return True
     
     return False
 
-# Setup auto-refresh function - IMPROVED version
+# Dynamic countdown timer that visually updates
+def render_countdown_timer():
+    """Create a dynamic countdown timer that visually updates."""
+    if not st.session_state.auto_update_enabled:
+        return
+    
+    # Create containers for timer components
+    time_display = st.container()
+    progress_bar = st.container()
+    countdown_display = st.empty()
+    
+    # Get current and next update times
+    now = get_sg_time()
+    next_refresh = st.session_state.next_refresh_time
+    
+    # Ensure timezone awareness
+    if next_refresh.tzinfo is None:
+        next_refresh = pytz.utc.localize(next_refresh).astimezone(SG_TZ)
+    
+    # Calculate remaining time
+    time_diff = next_refresh - now
+    remaining_seconds = max(0, time_diff.total_seconds())
+    minutes, seconds = divmod(int(remaining_seconds), 60)
+    
+    # Display time information
+    with time_display:
+        col1, col2 = st.columns(2)
+        with col1:
+            st.info(f"**Current time (SGT):** {now.strftime('%H:%M:%S')}")
+        with col2:
+            st.info(f"**Next update at:** {next_refresh.strftime('%H:%M:%S')}")
+    
+    # Display progress bar
+    with progress_bar:
+        if remaining_seconds > 0:
+            progress_value = 1 - (remaining_seconds / 300)  # Calculate percentage of time elapsed
+            st.progress(progress_value)
+        else:
+            st.progress(1.0)
+    
+    # Display countdown
+    countdown_display.markdown(f"**Time remaining:** {minutes:02d}:{seconds:02d}")
+    st.markdown("<p class='auto-refresh-note'>The countdown updates every few seconds</p>", unsafe_allow_html=True)
+    
+    # Force mini-refreshes to update the timer display
+    current_time = time.time()
+    if 'last_mini_refresh' not in st.session_state:
+        st.session_state.last_mini_refresh = current_time
+    
+    # Update every 2 seconds
+    if current_time - st.session_state.last_mini_refresh >= 2:
+        st.session_state.last_mini_refresh = current_time
+        time.sleep(0.1)  # Short delay
+        st.experimental_rerun()
+    
+    # If time's up, trigger data refresh
+    if remaining_seconds <= 1:
+        st.session_state.refresh_counter += 1
+        st.experimental_rerun()
+
+# Setup auto-refresh function
 def setup_auto_refresh():
-    """Setup automated page refresh using a more reliable approach."""
+    """Setup automated page refresh with improved reliability."""
     # Check if auto-update is needed
     if check_auto_update():
-        st.session_state.refresh_counter += 1
+        now = get_sg_time()
         
         if st.session_state.view_mode == 'table':
             # Update logic for table view
@@ -275,21 +355,20 @@ def setup_auto_refresh():
                     pairs_to_update = major_pairs[:max_pairs_to_update]
                 
                 batch_update_pairs(pairs_to_update)
-                st.session_state.update_status = f"Auto-updated {len(pairs_to_update)} pairs at {get_sg_time().strftime('%H:%M:%S')}. Full update recommended."
+                st.session_state.update_status = f"🔄 Auto-updated {len(pairs_to_update)} pairs at {now.strftime('%H:%M:%S')}. Full update recommended."
             else:
                 batch_update_pairs(available_pairs)
-                st.session_state.update_status = f"Auto-updated all {len(available_pairs)} pairs at {get_sg_time().strftime('%H:%M:%S')}."
+                st.session_state.update_status = f"🔄 Auto-updated all {len(available_pairs)} pairs at {now.strftime('%H:%M:%S')}."
         else:
             # Update current pair in detail view
             current_pair = st.session_state.current_pair
             if current_pair:
                 batch_update_pairs([current_pair])
-                st.session_state.update_status = f"Auto-updated {current_pair} at {get_sg_time().strftime('%H:%M:%S')}."
+                st.session_state.update_status = f"🔄 Auto-updated {current_pair} at {now.strftime('%H:%M:%S')}."
         
-        # Force a page refresh to show updated data
         st.experimental_rerun()
 
-# Database connection functions - with optimized caching to improve performance
+# Database connection functions - with optimized caching
 @st.cache_resource(ttl=3600)  # Cache for 1 hour
 def init_connection():
     """Initialize database connection using Streamlit secrets."""
@@ -304,7 +383,7 @@ def init_connection():
         return engine
     except Exception as e:
         st.sidebar.error(f"Database connection error: {e}")
-        # Fall back to direct connection parameters as provided in volatility plot code
+        # Fall back to direct connection parameters
         try:
             db_params = {
                 'host': 'aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com',
@@ -320,7 +399,7 @@ def init_connection():
             st.error(f"Alternative connection failed: {e2}")
             return None
 
-# Fetch available trading pairs - cache the results for a shorter time to ensure freshness
+# Fetch available trading pairs with shorter caching
 @st.cache_data(ttl=60)  # Cache for just 1 minute to ensure fresh data
 def fetch_pairs():
     """Fetch all active trading pairs from the database."""
@@ -346,10 +425,10 @@ def fetch_pairs():
         st.error(f"Error fetching pairs: {e}")
         return []
 
-# Fetch current parameters for multiple pairs at once - reduced cache time
+# Fetch current parameters for multiple pairs with shorter caching
 @st.cache_data(ttl=60)  # Cache for 1 minute only
-def fetch_current_parameters_batch(pair_names):
-    """Fetch current parameters for multiple pairs from the database."""
+def fetch_current_parameters_batch(pair_names, _cache_key=None):
+    """Fetch current parameters for multiple pairs with cache busting."""
     engine = init_connection()
     if not engine:
         st.error("Failed to connect to database. Check your connection settings.")
@@ -405,8 +484,8 @@ def init_pairs_batch(pair_names):
     if 'pair_data' not in st.session_state:
         st.session_state.pair_data = {}
     
-    # Fetch parameters for all pairs at once
-    params_batch = fetch_current_parameters_batch(pair_names)
+    # Fetch parameters for all pairs at once with cache busting
+    params_batch = fetch_current_parameters_batch(pair_names, _cache_key=get_cache_key())
     
     for pair_name in pair_names:
         if pair_name not in st.session_state.pair_data:
@@ -452,8 +531,8 @@ def init_pairs_batch(pair_names):
 
 # Optimized volatility calculation with shorter caching
 @st.cache_data(ttl=60)  # Cache for just 1 minute to ensure fresh data
-def calculate_volatility(pair_name, hours=24):
-    """Calculate and return the volatility data for a pair."""
+def calculate_volatility(pair_name, hours=24, _cache_key=None):
+    """Calculate and return the volatility data for a pair with cache busting."""
     engine = init_connection()
     if not engine:
         st.error("Failed to connect to database. Check your connection settings.")
@@ -520,7 +599,7 @@ def calculate_volatility(pair_name, hours=24):
                 start_str = start_time_sg.strftime('%Y-%m-%d %H:%M:%S')
                 end_str = now_sg.strftime('%Y-%m-%d %H:%M:%S')
                 
-                # Add 8 hours to convert to Singapore time - copying the exact approach from voltimeplot.py
+                # Add 8 hours to convert to Singapore time
                 query_part = f"""
                 SELECT 
                     pair_name,
@@ -599,8 +678,8 @@ def calculate_volatility(pair_name, hours=24):
 
 # Optimized PnL calculation with shorter caching
 @st.cache_data(ttl=60)  # Cache for just 1 minute to ensure fresh data
-def calculate_pnl(pair_name, hours=24):
-    """Calculate PnL for a specific pair for the last specified hours."""
+def calculate_pnl(pair_name, hours=24, _cache_key=None):
+    """Calculate PnL for a specific pair with cache busting."""
     engine = init_connection()
     if not engine:
         st.error("Failed to connect to database. Check your connection settings.")
@@ -667,11 +746,14 @@ def batch_update_pairs(pair_names):
     # Get current time
     current_time = get_sg_time()
     
+    # Generate cache key for this update
+    cache_key = get_cache_key()
+    
     # Process all pairs
     with st.spinner(f"Updating {len(pair_names)} pairs..."):
         for pair_name in pair_names:
-            # Calculate volatility
-            vol_df, current_vol, daily_avg = calculate_volatility(pair_name)
+            # Calculate volatility with cache busting
+            vol_df, current_vol, daily_avg = calculate_volatility(pair_name, _cache_key=cache_key)
             
             # Update volatility information
             if vol_df is not None and current_vol is not None and daily_avg is not None:
@@ -707,8 +789,8 @@ def batch_update_pairs(pair_names):
                         reason
                     ))
             
-            # Calculate PnL
-            pnl_df, period_pnl = calculate_pnl(pair_name)
+            # Calculate PnL with cache busting
+            pnl_df, period_pnl = calculate_pnl(pair_name, _cache_key=cache_key)
             
             # Update PnL information
             if pnl_df is not None:
@@ -852,8 +934,8 @@ def create_volatility_plot(pair_name):
     if pair_name not in st.session_state.pair_data:
         return None
     
-    # Get volatility data
-    vol_df, current_vol, daily_avg = calculate_volatility(pair_name)
+    # Get volatility data with cache busting
+    vol_df, current_vol, daily_avg = calculate_volatility(pair_name, _cache_key=get_cache_key())
     
     if vol_df is None:
         return None
@@ -930,8 +1012,8 @@ def create_pnl_plot(pair_name):
     if pair_name not in st.session_state.pair_data:
         return None
     
-    # Get PnL data
-    pnl_df, _ = calculate_pnl(pair_name)
+    # Get PnL data with cache busting
+    pnl_df, _ = calculate_pnl(pair_name, _cache_key=get_cache_key())
     
     if pnl_df is None or pnl_df.empty:
         return None
@@ -1036,51 +1118,10 @@ def create_parameter_history_plot(pair_name):
     
     return br_fig, pm_fig
 
-# IMPROVED TIMER: Render a more reliable auto-refresh timer
-def render_countdown_timer():
-    """Render a reliable auto-refresh timer using Streamlit's native features."""
-    if not st.session_state.auto_update_enabled:
-        return
-    
-    # Calculate time until next update
-    now = get_sg_time()
-    next_update_time = st.session_state.next_refresh_time
-    
-    # Ensure next_update_time has timezone info
-    if next_update_time.tzinfo is None:
-        next_update_time = pytz.utc.localize(next_update_time).astimezone(SG_TZ)
-    
-    # Calculate remaining time
-    time_diff = next_update_time - now
-    remaining_seconds = max(0, time_diff.total_seconds())
-    
-    # Calculate minutes and seconds for display
-    minutes, seconds = divmod(int(remaining_seconds), 60)
-    
-    # Create the timer display
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.info(f"**Current time (SGT):** {now.strftime('%Y-%m-%d %H:%M:%S')}")
-        
-    with col2:
-        st.info(f"**Next update in:** {minutes:02d}:{seconds:02d} (at {next_update_time.strftime('%H:%M:%S')})")
-    
-    # Use a progress bar to show countdown
-    if remaining_seconds > 0:
-        progress_value = 1 - (remaining_seconds / 300)  # Calculate percentage of time elapsed
-        st.progress(progress_value)
-    else:
-        st.progress(1.0)
-        # If time's up, trigger a refresh
-        st.session_state.refresh_counter += 1
-        time.sleep(1)  # Small delay before rerun
-        st.experimental_rerun()
-
 # Optimized function to generate pairs table data
 @st.cache_data(ttl=30)  # Short cache to ensure UI responsiveness
-def generate_pairs_table_data(filter_type=None, tier_filter=None, search_term=None):
-    """Generate data for the pairs table with filtering."""
+def generate_pairs_table_data(filter_type=None, tier_filter=None, search_term=None, _cache_key=None):
+    """Generate data for the pairs table with filtering and cache busting."""
     # Get available pairs
     available_pairs = fetch_pairs()
     
@@ -1166,7 +1207,7 @@ def select_pair(pair_name):
     st.session_state.view_mode = 'detail'
     # Update page for selected pair
     batch_update_pairs([pair_name])
-    st.experimental_rerun()  # Use experimental_rerun instead
+    st.experimental_rerun()
 
 # Function to render the detailed dashboard for a specific pair
 def render_detail_dashboard(pair_name):
@@ -1177,7 +1218,7 @@ def render_detail_dashboard(pair_name):
     if st.button("Back to All Pairs"):
         st.session_state.view_mode = 'table'
         st.session_state.current_pair = None
-        st.experimental_rerun()  # Use experimental_rerun instead
+        st.experimental_rerun()
     
     # Reset PnL and Update Data buttons
     col1, col2 = st.columns(2)
@@ -1186,13 +1227,17 @@ def render_detail_dashboard(pair_name):
         if st.button("Reset PnL", key=f"reset_pnl_{pair_name}"):
             reset_pnl(pair_name)
             st.success("PnL reset successfully!")
-            st.experimental_rerun()  # Use experimental_rerun instead
+            st.experimental_rerun()
     
     with col2:
         if st.button("Update Data", key=f"update_{pair_name}", type="primary"):
             batch_update_pairs([pair_name])
             st.success("Data updated successfully!")
-            st.experimental_rerun()  # Use experimental_rerun instead
+            st.experimental_rerun()
+    
+    # Display auto-update timer
+    if st.session_state.auto_update_enabled:
+        render_countdown_timer()
     
     # Display pair type (Major or Alt)
     is_major = st.session_state.is_major_pairs.get(pair_name, False)
@@ -1211,7 +1256,7 @@ def render_detail_dashboard(pair_name):
         calculate_recommended_parameters(pair_name)
         adjust_parameters(pair_name)
         st.success(f"Changed {pair_name} to {('Major' if new_is_major else 'Alt')} pair.")
-        st.experimental_rerun()  # Use experimental_rerun instead
+        st.experimental_rerun()
     
     st.markdown(f"**Pair Type**: {pair_type} (PnL Thresholds: {st.session_state.pnl_threshold_major_1}/{st.session_state.pnl_threshold_major_2 if is_major else st.session_state.pnl_threshold_alt_1}/{st.session_state.pnl_threshold_alt_2})")
     
@@ -1372,7 +1417,7 @@ def render_detail_dashboard(pair_name):
         )
         
         st.success(f"Manually applied recommended parameters: BR={recommended_br:.6f}, PM={recommended_pm:.1f}")
-        st.experimental_rerun()  # Use experimental_rerun instead
+        st.experimental_rerun()
     
     # Display charts in tabs
     tabs = st.tabs(["Volatility", "PnL", "Parameter History"])
@@ -1411,8 +1456,9 @@ def render_table_dashboard():
     """Render the main dashboard with all pairs in a simplified table."""
     st.title("Volatility & PnL Parameter Adjustment System")
     
-    # Auto-update timer
-    render_countdown_timer()
+    # Display auto-update timer
+    if st.session_state.auto_update_enabled:
+        render_countdown_timer()
     
     # Add filtering options
     st.markdown("### Filter Options")
@@ -1454,11 +1500,12 @@ def render_table_dashboard():
         # Search by pair name
         search_term = st.text_input("Search Pair Name")
     
-    # Generate filtered table data
+    # Generate filtered table data with cache busting
     filtered_df = generate_pairs_table_data(
         filter_type=filter_type, 
         tier_filter=tier_filter, 
-        search_term=search_term
+        search_term=search_term,
+        _cache_key=get_cache_key()
     )
     
     # Update buttons
@@ -1535,7 +1582,7 @@ def render_table_dashboard():
         display_df = display_df[display_cols]
         
         # Create clickable dataframe with selection callback
-        st.dataframe(
+        selected_indices = st.dataframe(
             display_df, 
             use_container_width=True,
             hide_index=True
@@ -1558,6 +1605,26 @@ def render_table_dashboard():
 def render_sidebar():
     """Render sidebar configuration options."""
     st.sidebar.title("Configuration")
+    
+    # Show auto-update status
+    if st.session_state.auto_update_enabled:
+        st.sidebar.markdown(
+            """
+            <div style="background-color:#e6ffe6; padding:10px; border-radius:5px; margin-bottom:10px;">
+                <strong>🔄 Auto-update:</strong> Enabled (5 minute intervals)
+            </div>
+            """, 
+            unsafe_allow_html=True
+        )
+    else:
+        st.sidebar.markdown(
+            """
+            <div style="background-color:#ffe6e6; padding:10px; border-radius:5px; margin-bottom:10px;">
+                <strong>🔄 Auto-update:</strong> Disabled
+            </div>
+            """, 
+            unsafe_allow_html=True
+        )
     
     # Volatility threshold settings
     st.sidebar.markdown("### Volatility Thresholds")
@@ -1648,14 +1715,15 @@ def main():
     if check_daily_reset():
         st.success("Daily PnL reset completed.")
     
-    # Setup auto-refresh (this now handles the auto-update check)
+    # Setup auto-refresh
     setup_auto_refresh()
     
     # Render sidebar
     render_sidebar()
     
-    # Add a hidden element with the refresh counter to force reruns
+    # Add hidden elements to assist with forcing updates
     st.empty().markdown(f"<!-- Refresh Counter: {st.session_state.refresh_counter} -->")
+    st.empty().markdown(f"<!-- Time: {time.time()} -->")
     
     # View selection
     if st.session_state.view_mode == 'detail' and st.session_state.current_pair:
