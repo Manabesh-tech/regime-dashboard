@@ -1493,7 +1493,7 @@ def render_table_dashboard():
     # Auto-update timer
     render_countdown_timer()
     
-    # Generate table data first so we can get filter options
+    # Generate table data first
     table_df = generate_pairs_table_data()
     
     # Add filtering options
@@ -1507,6 +1507,14 @@ def render_table_dashboard():
             "Pair Type",
             ["All", "Major Only", "Alt Only"]
         )
+        
+        # Store the current filter in session state for auto-update
+        if pair_type_filter == "Major Only":
+            st.session_state.current_filter_type = "major"
+        elif pair_type_filter == "Alt Only":
+            st.session_state.current_filter_type = "alt"
+        else:
+            st.session_state.current_filter_type = None
     
     with col2:
         # Filter by tier
@@ -1518,8 +1526,10 @@ def render_table_dashboard():
     with col3:
         # Search by pair name
         search_term = st.text_input("Search Pair Name")
+        # Store the search term in session state for auto-update
+        st.session_state.current_search_term = search_term if search_term else None
     
-    # Apply filters to the table data
+    # Apply filters to table data
     filtered_df = table_df.copy()
     
     # Apply pair type filter
@@ -1552,7 +1562,7 @@ def render_table_dashboard():
     
     with col2:
         if st.button("Update All Pairs", type="primary"):
-            # Get current filter settings
+            # Get filter type based on pair_type_filter
             filter_type = None
             if pair_type_filter == "Major Only":
                 filter_type = "major"
