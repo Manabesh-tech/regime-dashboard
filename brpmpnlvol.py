@@ -151,7 +151,7 @@ def init_session_state():
         st.session_state.initialized = False
 
     if 'last_daily_reset' not in st.session_state:
-        st.session_state.last_daily_reset = datetime.now(SG_TZ).date()
+        st.session_state.last_daily_reset = get_sg_time().date()
 
     if 'pair_data' not in st.session_state:
         st.session_state.pair_data = {}
@@ -160,10 +160,14 @@ def init_session_state():
         st.session_state.current_pair = None
         
     if 'last_auto_update' not in st.session_state:
-        st.session_state.last_auto_update = datetime.now(SG_TZ)
+        st.session_state.last_auto_update = get_sg_time()
         
     if 'auto_update_enabled' not in st.session_state:
         st.session_state.auto_update_enabled = True
+        
+    # Add a force refresh counter to ensure timer updates
+    if 'refresh_counter' not in st.session_state:
+        st.session_state.refresh_counter = 0
 
     # Configuration values
     if 'vol_threshold_1' not in st.session_state:
@@ -203,7 +207,9 @@ def init_session_state():
 # Function to get current time in Singapore timezone
 def get_sg_time():
     """Get current time in Singapore timezone."""
-    return datetime.now(SG_TZ)
+    now_utc = datetime.now(pytz.utc)
+    now_sg = now_utc.astimezone(SG_TZ)
+    return now_sg
 
 # Check if daily reset is needed
 def check_daily_reset():
@@ -223,6 +229,11 @@ def check_daily_reset():
 def check_auto_update():
     now = get_sg_time()
     last_update = st.session_state.last_auto_update
+    
+    # Make sure last_update is timezone-aware
+    if last_update.tzinfo is None:
+        last_update = pytz.utc.localize(last_update).astimezone(SG_TZ)
+        
     time_diff = (now - last_update).total_seconds() / 60
     
     if time_diff >= 5 and st.session_state.auto_update_enabled:
@@ -929,6 +940,11 @@ def time_until_next_update():
     
     now = get_sg_time()
     last_update = st.session_state.last_auto_update
+    
+    # Make sure last_update is timezone-aware
+    if last_update.tzinfo is None:
+        last_update = pytz.utc.localize(last_update).astimezone(SG_TZ)
+    
     elapsed_seconds = (now - last_update).total_seconds()
     
     if elapsed_seconds >= 300:  # 5 minutes in seconds
@@ -1192,6 +1208,14 @@ def main():
         if selected_pair:
             update_pair_data(selected_pair)
             st.rerun()
+            
+    # Force a refresh when the timer gets very low to ensure it updates
+    remaining_seconds = time_until_next_update()
+    if remaining_seconds is not None and remaining_seconds > 0 and remaining_seconds <= 5:
+        # Increment counter to force refresh every second when timer is low
+        st.session_state.refresh_counter += 1
+        time.sleep(1)
+        st.rerun()
     
     # Set page title
     st.title("Volatility & PnL Parameter Adjustment System")
