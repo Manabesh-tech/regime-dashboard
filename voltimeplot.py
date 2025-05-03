@@ -128,6 +128,8 @@ def build_query_for_partition_tables(tables, pair_name, start_time, end_time):
     """
     Build a complete UNION query for multiple partition tables.
     This creates a complete, valid SQL query with correct WHERE clauses.
+    
+    The query now keeps ALL 1-second data points for more accurate volatility calculation.
     """
     if not tables:
         return ""
@@ -137,6 +139,7 @@ def build_query_for_partition_tables(tables, pair_name, start_time, end_time):
     for table in tables:
         # Query for Surf data (source_type = 0)
         # Use a simpler, more direct query to avoid timezone complications
+        # Keep ALL data points (1-second level) for intraperiod volatility calculation
         query = f"""
         SELECT 
             pair_name,
@@ -178,28 +181,7 @@ def fetch_trading_pairs():
 all_tokens = fetch_trading_pairs()
 
 # Function to calculate volatility metrics - OPTIMIZED calculation
-def calculate_volatility_metrics(price_series):
-    if price_series is None or len(price_series) < 2:
-        return {
-            'realized_vol': np.nan
-        }
-    
-    try:
-        # Calculate log returns
-        log_returns = np.diff(np.log(price_series))
-        
-        # Realized volatility - for 5min data, we need to adjust the annualization factor
-        # 5min = 12 periods per hour * 24 hours * 365 days = 105120 periods per year
-        realized_vol = np.std(log_returns) * np.sqrt(105120)  
-        
-        return {
-            'realized_vol': realized_vol
-        }
-    except Exception as e:
-        print(f"Error in volatility calculation: {e}")
-        return {
-            'realized_vol': np.nan
-        }
+# This function is no longer used with the new approach
 
 # Volatility classification function
 def classify_volatility(vol):
@@ -300,33 +282,97 @@ def fetch_and_calculate_volatility(token, lookback_hours=24):
         
         # Work directly with the data
         df = df.set_index('timestamp').sort_index()
-        price_data = df['final_price'].dropna()
         
-        if price_data.empty:
+        # Keep all the 1-second data points for computing intraperiod volatility
+        raw_price_data = df['final_price'].dropna()
+        
+        if raw_price_data.empty:
             print(f"[{token}] No data after cleaning.")
             return None
         
-        # Resample to exactly 5min intervals
-        five_min_ohlc = price_data.resample('5min').ohlc().dropna()
+        # Create a DatetimeIndex with 5-minute frequency
+        start_date = raw_price_data.index.min().floor('5min')
+        end_date = raw_price_data.index.max().ceil('5min')
+        five_min_periods = pd.date_range(start=start_date, end=end_date, freq='5min')
         
-        if five_min_ohlc.empty:
-            print(f"[{token}] No 5-min data after resampling.")
-            return None
+        # Create a DataFrame to store OHLC and volatility for each 5-minute period
+        five_min_data = pd.DataFrame(index=five_min_periods)
         
-        # Calculate rolling volatility on 5-minute close prices
-        five_min_ohlc['realized_vol'] = five_min_ohlc['close'].rolling(window=rolling_window).apply(
-            lambda x: calculate_volatility_metrics(x)['realized_vol']
-        )
-
+        # Function to calculate volatility for a 5-minute window using 1-second data
+        def calculate_intraperiod_volatility(prices):
+            """
+            Calculate volatility within a period using all data points.
+            Returns annualized volatility.
+            """
+            if len(prices) < 2:
+                return np.nan
+            
+            try:
+                # Calculate log returns from all 1-second price points in this window
+                log_returns = np.diff(np.log(prices))
+                
+                # Seconds per year = 60 * 60 * 24 * 365 = 31,536,000
+                # If we're using 1-second data, we annualize by sqrt(31536000)
+                # Number of seconds in 5 minutes = 300
+                # Adjustment factor: We want to express the 5-min volatility as annual vol
+                annualization_factor = np.sqrt(31536000 / 300)
+                
+                # Calculate standard deviation and annualize
+                vol = np.std(log_returns) * annualization_factor
+                return vol
+            except Exception as e:
+                print(f"Error calculating intraperiod volatility: {e}")
+                return np.nan
+        
+        # Pre-calculate the period boundaries for efficiency
+        period_boundaries = [(period, period + pd.Timedelta(minutes=5)) 
+                            for period in five_min_periods[:-1]]
+        
+        # Process each 5-minute window
+        volatility_data = []
+        ohlc_data = []
+        
+        for start_time, end_time in period_boundaries:
+            # Get data for this 5-minute window
+            window_data = raw_price_data[(raw_price_data.index >= start_time) & 
+                                        (raw_price_data.index < end_time)]
+            
+            if not window_data.empty and len(window_data) >= 2:
+                # Calculate OHLC
+                ohlc = {
+                    'open': window_data.iloc[0],
+                    'high': window_data.max(),
+                    'low': window_data.min(),
+                    'close': window_data.iloc[-1]
+                }
+                
+                # Calculate volatility using all 1-second points in this window
+                vol = calculate_intraperiod_volatility(window_data.values)
+                
+                volatility_data.append((start_time, vol))
+                ohlc_data.append((start_time, ohlc))
+        
+        # Create DataFrames from the collected data
+        vol_df = pd.DataFrame(volatility_data, columns=['timestamp', 'realized_vol']).set_index('timestamp')
+        
+        # Create OHLC DataFrame
+        ohlc_df = pd.DataFrame(
+            [(t, d['open'], d['high'], d['low'], d['close']) for t, d in ohlc_data],
+            columns=['timestamp', 'open', 'high', 'low', 'close']
+        ).set_index('timestamp')
+        
+        # Merge the DataFrames
+        result_df = pd.concat([ohlc_df, vol_df], axis=1)
+        
         # Calculate returns for price movement
-        five_min_ohlc['returns'] = five_min_ohlc['close'].pct_change()
+        result_df['returns'] = result_df['close'].pct_change()
         
         # Get exactly the requested number of hours worth of data
         # 24 hours = 288 five-minute intervals (24 * 12)
         blocks_needed = lookback_hours * 12  # Number of 5-minute blocks in lookback period
         
         # Take only the most recent blocks_needed points
-        recent_data = five_min_ohlc.tail(blocks_needed)
+        recent_data = result_df.tail(blocks_needed)
         
         # Check if we have enough data
         if len(recent_data) < blocks_needed * 0.5:  # If we have less than 50% of expected points
@@ -342,6 +388,10 @@ def fetch_and_calculate_volatility(token, lookback_hours=24):
         
         print(f"[{token}] Successful Volatility Calculation")
         return recent_data
+    except Exception as e:
+        st.error(f"Error processing {token}: {e}")
+        print(f"[{token}] Error processing: {e}")
+        return None
     except Exception as e:
         st.error(f"Error processing {selected_token}: {e}")
         print(f"[{token}] Error processing: {e}")
@@ -656,11 +706,14 @@ if vol_data is not None and not vol_data.empty:
         - **Extreme Volatility** (>100%): Very large price movements, often indicating unusual market stress
         
         **Calculation Method**:
-        1. We calculate volatility using the standard deviation of logarithmic returns of 5-minute price data
-        2. The result is annualized by multiplying by the square root of the number of 5-minute periods in a year
-        3. For the main chart, we use a rolling window of 10 periods (50 minutes of data) to capture short-term volatility
+        1. For each 5-minute window, we gather all 1-second price data points within that window
+        2. We calculate the standard deviation of logarithmic returns from these 1-second points
+        3. This standard deviation is then annualized by multiplying by √(31,536,000/300)
+           - 31,536,000 = seconds in a year (60 * 60 * 24 * 365)
+           - 300 = seconds in a 5-minute window
         
         **Interpretation**:
+        - Each 5-minute window's volatility represents the actual price fluctuation within that specific period
         - Higher volatility generally indicates more risk and uncertainty
         - Volatility tends to cluster (periods of high volatility are often followed by more high volatility)
         - Extreme volatility events may indicate market disruptions or significant news
