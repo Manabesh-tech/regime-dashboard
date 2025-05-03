@@ -60,10 +60,10 @@ timeframe = "5min"
 lookback_hours = 24
 singapore_timezone = pytz.timezone('Asia/Singapore')
 
-# Get current time in Singapore timezone
+# Get current time in Singapore timezone and display prominently
 now_utc = datetime.now(pytz.utc)
 now_sg = now_utc.astimezone(singapore_timezone)
-st.write(f"Current Singapore Time: {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
+st.markdown(f"### Current Singapore Time: {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
 
 # Function to get partition tables based on date range
 def get_partition_tables(conn, start_date, end_date):
@@ -130,6 +130,7 @@ def build_query_for_partition_tables(tables, pair_name, start_time, end_time):
     
     for table in tables:
         # Query for Surf data (source_type = 0)
+        # IMPORTANT: Explicitly convert to Singapore time by adding 8 hours
         query = f"""
         SELECT 
             pair_name,
@@ -184,7 +185,7 @@ def classify_volatility(vol):
         return ("EXTREME", 4, "Extreme volatility")
 
 # UI Controls
-col1, col2 = st.columns([3, 1])
+col1, col2, col3 = st.columns([2, 1, 1])
 
 with col1:
     # Let user select a single token for analysis
@@ -201,12 +202,19 @@ with col2:
         st.cache_data.clear()
         st.experimental_rerun()
 
+with col3:
+    # Debug option to see time details
+    show_time_debug = st.checkbox("Show Time Debug Info", value=False)
+
 # Fetch and calculate volatility for a token with 5min timeframe
-@st.cache_data(ttl=300, show_spinner="Calculating volatility metrics...")
+@st.cache_data(ttl=60, show_spinner="Calculating volatility metrics...")  # Reduced cache time to 1 minute
 def fetch_and_calculate_volatility(token, lookback_hours=24):
     # Get current time in Singapore timezone
     now_utc = datetime.now(pytz.utc)
     now_sg = now_utc.astimezone(singapore_timezone)
+    
+    # For checking current time in debug mode
+    query_time_sg = now_sg.strftime("%Y-%m-%d %H:%M:%S")
     
     # Try to get data for a longer period than we need (36 hours instead of 24)
     extended_lookback = lookback_hours + 12
@@ -216,13 +224,21 @@ def fetch_and_calculate_volatility(token, lookback_hours=24):
     start_time = start_time_sg.strftime("%Y-%m-%d %H:%M:%S")
     end_time = now_sg.strftime("%Y-%m-%d %H:%M:%S")
 
-    # Get relevant partition tables
+    # Get relevant partition tables for today and yesterday
+    # Note: Singapore is UTC+8, so we need to cover both days
     extra_day_start = start_time_sg - timedelta(days=1)
     partition_tables = get_partition_tables(conn, extra_day_start, now_sg)
     
+    debug_info = {
+        "query_time_sg": query_time_sg,
+        "start_time_sg": start_time_sg.strftime("%Y-%m-%d %H:%M:%S"),
+        "end_time_sg": end_time,
+        "partition_tables": partition_tables
+    }
+    
     if not partition_tables:
         print(f"[{token}] No partition tables found for the specified date range")
-        return None
+        return None, debug_info
     
     # Build query using partition tables
     query = build_query_for_partition_tables(
@@ -237,13 +253,19 @@ def fetch_and_calculate_volatility(token, lookback_hours=24):
         st.info(f"Fetching 1-second level data for {token} from {len(partition_tables)} partition tables...")
         df = pd.read_sql_query(query, conn)
         print(f"[{token}] Query executed. DataFrame shape: {df.shape}")
+        
+        debug_info["raw_data_shape"] = df.shape
 
         if df.empty:
             print(f"[{token}] No data found.")
-            return None
+            return None, debug_info
 
-        # Process timestamps
+        # Process timestamps - IMPORTANT: timestamps should already be in Singapore time
         df['timestamp'] = pd.to_datetime(df['timestamp'])
+        
+        # Display timestamp range for debugging
+        debug_info["min_timestamp"] = df['timestamp'].min().strftime("%Y-%m-%d %H:%M:%S")
+        debug_info["max_timestamp"] = df['timestamp'].max().strftime("%Y-%m-%d %H:%M:%S")
         
         # Work directly with the data
         df = df.set_index('timestamp').sort_index()
@@ -251,12 +273,17 @@ def fetch_and_calculate_volatility(token, lookback_hours=24):
         
         if raw_price_data.empty:
             print(f"[{token}] No data after cleaning.")
-            return None
+            return None, debug_info
         
         # Create a DatetimeIndex with 5-minute frequency
+        # Important: floor to exact 5-minute boundaries
         start_date = raw_price_data.index.min().floor('5min')
         end_date = raw_price_data.index.max().ceil('5min')
         five_min_periods = pd.date_range(start=start_date, end=end_date, freq='5min')
+        
+        debug_info["five_min_start"] = start_date.strftime("%Y-%m-%d %H:%M:%S")
+        debug_info["five_min_end"] = end_date.strftime("%Y-%m-%d %H:%M:%S")
+        debug_info["five_min_periods_count"] = len(five_min_periods)
         
         # Progress bar for volatility calculation
         progress_bar = st.progress(0)
@@ -342,12 +369,27 @@ def fetch_and_calculate_volatility(token, lookback_hours=24):
         # Calculate returns for price movement
         result_df['returns'] = result_df['close'].pct_change()
         
+        # Debug - capture result range
+        debug_info["result_min_timestamp"] = result_df.index.min().strftime("%Y-%m-%d %H:%M:%S")
+        debug_info["result_max_timestamp"] = result_df.index.max().strftime("%Y-%m-%d %H:%M:%S")
+        debug_info["result_count"] = len(result_df)
+        
         # Get exactly the requested number of hours worth of data
         # 24 hours = 288 five-minute intervals (24 * 12)
         blocks_needed = lookback_hours * 12
         
         # Take only the most recent blocks_needed points
         recent_data = result_df.tail(blocks_needed)
+        
+        # Debug - capture final data range
+        debug_info["final_min_timestamp"] = recent_data.index.min().strftime("%Y-%m-%d %H:%M:%S")
+        debug_info["final_max_timestamp"] = recent_data.index.max().strftime("%Y-%m-%d %H:%M:%S")
+        debug_info["final_count"] = len(recent_data)
+        
+        # Check if we have enough data
+        if len(recent_data) < blocks_needed * 0.5:
+            print(f"[{token}] Warning: Only found {len(recent_data)} data points out of {blocks_needed} expected")
+            debug_info["warning"] = f"Only found {len(recent_data)} data points out of {blocks_needed} expected"
         
         # Classify volatility
         recent_data['vol_info'] = recent_data['realized_vol'].apply(classify_volatility)
@@ -358,15 +400,70 @@ def fetch_and_calculate_volatility(token, lookback_hours=24):
         recent_data['is_extreme'] = recent_data['realized_vol'] >= 1.0
         
         print(f"[{token}] Successful Volatility Calculation")
-        return recent_data
+        return recent_data, debug_info
     except Exception as e:
         st.error(f"Error processing {token}: {e}")
         print(f"[{token}] Error processing: {e}")
-        return None
+        debug_info["error"] = str(e)
+        return None, debug_info
 
 # Process the selected token
 with st.spinner(f"Calculating volatility for {selected_token}..."):
-    vol_data = fetch_and_calculate_volatility(selected_token, lookback_hours)
+    vol_data, debug_info = fetch_and_calculate_volatility(selected_token, lookback_hours)
+
+# Display time debug information if requested
+if show_time_debug and debug_info:
+    st.markdown("### Time and Data Debug Information")
+    
+    # Create a more readable format
+    debug_df = pd.DataFrame([
+        {"Parameter": "Query Time (SG)", "Value": debug_info.get("query_time_sg", "N/A")},
+        {"Parameter": "Data Start Time (SG)", "Value": debug_info.get("start_time_sg", "N/A")},
+        {"Parameter": "Data End Time (SG)", "Value": debug_info.get("end_time_sg", "N/A")},
+        {"Parameter": "Raw Data Min Timestamp", "Value": debug_info.get("min_timestamp", "N/A")},
+        {"Parameter": "Raw Data Max Timestamp", "Value": debug_info.get("max_timestamp", "N/A")},
+        {"Parameter": "5min Periods Start", "Value": debug_info.get("five_min_start", "N/A")},
+        {"Parameter": "5min Periods End", "Value": debug_info.get("five_min_end", "N/A")},
+        {"Parameter": "Result Min Timestamp", "Value": debug_info.get("result_min_timestamp", "N/A")},
+        {"Parameter": "Result Max Timestamp", "Value": debug_info.get("result_max_timestamp", "N/A")},
+        {"Parameter": "Final Min Timestamp", "Value": debug_info.get("final_min_timestamp", "N/A")},
+        {"Parameter": "Final Max Timestamp", "Value": debug_info.get("final_max_timestamp", "N/A")},
+        {"Parameter": "Raw Data Size", "Value": str(debug_info.get("raw_data_shape", "N/A"))},
+        {"Parameter": "5min Periods Count", "Value": debug_info.get("five_min_periods_count", "N/A")},
+        {"Parameter": "Result Count", "Value": debug_info.get("result_count", "N/A")},
+        {"Parameter": "Final Count", "Value": debug_info.get("final_count", "N/A")},
+    ])
+    
+    st.table(debug_df)
+    
+    # Show partition tables
+    st.markdown("#### Partition Tables Used")
+    st.write(debug_info.get("partition_tables", []))
+    
+    # Show any warnings or errors
+    if "warning" in debug_info:
+        st.warning(debug_info["warning"])
+    
+    if "error" in debug_info:
+        st.error(debug_info["error"])
+    
+    # If data is available, show the raw timestamps
+    if vol_data is not None and not vol_data.empty:
+        st.markdown("#### Sample of Time Periods in Data")
+        # Show a few timestamps from the data
+        time_sample = pd.DataFrame({
+            "Index": range(1, min(11, len(vol_data) + 1)),
+            "Timestamp": vol_data.index[:10].strftime("%Y-%m-%d %H:%M:%S")
+        })
+        st.table(time_sample)
+        
+        # Also show the last few timestamps
+        st.markdown("#### Last Few Time Periods in Data")
+        time_sample_end = pd.DataFrame({
+            "Index": range(len(vol_data) - min(10, len(vol_data)) + 1, len(vol_data) + 1),
+            "Timestamp": vol_data.index[-10:].strftime("%Y-%m-%d %H:%M:%S")
+        })
+        st.table(time_sample_end)
 
 # Create a dedicated volatility plot
 if vol_data is not None and not vol_data.empty:
@@ -410,9 +507,6 @@ if vol_data is not None and not vol_data.empty:
         f"<span style='font-size: 14px; color: gray;'>Current: {current_vol:.1f}%, "
         f"Avg: {avg_vol:.1f}%, Max: {max_vol:.1f}%</span>"
     )
-    
-    # Create time labels for better readability
-    time_labels = vol_data_pct.index.strftime('%H:%M<br>%m/%d')
     
     # Add volatility line chart with color-coded markers
     fig.add_trace(
@@ -490,6 +584,19 @@ if vol_data is not None and not vol_data.empty:
         bgcolor="rgba(255,255,255,0.7)"
     )
     
+    # Improve x-axis ticks to show more frequent time labels
+    # For a 24-hour period, show every hour
+    hourly_ticks = pd.date_range(
+        start=vol_data_pct.index.min().floor('H'),
+        end=vol_data_pct.index.max().ceil('H'),
+        freq='1H'
+    )
+    
+    # Filter to only include hours that are within our data range
+    valid_ticks = [tick for tick in hourly_ticks if 
+                  tick >= vol_data_pct.index.min() and 
+                  tick <= vol_data_pct.index.max()]
+    
     # Update layout for better readability
     fig.update_layout(
         title=dict(
@@ -504,8 +611,8 @@ if vol_data is not None and not vol_data.empty:
             title="Time (Singapore)",
             showgrid=True,
             gridcolor='rgba(200,200,200,0.3)',
-            tickvals=vol_data_pct.index[::12],  # Show every hour
-            ticktext=vol_data_pct.index[::12].strftime('%H:%M<br>%m/%d'),
+            tickvals=valid_ticks,  # Use hourly ticks
+            ticktext=[tick.strftime('%H:%M<br>%m/%d') for tick in valid_ticks],
             tickangle=-45,
             tickfont=dict(size=12),
         ),
@@ -567,12 +674,12 @@ if vol_data is not None and not vol_data.empty:
     
     # Sort by volatility (highest first) and take top 10
     high_vol_periods = vol_data_pct.sort_values(by='realized_vol', ascending=False).head(10).copy()
-    high_vol_periods['Time'] = high_vol_periods.index.strftime('%Y-%m-%d %H:%M')
+    high_vol_periods['Time (SG)'] = high_vol_periods.index.strftime('%Y-%m-%d %H:%M')
     high_vol_periods['Volatility (%)'] = high_vol_periods['realized_vol'].round(1)
     high_vol_periods['Regime'] = high_vol_periods['vol_desc']
     
     # Select columns for display
-    display_df = high_vol_periods[['Time', 'Volatility (%)', 'Regime']].reset_index(drop=True)
+    display_df = high_vol_periods[['Time (SG)', 'Volatility (%)', 'Regime']].reset_index(drop=True)
     
     # Add row numbering
     display_df.index = display_df.index + 1
@@ -624,7 +731,7 @@ if vol_data is not None and not vol_data.empty:
         )
     )
     
-    # Update layout
+    # Update layout - use same hourly ticks for consistency
     price_fig.update_layout(
         height=400,
         margin=dict(l=20, r=20, t=50, b=20),
@@ -634,8 +741,8 @@ if vol_data is not None and not vol_data.empty:
             title="Time (Singapore)",
             showgrid=True,
             gridcolor='rgba(200,200,200,0.3)',
-            tickvals=vol_data.index[::12],  # Show every hour
-            ticktext=vol_data.index[::12].strftime('%H:%M<br>%m/%d'),
+            tickvals=valid_ticks,  # Use hourly ticks
+            ticktext=[tick.strftime('%H:%M<br>%m/%d') for tick in valid_ticks],
             tickangle=-45,
         ),
         yaxis=dict(
