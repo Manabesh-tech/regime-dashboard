@@ -200,66 +200,6 @@ if not selected_tokens:
     st.warning("Please select at least one token")
     st.stop()
 
-# Function to calculate volatility metrics
-def calculate_volatility_metrics(high, low):
-    if high is None or low is None or pd.isna(high) or pd.isna(low) or high <= 0 or low <= 0:
-        return np.nan
-    
-    try:
-        # Calculate price range within this 5-minute period
-        price_range = high - low
-        avg_price = (high + low) / 2
-        
-        # Normalize by average price to get percentage volatility
-        normalized_range = price_range / avg_price if avg_price > 0 else 0
-        
-        # Annualize: multiply by sqrt(trading days in a year / periods in a day)
-        # Trading days: ~252, Periods in a day: 24 hours * 12 periods/hour = 288
-        annualized_vol = normalized_range * np.sqrt(252 * 288)
-        
-        return annualized_vol
-    except Exception as e:
-        print(f"Error in volatility calculation: {e}")
-        return np.nan
-
-# Volatility classification function
-def classify_volatility(vol):
-    if pd.isna(vol):
-        return ("UNKNOWN", 0, "Insufficient data")
-    elif vol < 0.30:  # 30% annualized volatility threshold for low volatility
-        return ("LOW", 1, "Low volatility")
-    elif vol < 0.60:  # 60% annualized volatility threshold for medium volatility
-        return ("MEDIUM", 2, "Medium volatility")
-    elif vol < 1.00:  # 100% annualized volatility threshold for high volatility
-        return ("HIGH", 3, "High volatility")
-    else:
-        return ("EXTREME", 4, "Extreme volatility")
-
-# Function to generate aligned 5-minute time blocks for the past 12 hours
-def generate_aligned_time_blocks(current_time, hours_back=12):
-    """
-    Generate fixed 5-minute time blocks for past X hours,
-    aligned with standard 5-minute intervals
-    """
-    # Round down to the nearest 5-minute mark
-    minute = current_time.minute
-    rounded_minute = (minute // 5) * 5
-    latest_complete_block_end = current_time.replace(minute=rounded_minute, second=0, microsecond=0)
-    
-    # Generate block labels for display
-    blocks = []
-    for i in range(hours_back * 12):  # 12 hours of 5-minute blocks = 144 blocks
-        block_end = latest_complete_block_end - timedelta(minutes=i*5)
-        block_start = block_end - timedelta(minutes=5)
-        block_label = f"{block_start.strftime('%H:%M')}"
-        blocks.append((block_start, block_end, block_label))
-    
-    return blocks
-
-# Generate aligned time blocks
-aligned_time_blocks = generate_aligned_time_blocks(now_sg, lookback_hours)
-time_block_labels = [block[2] for block in aligned_time_blocks]
-
 # Fetch and calculate volatility for a token with 5min timeframe
 @st.cache_data(ttl=300, show_spinner="Calculating volatility metrics...")
 def fetch_and_calculate_volatility(token):
@@ -267,8 +207,8 @@ def fetch_and_calculate_volatility(token):
     now_utc = datetime.now(pytz.utc)
     now_sg = now_utc.astimezone(singapore_timezone)
     
-    # Request 15 hours to ensure we get at least 12 hours (25% extra)
-    extended_lookback = 15
+    # Request 16 hours to ensure we get at least 12 hours (33% extra)
+    extended_lookback = 16
     start_time_sg = now_sg - timedelta(hours=extended_lookback)
     
     # Convert for database query
@@ -312,71 +252,158 @@ def fetch_and_calculate_volatility(token):
             print(f"[{token}] No data after cleaning.")
             return None
         
-        # Resample to exactly 5min intervals
-        five_min_ohlc = price_data.resample('5min').ohlc().dropna()
+        # Create 5-minute windows for consistent methodology with the plot script
+        result = []
         
-        if five_min_ohlc.empty:
-            print(f"[{token}] No 5-min data after resampling.")
+        # Create a rounded start and end time for the windows
+        start_date = price_data.index.min().floor('5min')
+        end_date = price_data.index.max().ceil('5min')
+        five_min_periods = pd.date_range(start=start_date, end=end_date, freq='5min')
+        
+        for i in range(len(five_min_periods)-1):
+            start_window = five_min_periods[i]
+            end_window = five_min_periods[i+1]
+            
+            # Get price data in this window
+            window_data = price_data[(price_data.index >= start_window) & (price_data.index < end_window)]
+            
+            if len(window_data) >= 2:  # Need at least 2 points for volatility
+                # OHLC data
+                window_open = window_data.iloc[0]
+                window_high = window_data.max()
+                window_low = window_data.min()
+                window_close = window_data.iloc[-1]
+                
+                # Calculate volatility using 1-second data points
+                # Log returns
+                log_returns = np.diff(np.log(window_data.values))
+                
+                # Annualize: seconds in year / seconds in 5 minutes
+                annualization_factor = np.sqrt(31536000 / 300)
+                volatility = np.std(log_returns) * annualization_factor
+                
+                result.append({
+                    'timestamp': start_window,
+                    'time_label': start_window.strftime('%H:%M'),
+                    'open': window_open,
+                    'high': window_high, 
+                    'low': window_low,
+                    'close': window_close,
+                    'realized_vol': volatility
+                })
+        
+        # Create dataframe from results
+        if not result:
+            print(f"[{token}] Could not calculate volatility.")
             return None
+            
+        result_df = pd.DataFrame(result)
         
-        # Calculate volatility for each 5-minute period using the OHLC data
-        five_min_ohlc['realized_vol'] = five_min_ohlc.apply(
-            lambda row: calculate_volatility_metrics(row['high'], row['low']), 
-            axis=1
-        )
+        # Get most recent 12 hours (144 5-minute periods)
+        periods_needed = lookback_hours * 12
+        result_df = result_df.tail(periods_needed)
         
-        # Get exactly the requested number of hours worth of data
-        # 12 hours = 144 five-minute intervals (12 * 12)
-        blocks_needed = lookback_hours * 12  # Number of 5-minute blocks in lookback period
+        # Ensure we have a complete set of time blocks for the last 12 hours
+        end_time = now_sg.replace(second=0, microsecond=0)
+        minute = end_time.minute
+        end_time = end_time.replace(minute=(minute // 5) * 5)  # Round to nearest 5 minutes
         
-        # Take only the most recent blocks_needed points
-        recent_data = five_min_ohlc.tail(blocks_needed)
+        start_time = end_time - timedelta(hours=lookback_hours)
         
-        # Check if we have enough data
-        if len(recent_data) < blocks_needed * 0.8:  # If we have less than 80% of expected points
-            print(f"[{token}] Warning: Only found {len(recent_data)} data points out of {blocks_needed} expected")
+        # Create the full range of expected timestamps
+        full_time_range = pd.date_range(start=start_time, end=end_time, freq='5min')
+        full_time_labels = [ts.strftime('%H:%M') for ts in full_time_range]
         
-        last_period_vol = recent_data['realized_vol']
+        # Match against what we have
+        time_label_mapping = {row['time_label']: row for idx, row in result_df.iterrows()}
         
-        if last_period_vol.empty:
-            print(f"[{token}] No volatility data.")
-            return None
+        # Create a complete dataframe
+        complete_result = []
+        for ts, label in zip(full_time_range, full_time_labels):
+            if label in time_label_mapping:
+                row_data = time_label_mapping[label]
+                row_data['timestamp'] = ts  # Ensure we use the consistent timestamp
+                complete_result.append(row_data)
+            else:
+                # Create an empty row
+                complete_result.append({
+                    'timestamp': ts,
+                    'time_label': label,
+                    'open': np.nan,
+                    'high': np.nan,
+                    'low': np.nan,
+                    'close': np.nan,
+                    'realized_vol': np.nan
+                })
         
-        last_period_vol = last_period_vol.to_frame()
+        complete_df = pd.DataFrame(complete_result)
         
-        # Store original datetime index for reference
-        last_period_vol['original_datetime'] = last_period_vol.index
-        
-        # Format time label to match our aligned blocks (HH:MM format)
-        last_period_vol['time_label'] = last_period_vol.index.strftime('%H:%M')
-        
-        # Calculate average volatility over lookback period
-        last_period_vol['avg_period_vol'] = last_period_vol['realized_vol'].mean()
-        
-        # Classify volatility
-        last_period_vol['vol_info'] = last_period_vol['realized_vol'].apply(classify_volatility)
-        last_period_vol['vol_regime'] = last_period_vol['vol_info'].apply(lambda x: x[0])
-        last_period_vol['vol_desc'] = last_period_vol['vol_info'].apply(lambda x: x[2])
-        
-        # Also classify the average
-        last_period_vol['avg_vol_info'] = last_period_vol['avg_period_vol'].apply(classify_volatility)
-        last_period_vol['avg_vol_regime'] = last_period_vol['avg_vol_info'].apply(lambda x: x[0])
-        last_period_vol['avg_vol_desc'] = last_period_vol['avg_vol_info'].apply(lambda x: x[2])
-        
-        # Flag extreme volatility events
-        last_period_vol['is_extreme'] = last_period_vol['realized_vol'] >= extreme_vol_threshold
+        # Calculate average volatility over the period
+        valid_vols = complete_df['realized_vol'].dropna()
+        if not valid_vols.empty:
+            avg_vol = valid_vols.mean()
+            complete_df['avg_period_vol'] = avg_vol
+            
+            # Classify volatility
+            complete_df['vol_info'] = complete_df['realized_vol'].apply(
+                lambda x: ("UNKNOWN", 0, "Insufficient data") if pd.isna(x) else
+                          ("LOW", 1, "Low volatility") if x < 0.3 else
+                          ("MEDIUM", 2, "Medium volatility") if x < 0.6 else
+                          ("HIGH", 3, "High volatility") if x < 1.0 else
+                          ("EXTREME", 4, "Extreme volatility")
+            )
+            
+            complete_df['vol_regime'] = complete_df['vol_info'].apply(lambda x: x[0])
+            complete_df['vol_desc'] = complete_df['vol_info'].apply(lambda x: x[2])
+            
+            # Also classify the average
+            avg_vol_info = ("UNKNOWN", 0, "Insufficient data") if pd.isna(avg_vol) else \
+                           ("LOW", 1, "Low volatility") if avg_vol < 0.3 else \
+                           ("MEDIUM", 2, "Medium volatility") if avg_vol < 0.6 else \
+                           ("HIGH", 3, "High volatility") if avg_vol < 1.0 else \
+                           ("EXTREME", 4, "Extreme volatility")
+                           
+            complete_df['avg_vol_regime'] = avg_vol_info[0]
+            complete_df['avg_vol_desc'] = avg_vol_info[2]
+            
+            # Flag extreme volatility
+            complete_df['is_extreme'] = complete_df['realized_vol'] >= extreme_vol_threshold
         
         print(f"[{token}] Successful Volatility Calculation")
-        return last_period_vol
+        return complete_df
     except Exception as e:
         st.error(f"Error processing {token}: {e}")
         print(f"[{token}] Error processing: {e}")
         return None
 
-# Show the blocks we're analyzing - OPTIMIZED to be in expander for cleaner UI
+# Generate time blocks for display
+def generate_time_blocks(current_time, hours=12):
+    """
+    Generate full 12 hours of 5-minute blocks
+    """
+    blocks = []
+    # Round down to the nearest 5 minutes
+    minute = current_time.minute
+    rounded_minute = (minute // 5) * 5
+    end_time = current_time.replace(minute=rounded_minute, second=0, microsecond=0)
+    
+    # Generate 144 blocks (12 hours * 12 5-min periods per hour)
+    for i in range(hours * 12):
+        block_end = end_time - timedelta(minutes=i*5)
+        block_start = block_end - timedelta(minutes=5)
+        label = block_start.strftime('%H:%M')
+        blocks.append((block_start, block_end, label))
+    
+    return blocks
+
+# Generate all the 5-minute blocks we want to display
+time_blocks = generate_time_blocks(now_sg)
+block_labels = [block[2] for block in time_blocks]
+
+# Show the blocks we're analyzing
 with st.expander("View Time Blocks Being Analyzed", expanded=False):
     time_blocks_df = pd.DataFrame([(b[0].strftime('%Y-%m-%d %H:%M'), b[1].strftime('%Y-%m-%d %H:%M'), b[2]) 
-                                  for b in aligned_time_blocks], 
+                                  for b in time_blocks], 
                                  columns=['Start Time', 'End Time', 'Block Label'])
     st.dataframe(time_blocks_df)
 
@@ -419,16 +446,8 @@ if token_results:
     # Create DataFrame with all tokens
     vol_table = pd.DataFrame(table_data)
     
-    # Apply the time blocks in the proper order (most recent first)
-    available_times = set(vol_table.index)
-    ordered_times = [t for t in time_block_labels if t in available_times]
-    
-    # If no matches are found in aligned blocks, fallback to the available times
-    if not ordered_times and available_times:
-        ordered_times = sorted(list(available_times), reverse=True)
-    
-    # Reindex with the ordered times
-    vol_table = vol_table.reindex(ordered_times)
+    # Apply the standard time blocks
+    vol_table = vol_table.reindex(block_labels)
     
     # Convert from decimal to percentage and round to 1 decimal place
     vol_table = (vol_table * 100).round(1)
@@ -454,8 +473,12 @@ if token_results:
     st.markdown("### Color Legend: <span style='color:green'>Low Vol</span>, <span style='color:#aaaa00'>Medium Vol</span>, <span style='color:orange'>High Vol</span>, <span style='color:red'>Extreme Vol</span>", unsafe_allow_html=True)
     st.markdown("Values shown as annualized volatility percentage")
     
+    # Calculate how many time blocks actually contain data
+    data_blocks = vol_table.count(axis=1).max() if not vol_table.empty else 0
+    st.info(f"Displaying {len(vol_table)} time blocks covering 12 hours. Found data for approximately {data_blocks/12:.1f} hours.")
+    
     # Set a maximum height for the table
-    max_height = min(700, 100 + 20 * len(ordered_times))  # Base height + rows
+    max_height = min(700, 100 + 20 * len(vol_table))  # Base height + rows
     st.dataframe(styled_table, height=max_height, use_container_width=True)
     
     # Create ranking table based on average volatility
@@ -463,19 +486,27 @@ if token_results:
     
     ranking_data = []
     for token, df in token_results.items():
-        if not df.empty and 'avg_period_vol' in df.columns and not df['avg_period_vol'].isna().all():
-            avg_vol = df['avg_period_vol'].iloc[0]  # All rows have the same avg value
-            vol_regime = df['avg_vol_desc'].iloc[0]
-            max_vol = df['realized_vol'].max()
-            min_vol = df['realized_vol'].min()
-            ranking_data.append({
-                'Token': token,
-                'Avg Vol (%)': (avg_vol * 100).round(1),
-                'Regime': vol_regime,
-                'Max Vol (%)': (max_vol * 100).round(1),
-                'Min Vol (%)': (min_vol * 100).round(1),
-                'Vol Range (%)': ((max_vol - min_vol) * 100).round(1)
-            })
+        if not df.empty and 'avg_period_vol' in df.columns:
+            # We should have at least one value that's not NA
+            avg_vol = df['avg_period_vol'].iloc[0] if not pd.isna(df['avg_period_vol'].iloc[0]) else np.nan
+            
+            if not pd.isna(avg_vol):
+                vol_regime = df['avg_vol_desc'].iloc[0] if 'avg_vol_desc' in df.columns else ""
+                
+                # Get max and min from non-NA values
+                valid_vols = df['realized_vol'].dropna()
+                if not valid_vols.empty:
+                    max_vol = valid_vols.max()
+                    min_vol = valid_vols.min()
+                    
+                    ranking_data.append({
+                        'Token': token,
+                        'Avg Vol (%)': (avg_vol * 100).round(1),
+                        'Regime': vol_regime,
+                        'Max Vol (%)': (max_vol * 100).round(1),
+                        'Min Vol (%)': (min_vol * 100).round(1),
+                        'Vol Range (%)': ((max_vol - min_vol) * 100).round(1)
+                    })
     
     if ranking_data:
         ranking_df = pd.DataFrame(ranking_data)
@@ -539,7 +570,7 @@ if token_results:
                     'Token': token,
                     'Time': time_label,
                     'Volatility (%)': round(vol_value * 100, 1),
-                    'Full Timestamp': idx.strftime('%Y-%m-%d %H:%M')
+                    'Full Timestamp': row['timestamp'].strftime('%Y-%m-%d %H:%M') if 'timestamp' in row else "Unknown"
                 })
     
     if extreme_events:
@@ -581,10 +612,12 @@ if token_results:
     with col1:
         avg_values = {}
         for token, df in token_results.items():
-            if not df.empty and 'avg_period_vol' in df.columns and not df['avg_period_vol'].isna().all():
-                avg = df['avg_period_vol'].iloc[0]  # All rows have the same avg value
-                regime = df['avg_vol_desc'].iloc[0]
-                avg_values[token] = (avg, regime)
+            if not df.empty and 'avg_period_vol' in df.columns:
+                # Check for first row with avg_period_vol that's not NA
+                if not pd.isna(df['avg_period_vol'].iloc[0]):
+                    avg = df['avg_period_vol'].iloc[0]
+                    regime = df['avg_vol_desc'].iloc[0] if 'avg_vol_desc' in df.columns else ""
+                    avg_values[token] = (avg, regime)
         
         if avg_values:
             low_vol = sum(1 for v, r in avg_values.values() if v < 0.3)
@@ -693,8 +726,8 @@ with st.expander("Understanding the Volatility Table", expanded=False):
     These are specific 5-minute periods where a token's annualized volatility exceeded 100%.
     
     **Technical details:**
-    - Volatility is calculated using high-low price range within each 5-minute period
+    - Volatility is calculated using log returns of price data within each 5-minute period
     - Values shown are in percentage (e.g., 50.0 means 50% annualized volatility)
-    - The volatility is annualized to represent the expected price variation over a year
+    - The volatility is annualized using sqrt(seconds in year / seconds in 5 minutes)
     - Missing values (light gray cells) indicate insufficient data for calculation
     """)
