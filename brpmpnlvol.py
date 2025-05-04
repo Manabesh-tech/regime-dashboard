@@ -323,12 +323,12 @@ def render_countdown_timer():
     if current_time - st.session_state.last_mini_refresh >= 2:
         st.session_state.last_mini_refresh = current_time
         time.sleep(0.1)  # Short delay
-        st.experimental_rerun()
+        st.rerun()
     
     # If time's up, trigger data refresh
     if remaining_seconds <= 1:
         st.session_state.refresh_counter += 1
-        st.experimental_rerun()
+        st.rerun()
 
 # Setup auto-refresh function
 def setup_auto_refresh():
@@ -366,7 +366,7 @@ def setup_auto_refresh():
                 batch_update_pairs([current_pair])
                 st.session_state.update_status = f"🔄 Auto-updated {current_pair} at {now.strftime('%H:%M:%S')}."
         
-        st.experimental_rerun()
+        st.rerun()
 
 # Database connection functions - with optimized caching
 @st.cache_resource(ttl=3600)  # Cache for 1 hour
@@ -1207,7 +1207,7 @@ def select_pair(pair_name):
     st.session_state.view_mode = 'detail'
     # Update page for selected pair
     batch_update_pairs([pair_name])
-    st.experimental_rerun()
+    st.rerun()
 
 # Function to render the detailed dashboard for a specific pair
 def render_detail_dashboard(pair_name):
@@ -1218,7 +1218,7 @@ def render_detail_dashboard(pair_name):
     if st.button("Back to All Pairs"):
         st.session_state.view_mode = 'table'
         st.session_state.current_pair = None
-        st.experimental_rerun()
+        st.rerun()
     
     # Reset PnL and Update Data buttons
     col1, col2 = st.columns(2)
@@ -1227,13 +1227,13 @@ def render_detail_dashboard(pair_name):
         if st.button("Reset PnL", key=f"reset_pnl_{pair_name}"):
             reset_pnl(pair_name)
             st.success("PnL reset successfully!")
-            st.experimental_rerun()
+            st.rerun()
     
     with col2:
         if st.button("Update Data", key=f"update_{pair_name}", type="primary"):
             batch_update_pairs([pair_name])
             st.success("Data updated successfully!")
-            st.experimental_rerun()
+            st.rerun()
     
     # Display auto-update timer
     if st.session_state.auto_update_enabled:
@@ -1256,7 +1256,7 @@ def render_detail_dashboard(pair_name):
         calculate_recommended_parameters(pair_name)
         adjust_parameters(pair_name)
         st.success(f"Changed {pair_name} to {('Major' if new_is_major else 'Alt')} pair.")
-        st.experimental_rerun()
+        st.rerun()
     
     st.markdown(f"**Pair Type**: {pair_type} (PnL Thresholds: {st.session_state.pnl_threshold_major_1}/{st.session_state.pnl_threshold_major_2 if is_major else st.session_state.pnl_threshold_alt_1}/{st.session_state.pnl_threshold_alt_2})")
     
@@ -1417,7 +1417,7 @@ def render_detail_dashboard(pair_name):
         )
         
         st.success(f"Manually applied recommended parameters: BR={recommended_br:.6f}, PM={recommended_pm:.1f}")
-        st.experimental_rerun()
+        st.rerun()
     
     # Display charts in tabs
     tabs = st.tabs(["Volatility", "PnL", "Parameter History"])
@@ -1521,7 +1521,7 @@ def render_table_dashboard():
             # Reset the next refresh time if enabled
             if auto_update:
                 st.session_state.next_refresh_time = get_sg_time() + timedelta(minutes=5)
-                st.experimental_rerun()
+                st.rerun()
     
     with col2:
         if st.button("Update All Pairs", type="primary"):
@@ -1535,7 +1535,7 @@ def render_table_dashboard():
             st.success(f"Updated {len(available_pairs)} pairs successfully!")
             # Reset the next refresh time
             st.session_state.next_refresh_time = get_sg_time() + timedelta(minutes=5)
-            st.experimental_rerun()
+            st.rerun()
     
     with col3:
         if st.button("Reset All PnL"):
@@ -1545,7 +1545,7 @@ def render_table_dashboard():
                 reset_count = reset_all_pnl(pairs_to_reset)
             
             st.success(f"Reset PnL for {reset_count} pairs!")
-            st.experimental_rerun()
+            st.rerun()
     
     # Display the status message
     if st.session_state.update_status:
@@ -1704,7 +1704,7 @@ def render_sidebar():
             calculate_recommended_parameters(pair_name)
             adjust_parameters(pair_name)
         st.sidebar.success("Settings applied to all pairs!")
-        st.experimental_rerun()
+        st.rerun()
 
 # Main application
 def main():
