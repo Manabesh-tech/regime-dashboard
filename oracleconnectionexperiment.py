@@ -129,6 +129,37 @@ def get_available_pairs():
         st.error(f"Error fetching pairs: {e}")
         return default_pairs
 
+def _calculate_trend_strength(prices, window):
+    """Calculate average Trend Strength - measures the directional strength of price movements.
+    
+    Trend Strength is calculated as the ratio of net price change to the sum of all price movements.
+    A higher value indicates stronger trend (closer to 1), lower values indicate choppy price action.
+    """
+    try:
+        # Calculate absolute tick-to-tick changes
+        diff = prices.diff().abs()
+        
+        # Get sum of all absolute changes over the window
+        sum_abs_changes = diff.rolling(window=window, min_periods=1).sum()
+        
+        # Calculate the absolute net change over the window
+        net_change = prices.diff(periods=window).abs()
+        
+        # Avoid division by zero
+        epsilon = 1e-10
+        
+        # Calculate trend strength: net change / sum of all changes
+        # This ranges from 0 to 1 (choppy to trending)
+        trend_strength = net_change / (sum_abs_changes + epsilon)
+        
+        # Handle NaN values and ensure reasonable bounds
+        trend_strength = trend_strength.fillna(0.5)
+        
+        return trend_strength.mean()
+    except Exception as e:
+        # Return a reasonable default on error
+        return 0.5
+
 def analyze_tiers(pair_name, progress_bar=None):
     """Analyze all exchange-tier combinations with time-based windows"""
     # Setup metadata dictionary to return
@@ -319,10 +350,13 @@ def analyze_tiers(pair_name, progress_bar=None):
             # Initialize trackers
             win_counts = {}  # To count how many times each tier wins
             exchange_tier_choppiness = {}  # Store the overall choppiness average
+            exchange_tier_trend_strength = {}  # Store the overall trend strength average
+            exchange_tier_chop_trend_ratio = {}  # Store the choppiness/trend strength ratio
             exchange_tier_dropout = {}  # Store the overall dropout rate
             exchange_tier_valid_points = {}  # Store the count of valid data points
             exchange_tier_validity = {}  # Store the validity rate
             exchange_choppiness_by_range = {}  # Store choppiness by range group
+            exchange_trend_strength_by_range = {}  # Store trend strength by range group
             
             # Define range groups for time-based windows
             range_groups = list(range(1, 11))  # 1 to 10 groups
@@ -372,6 +406,8 @@ def analyze_tiers(pair_name, progress_bar=None):
                     
                     # Track all choppiness values for diagnostic
                     window_tier_choppiness = {}
+                    window_tier_trend_strength = {}
+                    window_tier_chop_trend_ratio = {}
                     
                     # Process each tier
                     for tier_col in tier_columns:
@@ -452,20 +488,40 @@ def analyze_tiers(pair_name, progress_bar=None):
                         else:
                             avg_choppiness = 0
                         
+                        # Calculate trend strength
+                        trend_strength = _calculate_trend_strength(prices, window_size_choppiness)
+                        
+                        # Calculate choppiness/trend strength ratio
+                        # Higher values indicate more choppiness relative to trend strength
+                        if trend_strength > 0:
+                            chop_trend_ratio = avg_choppiness / (trend_strength * 100)  # Scaling for easier reading
+                        else:
+                            chop_trend_ratio = avg_choppiness  # If trend_strength is 0, just use choppiness
+                        
                         # Store for diagnostics
                         window_tier_choppiness[tier_name] = avg_choppiness
+                        window_tier_trend_strength[tier_name] = trend_strength
+                        window_tier_chop_trend_ratio[tier_name] = chop_trend_ratio
                         
-                        # Track overall choppiness
+                        # Track overall choppiness and trend strength
                         if exchange_tier_key not in exchange_tier_choppiness:
                             exchange_tier_choppiness[exchange_tier_key] = []
                         exchange_tier_choppiness[exchange_tier_key].append(avg_choppiness)
+                        
+                        if exchange_tier_key not in exchange_tier_trend_strength:
+                            exchange_tier_trend_strength[exchange_tier_key] = []
+                        exchange_tier_trend_strength[exchange_tier_key].append(trend_strength)
+                        
+                        if exchange_tier_key not in exchange_tier_chop_trend_ratio:
+                            exchange_tier_chop_trend_ratio[exchange_tier_key] = []
+                        exchange_tier_chop_trend_ratio[exchange_tier_key].append(chop_trend_ratio)
                         
                         # Check if this is the best choppiness for this window
                         if avg_choppiness > best_choppiness:
                             best_choppiness = avg_choppiness
                             best_tier = exchange_tier_key
                     
-                    # Save choppiness values for this range group by tier
+                    # Save choppiness and trend strength values for this range group by tier
                     for tier_col in tier_columns:
                         if tier_col not in window_df.columns:
                             continue
@@ -479,6 +535,13 @@ def analyze_tiers(pair_name, progress_bar=None):
                         
                         if window_tier_choppiness.get(tier_name) is not None:
                             exchange_choppiness_by_range[exchange_tier_key][range_group] = window_tier_choppiness[tier_name]
+                            
+                        # Store trend strength for this range group
+                        if exchange_tier_key not in exchange_trend_strength_by_range:
+                            exchange_trend_strength_by_range[exchange_tier_key] = {}
+                        
+                        if window_tier_trend_strength.get(tier_name) is not None:
+                            exchange_trend_strength_by_range[exchange_tier_key][range_group] = window_tier_trend_strength[tier_name]
                     
                     # Record the winner for this window
                     if best_tier:
@@ -513,6 +576,8 @@ def analyze_tiers(pair_name, progress_bar=None):
             
             # Create average choppiness across all exchanges for each tier
             tier_to_avg_choppiness = {}
+            tier_to_avg_trend_strength = {}
+            tier_to_avg_chop_trend_ratio = {}
             
             # Calculate average choppiness per tier across all exchanges
             for exchange_tier_key, choppiness_values in exchange_tier_choppiness.items():
@@ -521,11 +586,36 @@ def analyze_tiers(pair_name, progress_bar=None):
                     tier_to_avg_choppiness[tier] = []
                 tier_to_avg_choppiness[tier].extend(choppiness_values)
             
+            # Calculate average trend strength per tier across all exchanges
+            for exchange_tier_key, trend_strength_values in exchange_tier_trend_strength.items():
+                _, tier = exchange_tier_key.split(':', 1)
+                if tier not in tier_to_avg_trend_strength:
+                    tier_to_avg_trend_strength[tier] = []
+                tier_to_avg_trend_strength[tier].extend(trend_strength_values)
+                
+            # Calculate average chop/trend ratio per tier across all exchanges
+            for exchange_tier_key, ratio_values in exchange_tier_chop_trend_ratio.items():
+                _, tier = exchange_tier_key.split(':', 1)
+                if tier not in tier_to_avg_chop_trend_ratio:
+                    tier_to_avg_chop_trend_ratio[tier] = []
+                tier_to_avg_chop_trend_ratio[tier].extend(ratio_values)
+            
             # Calculate averages
             tier_avg_choppiness = {}
+            tier_avg_trend_strength = {}
+            tier_avg_chop_trend_ratio = {}
+            
             for tier, choppiness_list in tier_to_avg_choppiness.items():
                 if choppiness_list:
                     tier_avg_choppiness[tier] = sum(choppiness_list) / len(choppiness_list)
+                    
+            for tier, trend_strength_list in tier_to_avg_trend_strength.items():
+                if trend_strength_list:
+                    tier_avg_trend_strength[tier] = sum(trend_strength_list) / len(trend_strength_list)
+                    
+            for tier, ratio_list in tier_to_avg_chop_trend_ratio.items():
+                if ratio_list:
+                    tier_avg_chop_trend_ratio[tier] = sum(ratio_list) / len(ratio_list)
             
             # Sort tiers by average choppiness
             sorted_tiers = sorted(tier_avg_choppiness.items(), key=lambda x: x[1], reverse=True)
@@ -562,6 +652,22 @@ def analyze_tiers(pair_name, progress_bar=None):
                 avg_choppiness = sum(choppiness_values) / len(choppiness_values) if choppiness_values else 0
                 avg_choppiness = round(avg_choppiness, 1)
                 
+                # Calculate trend strength metrics
+                trend_strength_values = exchange_tier_trend_strength.get(exchange_tier_key, [0.5])
+                current_trend_strength = trend_strength_values[0] if trend_strength_values else 0.5
+                current_trend_strength = round(current_trend_strength, 3)
+                
+                avg_trend_strength = sum(trend_strength_values) / len(trend_strength_values) if trend_strength_values else 0.5
+                avg_trend_strength = round(avg_trend_strength, 3)
+                
+                # Calculate choppiness/trend strength ratio 
+                ratio_values = exchange_tier_chop_trend_ratio.get(exchange_tier_key, [0])
+                current_ratio = ratio_values[0] if ratio_values else 0
+                current_ratio = round(current_ratio, 2)
+                
+                avg_ratio = sum(ratio_values) / len(ratio_values) if ratio_values else 0
+                avg_ratio = round(avg_ratio, 2)
+                
                 # Calculate average dropout rate across all windows
                 dropout_values = exchange_tier_dropout.get(exchange_tier_key, [100])
                 avg_dropout = sum(dropout_values) / len(dropout_values) if dropout_values else 100
@@ -581,6 +687,10 @@ def analyze_tiers(pair_name, progress_bar=None):
                     'exchange_tier': exchange_tier_key,
                     'current_choppiness': current_choppiness,
                     'avg_choppiness': avg_choppiness,
+                    'current_trend_strength': current_trend_strength,
+                    'avg_trend_strength': avg_trend_strength,
+                    'current_chop_trend_ratio': current_ratio,
+                    'avg_chop_trend_ratio': avg_ratio,
                     'dropout_rate': avg_dropout,
                     'win_rate': win_rate,
                     'validity_rate': validity_rate,
@@ -620,10 +730,14 @@ def format_column(value, column_name):
     if pd.isna(value):
         return "N/A"
         
-    if column_name in ['dropout_rate', 'win_rate', 'efficiency']:
+    if column_name in ['dropout_rate', 'win_rate', 'efficiency', 'validity_rate']:
         return f"{value:.1f}%"
     elif column_name in ['current_choppiness', 'avg_choppiness']:
         return f"{value:.1f}"
+    elif column_name in ['current_trend_strength', 'avg_trend_strength']:
+        return f"{value:.3f}"
+    elif column_name in ['current_chop_trend_ratio', 'avg_chop_trend_ratio']:
+        return f"{value:.2f}"
     elif column_name == 'valid_points':
         return f"{int(value):,}"
     elif column_name == 'rank':
@@ -669,6 +783,8 @@ def main():
     - **Efficiency Score:** Win Rate % × Validity Rate % ÷ 100
     - **Current Choppiness:** Most recent choppiness value using 20-tick rolling window
     - **Avg Choppiness:** Average choppiness across all windows
+    - **Trend Strength:** Directional movement strength (0-1, where higher means stronger trend)
+    - **Chop/Trend Ratio:** Ratio of choppiness to trend strength (higher values indicate more volatile price action)
     - **Dropout Rate:** Percentage of time tier has missing or invalid data
     - **Valid Ticks:** Number of valid data points analyzed for this tier
     """)
@@ -758,6 +874,10 @@ def main():
                 'efficiency': 'Efficiency Score',
                 'current_choppiness': 'Current Choppiness',
                 'avg_choppiness': 'Avg Choppiness',
+                'current_trend_strength': 'Current Trend Str',
+                'avg_trend_strength': 'Avg Trend Str',
+                'current_chop_trend_ratio': 'Current Chop/Trend',
+                'avg_chop_trend_ratio': 'Avg Chop/Trend',
                 'dropout_rate': 'Dropout Rate (%)',
                 'win_rate': 'Win Rate (%)',
                 'validity_rate': 'Validity Rate (%)',
@@ -775,6 +895,9 @@ def main():
                 'Dropout Rate (%)',
                 'Current Choppiness',
                 'Avg Choppiness',
+                'Current Trend Str',
+                'Avg Trend Str',
+                'Avg Chop/Trend',
                 'Valid Ticks'
             ]
             
@@ -785,7 +908,7 @@ def main():
             # Format numeric columns
             for col in display_df.columns:
                 if col != 'Exchange:Tier':
-                    col_name = col.lower().replace(' ', '_').replace('(%)', '').replace(':', '_')
+                    col_name = col.lower().replace(' ', '_').replace('(%)', '').replace(':', '_').replace('/', '_')
                     display_df[col] = display_df[col].apply(lambda x: format_column(x, col_name))
             
             # Show table
