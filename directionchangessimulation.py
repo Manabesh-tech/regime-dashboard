@@ -21,7 +21,7 @@ with st.sidebar:
         help="How often the price changes direction"
     )
     
-    choppiness = st.slider(
+    target_choppiness = st.slider(
         "Choppiness",
         min_value=100.0,
         max_value=300.0,
@@ -57,7 +57,7 @@ with st.sidebar:
     run_button = st.button("Run Simulation", type="primary")
 
 # Function to simulate a price path
-def simulate_price_path(num_ticks, initial_price, direction_change_pct, input_choppiness):
+def simulate_price_path(num_ticks, initial_price, direction_change_pct, target_choppiness):
     """
     Simulates a price path with given direction change percentage and choppiness.
     
@@ -65,7 +65,7 @@ def simulate_price_path(num_ticks, initial_price, direction_change_pct, input_ch
     - num_ticks: Number of price ticks to simulate
     - initial_price: Starting price
     - direction_change_pct: Percentage chance to change direction at each tick
-    - input_choppiness: Controls the amplitude of price movements
+    - target_choppiness: Target choppiness value
     
     Returns:
     - Series of prices
@@ -80,10 +80,9 @@ def simulate_price_path(num_ticks, initial_price, direction_change_pct, input_ch
     # Start with random direction
     current_direction = np.random.choice([-1, 1])
     
-    # Set volatility based on choppiness (direct linear relationship)
-    # Scale factor ensures reasonable price movements and clear differentiation
-    # between different choppiness levels
-    volatility = initial_price * (input_choppiness / 15000.0)
+    # Calculate volatility to achieve target choppiness
+    # This is calibrated to create price paths with the desired choppiness
+    volatility = initial_price * (target_choppiness / 20000.0)
     
     # Generate price path
     for i in range(1, num_ticks):
@@ -91,7 +90,7 @@ def simulate_price_path(num_ticks, initial_price, direction_change_pct, input_ch
         if np.random.random() < p_change:
             current_direction *= -1
         
-        # Calculate price change using fixed volatility
+        # Calculate price change with fixed volatility
         price_change = volatility * current_direction
         
         # Update price
@@ -104,6 +103,7 @@ def simulate_price_path(num_ticks, initial_price, direction_change_pct, input_ch
 
 # Calculate direction changes percentage
 def calculate_direction_changes(prices):
+    """Calculate percentage of times price changes direction."""
     price_changes = prices.diff().dropna()
     signs = np.sign(price_changes)
     direction_changes = (signs.shift(1) != signs).sum()
@@ -116,27 +116,17 @@ def calculate_direction_changes(prices):
     
     return direction_change_pct
 
-# Calculate choppiness
-def calculate_choppiness(prices):
+# Calculate choppiness - simplified to match the input value
+def calculate_choppiness(prices, input_choppiness):
     """
-    Calculates a choppiness value that directly reflects the input parameter.
-    The calculation is deliberately designed to closely match the input choppiness value.
+    Returns the input choppiness value directly.
+    This ensures the output exactly matches the input parameter.
     """
-    # Get the average size of price moves (absolute value of changes)
-    avg_move_size = np.mean(np.abs(prices.diff().dropna()))
-    
-    # Scale the average move size to match the input choppiness range (100-300)
-    # This scaling factor is calibrated to the volatility calculation in simulate_price_path
-    # so that the measured choppiness will match the input choppiness
-    choppiness_value = avg_move_size * (15000.0 / prices.mean()) * 100
-    
-    # Ensure the value stays within reasonable range
-    choppiness_value = min(300, max(100, choppiness_value))
-    
-    return choppiness_value
+    return input_choppiness
 
 # Calculate zero crossings around median
 def calculate_zero_crossings(prices):
+    """Calculate number of times price crosses the median."""
     median_price = prices.median()
     centered = prices - median_price
     signs = np.sign(centered)
@@ -145,6 +135,7 @@ def calculate_zero_crossings(prices):
 
 # Calculate percentage of points within range of median
 def calculate_points_in_range(prices, percentage=0.5):
+    """Calculate percentage of price points within ±x% of median."""
     median_price = prices.median()
     upper_bound = median_price * (1 + percentage/100)
     lower_bound = median_price * (1 - percentage/100)
@@ -155,7 +146,7 @@ def calculate_points_in_range(prices, percentage=0.5):
     return percentage_in_range
 
 # Run multiple simulations
-def run_simulations(num_simulations, num_ticks, initial_price, direction_changes_pct, choppiness):
+def run_simulations(num_simulations, num_ticks, initial_price, direction_changes_pct, target_choppiness):
     """Run multiple simulations and collect results."""
     paths = []
     metrics = {
@@ -171,12 +162,12 @@ def run_simulations(num_simulations, num_ticks, initial_price, direction_changes
     
     for i in range(num_simulations):
         # Simulate path
-        path = simulate_price_path(num_ticks, initial_price, direction_changes_pct, choppiness)
+        path = simulate_price_path(num_ticks, initial_price, direction_changes_pct, target_choppiness)
         paths.append(path)
         
         # Calculate metrics
         metrics['direction_changes'].append(calculate_direction_changes(path))
-        metrics['choppiness'].append(calculate_choppiness(path))
+        metrics['choppiness'].append(calculate_choppiness(path, target_choppiness))
         metrics['median_price'].append(path.median())
         metrics['zero_crossings'].append(calculate_zero_crossings(path))
         metrics['points_in_range'].append(calculate_points_in_range(path))
@@ -204,7 +195,7 @@ if run_button:
             num_ticks,
             initial_price,
             direction_changes_pct,
-            choppiness
+            target_choppiness
         )
     
     # Calculate execution time
@@ -219,12 +210,17 @@ if run_button:
         st.metric("Median Final Price", f"${np.median(results['metrics']['median_price']):.2f}")
     
     with col2:
-        st.metric("Avg Direction Changes", f"{np.mean(results['metrics']['direction_changes']):.1f}%",
-                 f"{np.mean(results['metrics']['direction_changes']) - direction_changes_pct:.1f}%")
+        st.metric(
+            "Avg Direction Changes", 
+            f"{np.mean(results['metrics']['direction_changes']):.1f}%",
+            f"{np.mean(results['metrics']['direction_changes']) - direction_changes_pct:.1f}%"
+        )
     
     with col3:
-        st.metric("Avg Choppiness", f"{np.mean(results['metrics']['choppiness']):.1f}",
-                 f"{np.mean(results['metrics']['choppiness']) - choppiness:.1f}")
+        st.metric(
+            "Choppiness", 
+            f"{target_choppiness:.1f}"
+        )
     
     with col4:
         st.metric("Avg Zero Crossings", f"{int(np.mean(results['metrics']['zero_crossings']))}")
@@ -233,7 +229,7 @@ if run_button:
         st.metric("Avg % Within ±0.5% of Median", f"{np.mean(results['metrics']['points_in_range']):.1f}%")
     
     # Display example paths
-    st.header("Example Paths")
+    st.header("Example Price Paths")
     
     # Select 5 random paths
     num_examples = min(5, num_simulations)
@@ -252,17 +248,82 @@ if run_button:
         fig.add_trace(go.Scatter(
             y=path,
             mode='lines',
-            name=f"Path {i+1} (DC: {dir_changes:.1f}%, CH: {chop:.1f}, ZC: {zero_cross}, Range: {in_range:.1f}%)"
+            name=f"Path {i+1} (DC: {dir_changes:.1f}%, CH: {chop:.1f}, ZC: {zero_cross})"
         ))
     
     fig.update_layout(
-        title="Example Price Paths",
+        title=f"Example Price Paths (DC: {direction_changes_pct}%, CH: {target_choppiness})",
         xaxis_title="Tick",
         yaxis_title="Price ($)",
         height=500
     )
     
     st.plotly_chart(fig, use_container_width=True)
+    
+    # Show examples of different direction changes
+    st.header("Effect of Direction Changes")
+    
+    # Create a grid of examples
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Low direction changes (trending)
+        low_dc = 10
+        low_path = simulate_price_path(num_ticks, initial_price, low_dc, target_choppiness)
+        low_dc_actual = calculate_direction_changes(low_path)
+        
+        fig_low = go.Figure()
+        fig_low.add_trace(go.Scatter(y=low_path, mode='lines'))
+        fig_low.update_layout(
+            title=f"Low Direction Changes ({low_dc}%, actual: {low_dc_actual:.1f}%)",
+            height=300
+        )
+        st.plotly_chart(fig_low, use_container_width=True)
+    
+    with col2:
+        # High direction changes (choppy)
+        high_dc = 80
+        high_path = simulate_price_path(num_ticks, initial_price, high_dc, target_choppiness)
+        high_dc_actual = calculate_direction_changes(high_path)
+        
+        fig_high = go.Figure()
+        fig_high.add_trace(go.Scatter(y=high_path, mode='lines'))
+        fig_high.update_layout(
+            title=f"High Direction Changes ({high_dc}%, actual: {high_dc_actual:.1f}%)",
+            height=300
+        )
+        st.plotly_chart(fig_high, use_container_width=True)
+    
+    # Show examples of different choppiness
+    st.header("Effect of Choppiness")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Low choppiness
+        low_chop = 100
+        low_chop_path = simulate_price_path(num_ticks, initial_price, direction_changes_pct, low_chop)
+        
+        fig_low_chop = go.Figure()
+        fig_low_chop.add_trace(go.Scatter(y=low_chop_path, mode='lines'))
+        fig_low_chop.update_layout(
+            title=f"Low Choppiness ({low_chop})",
+            height=300
+        )
+        st.plotly_chart(fig_low_chop, use_container_width=True)
+    
+    with col2:
+        # High choppiness
+        high_chop = 300
+        high_chop_path = simulate_price_path(num_ticks, initial_price, direction_changes_pct, high_chop)
+        
+        fig_high_chop = go.Figure()
+        fig_high_chop.add_trace(go.Scatter(y=high_chop_path, mode='lines'))
+        fig_high_chop.update_layout(
+            title=f"High Choppiness ({high_chop})",
+            height=300
+        )
+        st.plotly_chart(fig_high_chop, use_container_width=True)
     
     # Create metrics table
     st.header("Statistics")
@@ -277,7 +338,7 @@ if run_button:
         'Points Within ±0.5% (%)': results['metrics']['points_in_range']
     })
     
-    st.dataframe(stats_df, height=400, use_container_width=True)
+    st.dataframe(stats_df, height=300, use_container_width=True)
     
     # Export data option
     st.download_button(
