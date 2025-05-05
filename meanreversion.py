@@ -7,7 +7,6 @@ from datetime import datetime, timedelta
 import psycopg2
 import warnings
 import pytz
-from statistics import median
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
@@ -21,6 +20,10 @@ st.set_page_config(
 
 # Always clear cache at startup to ensure fresh data
 st.cache_data.clear()
+
+# Define constants for analysis
+INTERVAL_MINUTES = 15  # 15-minute intervals
+TOLERANCE_PERCENTAGE = 0.5  # ±0.5% tolerance
 
 # Configure database connection
 def init_db_connection():
@@ -62,8 +65,8 @@ class PriceStabilityAnalyzer:
     """Analyzer for cryptocurrency price stability within intervals"""
     
     def __init__(self):
-        self.interval_minutes = 15  # 15-minute intervals
-        self.tolerance_percentage = 0.5  # ±0.5% tolerance
+        self.interval_minutes = INTERVAL_MINUTES
+        self.tolerance_percentage = TOLERANCE_PERCENTAGE
         self.exchanges = ['rollbit', 'surf']
         
     def _get_partition_tables(self, conn, start_date, end_date):
@@ -485,7 +488,7 @@ if st.session_state.get('analyze_clicked', False):
             # Tab 1: Time Series Analysis
             with tab1:
                 st.header("Time Series Analysis")
-                st.write(f"Percentage of prices within ±{analyzer.tolerance_percentage}% of {analyzer.interval_minutes}-minute interval median")
+                st.write(f"Percentage of prices within ±{TOLERANCE_PERCENTAGE}% of {INTERVAL_MINUTES}-minute interval median")
                 
                 # Create time series plots for each pair
                 for pair, df in stability_results.items():
@@ -496,7 +499,7 @@ if st.session_state.get('analyze_clicked', False):
                         df,
                         x='interval',
                         y='percentage_in_range',
-                        title=f"{pair} - Percentage of prices within ±{analyzer.tolerance_percentage}% of interval median",
+                        title=f"{pair} - Percentage of prices within ±{TOLERANCE_PERCENTAGE}% of interval median",
                         labels={
                             'interval': 'Time (15-minute intervals)',
                             'percentage_in_range': '% within ±0.5% of median'
@@ -545,7 +548,7 @@ if st.session_state.get('analyze_clicked', False):
                     
                     # Add daily average
                     daily_avg = daily_averages.get(pair, 0)
-                    st.write(f"Daily average: {daily_avg:.2f}% of prices within ±{analyzer.tolerance_percentage}% of interval median")
+                    st.write(f"Daily average: {daily_avg:.2f}% of prices within ±{TOLERANCE_PERCENTAGE}% of interval median")
                     
                     # Add download button for the data
                     csv = df.to_csv(index=False).encode('utf-8')
@@ -561,7 +564,7 @@ if st.session_state.get('analyze_clicked', False):
             # Tab 2: Daily Rankings
             with tab2:
                 st.header("Daily Ranking by Price Stability")
-                st.write(f"Average percentage of prices within ±{analyzer.tolerance_percentage}% of {analyzer.interval_minutes}-minute interval median")
+                st.write(f"Average percentage of prices within ±{TOLERANCE_PERCENTAGE}% of {INTERVAL_MINUTES}-minute interval median")
                 
                 # Create DataFrame with daily averages
                 if daily_averages:
@@ -627,9 +630,9 @@ st.sidebar.subheader("About This Analysis")
 st.sidebar.markdown(f"""
 This dashboard analyzes cryptocurrency price stability by:
 
-1. Dividing price data into {analyzer.interval_minutes}-minute intervals
+1. Dividing price data into {INTERVAL_MINUTES}-minute intervals
 2. Calculating the median price for each interval
-3. Measuring what percentage of prices fall within ±{analyzer.tolerance_percentage}% of the median
+3. Measuring what percentage of prices fall within ±{TOLERANCE_PERCENTAGE}% of the median
 4. Plotting these percentages over time
 5. Calculating daily averages and ranking the coins by stability
 
