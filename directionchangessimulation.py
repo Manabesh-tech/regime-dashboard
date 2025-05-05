@@ -72,23 +72,38 @@ def simulate_price_path(num_ticks, initial_price, direction_change_pct, target_c
     # Window size for measuring local choppiness
     window_size = min(20, num_ticks // 10)
     
-    # Base volatility - derived from initial price and target choppiness
-    base_volatility = initial_price * 0.002 * (target_choppiness / 150)
+    # Base volatility - derived from initial price (we'll adjust dynamically)
+    # Start with a conservative value
+    base_volatility = initial_price * 0.001
+    
+    # Scaling factor to gradually reach target choppiness
+    choppiness_factor = 1.0
     
     # Generate price path
     for i in range(1, num_ticks):
         # Calculate current choppiness if we have enough points
-        if i >= window_size:
+        if i >= window_size + 5:  # Need a bit more data for stable calculation
             window_prices = prices[max(0, i-window_size):i]
             
             # Calculate current choppiness
             price_range = max(window_prices) - min(window_prices)
             sum_movements = np.sum(np.abs(np.diff(window_prices)))
-            current_choppiness = (sum_movements / price_range * 100) if price_range > 0 else 150
             
-            # Adjust volatility based on current vs target choppiness
-            choppiness_ratio = target_choppiness / current_choppiness if current_choppiness > 0 else 1
-            volatility = base_volatility * min(max(choppiness_ratio * 0.5, 0.5), 1.5)
+            # Avoid division by zero
+            epsilon = 1e-10
+            current_choppiness = (sum_movements / (price_range + epsilon) * 100)
+            
+            # More aggressive adjustment based on the difference
+            if current_choppiness > 0:
+                # If current is too high, reduce volatility
+                if current_choppiness > target_choppiness * 1.05:
+                    choppiness_factor = max(choppiness_factor * 0.95, 0.5)
+                # If current is too low, increase volatility    
+                elif current_choppiness < target_choppiness * 0.95:
+                    choppiness_factor = min(choppiness_factor * 1.05, 2.0)
+            
+            # Apply the adjustment
+            volatility = base_volatility * choppiness_factor
         else:
             volatility = base_volatility
         
