@@ -7,22 +7,21 @@ import time
 
 # Set page config
 st.set_page_config(
-    page_title="Direction Changes Price Path Simulator",
+    page_title="Multi-Metric Crypto Price Path Simulator",
     page_icon="📈",
     layout="wide"
 )
 
 # Main title and description
-st.title("Direction Changes Price Path Simulator")
+st.title("Multi-Metric Crypto Price Path Simulator")
 st.markdown("""
-This dashboard simulates cryptocurrency price paths based on a specified direction changes percentage.
-Direction changes measure how frequently the price reverses direction - a higher percentage means more choppy price action.
+This dashboard simulates cryptocurrency price paths based on three key metrics:
 
-**How it works:**
-- Enter the desired direction changes percentage (e.g., 45% means the price changes direction 45% of the time)
-- Select the number of ticks to simulate
-- The simulator will generate 1000 price paths with that characteristic
-- You can view example paths, distribution statistics, and download the results
+1. **Direction Changes (%)**: How frequently the price changes direction
+2. **Choppiness**: How much the price oscillates within a range
+3. **Trend Strength**: How effectively price moves in a consistent direction
+
+By adjusting these metrics, you can simulate different market conditions and generate realistic price paths.
 """)
 
 # Sidebar for controls
@@ -37,6 +36,28 @@ with st.sidebar:
         step=1.0,
         help="Percentage of times the price changes direction. 50% is random walk, lower is more trending, higher is more reversal."
     )
+    
+    choppiness = st.slider(
+        "Choppiness",
+        min_value=100.0,
+        max_value=300.0,
+        value=150.0,
+        step=5.0,
+        help="Measures price oscillation within a range. Higher values indicate more oscillation."
+    )
+    
+    trend_strength = st.slider(
+        "Trend Strength",
+        min_value=0.1,
+        max_value=0.9,
+        value=0.5,
+        step=0.05,
+        help="Measures how effectively price moves in a consistent direction. Lower values indicate more oscillation without net progress."
+    )
+    
+    st.markdown("---")
+    
+    st.subheader("Additional Parameters")
     
     num_ticks = st.select_slider(
         "Number of Ticks",
@@ -82,15 +103,18 @@ with st.sidebar:
     
     run_button = st.button("Run Simulation", type="primary", use_container_width=True)
 
-# Function to simulate a price path with a target direction change percentage
-def simulate_price_path(num_ticks, initial_price, target_dir_change_pct, volatility_pct, trend_bias):
+# Function to simulate a price path with target metrics
+def simulate_price_path(num_ticks, initial_price, target_dir_change_pct, target_choppiness, target_trend_strength, 
+                         volatility_pct, trend_bias):
     """
-    Simulates a price path with a target direction change percentage.
+    Simulates a price path with target metrics.
     
     Args:
         num_ticks: Number of price ticks to simulate
         initial_price: Starting price
         target_dir_change_pct: Target percentage of direction changes (0-100)
+        target_choppiness: Target choppiness value (higher means more oscillation)
+        target_trend_strength: Target trend strength (higher means stronger trend)
         volatility_pct: Price volatility as a percentage
         trend_bias: Bias towards upward or downward movement
     
@@ -104,21 +128,68 @@ def simulate_price_path(num_ticks, initial_price, target_dir_change_pct, volatil
     prices = np.zeros(num_ticks)
     prices[0] = initial_price
     
-    # Base probability of a direction change
-    p_change = target_dir_change
-    
     # Initialize with a random direction
     current_direction = np.random.choice([-1, 1])
     
+    # Window size for calculating running metrics (for adjustments)
+    window_size = min(20, num_ticks // 10)
+    
+    # Calculate base volatility
+    base_volatility = initial_price * (volatility_pct / 100.0)
+    
     # Generate subsequent prices
     for i in range(1, num_ticks):
+        # Calculate current metrics if we have enough data points
+        if i >= window_size:
+            window_prices = prices[max(0, i-window_size):i]
+            
+            # Calculate current direction changes
+            price_changes = np.diff(window_prices)
+            signs = np.sign(price_changes)
+            direction_changes = (signs[1:] != signs[:-1]).sum()
+            current_dir_change = direction_changes / (len(signs) - 1) if len(signs) > 1 else 0.5
+            
+            # Calculate current choppiness (simplified version)
+            price_range = max(window_prices) - min(window_prices)
+            sum_movements = np.sum(np.abs(np.diff(window_prices)))
+            current_choppiness = (sum_movements / price_range * 100) if price_range > 0 else 150
+            
+            # Calculate current trend strength
+            price_range = max(window_prices) - min(window_prices)
+            net_change = abs(window_prices[-1] - window_prices[0])
+            current_trend_strength = (net_change / sum_movements) if sum_movements > 0 else 0.5
+            
+            # Adjust probabilities based on current metrics vs target metrics
+            # Direction changes adjustment
+            dir_change_adjustment = 0.1 * (target_dir_change - current_dir_change)
+            
+            # Choppiness adjustment
+            # If current choppiness is higher than target, reduce volatility
+            # If current choppiness is lower than target, increase volatility
+            choppiness_ratio = target_choppiness / current_choppiness if current_choppiness > 0 else 1
+            volatility_adjustment = min(max(choppiness_ratio * 0.5, 0.5), 1.5)
+            
+            # Trend strength adjustment
+            # If current trend strength is lower than target, reduce direction change probability
+            # If current trend strength is higher than target, increase direction change probability
+            trend_adjustment = 0.1 * (current_trend_strength - target_trend_strength)
+            
+            # Combine adjustments
+            p_change = max(0.01, min(0.99, target_dir_change + dir_change_adjustment - trend_adjustment))
+            
+            # Adjust volatility
+            adjusted_volatility = base_volatility * volatility_adjustment
+        else:
+            # Default values for early iterations
+            p_change = target_dir_change
+            adjusted_volatility = base_volatility
+        
         # Decide whether to change direction
         if np.random.random() < p_change:
             current_direction *= -1
         
         # Calculate the price change
-        volatility = initial_price * (volatility_pct / 100.0)
-        price_change = volatility * current_direction
+        price_change = adjusted_volatility * current_direction
         
         # Add trend bias
         price_change += initial_price * (trend_bias / 100.0)
@@ -131,17 +202,9 @@ def simulate_price_path(num_ticks, initial_price, target_dir_change_pct, volatil
     
     return pd.Series(prices)
 
-# Function to calculate actual direction changes percentage
+# Functions to calculate metrics on a price series
 def calculate_direction_changes(prices):
-    """
-    Calculate the percentage of times the price direction changes.
-    
-    Args:
-        prices: Series of price values
-    
-    Returns:
-        Percentage of direction changes
-    """
+    """Calculate the percentage of times the price direction changes."""
     price_changes = prices.diff().dropna()
     signs = np.sign(price_changes)
     direction_changes = (signs.shift(1) != signs).sum()
@@ -154,8 +217,48 @@ def calculate_direction_changes(prices):
     
     return direction_change_pct
 
+def calculate_choppiness(prices, window=14):
+    """Calculate average Choppiness Index."""
+    diff = prices.diff().abs()
+    sum_abs_changes = diff.rolling(window, min_periods=1).sum()
+    price_range = prices.rolling(window, min_periods=1).max() - prices.rolling(window, min_periods=1).min()
+    
+    # Avoid division by zero
+    epsilon = 1e-10
+    choppiness = 100 * sum_abs_changes / (price_range + epsilon)
+    
+    # Cap extreme values and handle NaN
+    choppiness = np.minimum(choppiness, 1000)
+    choppiness = choppiness.fillna(200)
+    
+    return choppiness.mean()
+
+def calculate_trend_strength(prices, window=14):
+    """Calculate average Trend Strength."""
+    diff = prices.diff().abs()
+    sum_abs_changes = diff.rolling(window, min_periods=1).sum()
+    net_change = (prices - prices.shift(window)).abs()
+    
+    # Avoid division by zero
+    epsilon = 1e-10
+    trend_strength = np.where(
+        sum_abs_changes > epsilon,
+        net_change / (sum_abs_changes + epsilon),
+        0.5
+    )
+    
+    # Convert to pandas Series if it's a numpy array
+    if isinstance(trend_strength, np.ndarray):
+        trend_strength = pd.Series(trend_strength, index=net_change.index)
+    
+    # Handle NaN values
+    trend_strength = pd.Series(trend_strength).fillna(0.5)
+    
+    return trend_strength.mean()
+
 # Function to run multiple simulations and return statistics
-def run_multiple_simulations(num_simulations, num_ticks, initial_price, target_dir_change_pct, volatility_pct, trend_bias):
+def run_multiple_simulations(num_simulations, num_ticks, initial_price, target_dir_change_pct, 
+                             target_choppiness, target_trend_strength, volatility_pct, trend_bias):
     """
     Run multiple simulations and collect statistics.
     
@@ -164,6 +267,8 @@ def run_multiple_simulations(num_simulations, num_ticks, initial_price, target_d
     """
     all_paths = []
     direction_changes_actual = []
+    choppiness_actual = []
+    trend_strength_actual = []
     final_prices = []
     max_prices = []
     min_prices = []
@@ -181,11 +286,23 @@ def run_multiple_simulations(num_simulations, num_ticks, initial_price, target_d
         status_text.text(f"Simulating path {i+1}/{num_simulations} ({progress}%)")
         
         # Simulate path
-        path = simulate_price_path(num_ticks, initial_price, target_dir_change_pct, volatility_pct, trend_bias)
+        path = simulate_price_path(
+            num_ticks, 
+            initial_price, 
+            target_dir_change_pct, 
+            target_choppiness, 
+            target_trend_strength, 
+            volatility_pct, 
+            trend_bias
+        )
         all_paths.append(path)
         
-        # Calculate statistics
+        # Calculate metrics
         direction_changes_actual.append(calculate_direction_changes(path))
+        choppiness_actual.append(calculate_choppiness(path))
+        trend_strength_actual.append(calculate_trend_strength(path))
+        
+        # Calculate additional statistics
         final_prices.append(path.iloc[-1])
         max_prices.append(path.max())
         min_prices.append(path.min())
@@ -212,6 +329,8 @@ def run_multiple_simulations(num_simulations, num_ticks, initial_price, target_d
     results = {
         'paths': all_paths,
         'direction_changes': direction_changes_actual,
+        'choppiness': choppiness_actual,
+        'trend_strength': trend_strength_actual,
         'final_prices': final_prices,
         'max_prices': max_prices,
         'min_prices': min_prices,
@@ -222,7 +341,7 @@ def run_multiple_simulations(num_simulations, num_ticks, initial_price, target_d
     return results
 
 # Main interface
-tab1, tab2, tab3, tab4 = st.tabs(["Simulation Results", "Example Paths", "Statistics", "Data Export"])
+tab1, tab2, tab3, tab4 = st.tabs(["Simulation Results", "Example Paths", "Metrics Analysis", "Data Export"])
 
 # Run simulation when button is clicked
 if run_button:
@@ -234,6 +353,8 @@ if run_button:
             num_ticks=num_ticks,
             initial_price=initial_price,
             target_dir_change_pct=direction_changes_pct,
+            target_choppiness=choppiness,
+            target_trend_strength=trend_strength,
             volatility_pct=price_volatility,
             trend_bias=trend_bias
         )
@@ -243,6 +364,8 @@ if run_button:
     st.session_state.simulation_results = results
     st.session_state.simulation_params = {
         'direction_changes_pct': direction_changes_pct,
+        'choppiness': choppiness,
+        'trend_strength': trend_strength,
         'num_ticks': num_ticks,
         'initial_price': initial_price,
         'price_volatility': price_volatility,
@@ -251,28 +374,40 @@ if run_button:
         'execution_time': execution_time
     }
     
-    # Display basic statistics
+    # Display basic statistics in tab 1
     with tab1:
         st.header("Simulation Results")
         st.write(f"Completed {num_simulations} simulations in {execution_time:.2f} seconds")
         
-        # Create 3 columns for metrics
+        # Create columns for metrics summary
         col1, col2, col3 = st.columns(3)
         
         with col1:
             st.metric(
-                "Average Direction Changes",
+                "Avg Direction Changes",
                 f"{np.mean(results['direction_changes']):.2f}%",
                 f"{np.mean(results['direction_changes']) - direction_changes_pct:.2f}%"
             )
             
             st.metric(
+                "Avg Choppiness",
+                f"{np.mean(results['choppiness']):.2f}",
+                f"{np.mean(results['choppiness']) - choppiness:.2f}"
+            )
+            
+            st.metric(
+                "Avg Trend Strength",
+                f"{np.mean(results['trend_strength']):.2f}",
+                f"{np.mean(results['trend_strength']) - trend_strength:.2f}"
+            )
+        
+        with col2:
+            st.metric(
                 "Median Final Price",
                 f"${np.median(results['final_prices']):.2f}",
                 f"{(np.median(results['final_prices']) - initial_price) / initial_price * 100:.2f}%"
             )
-        
-        with col2:
+            
             st.metric(
                 "Average Max Drawdown",
                 f"{np.mean(results['max_drawdowns']):.2f}%"
@@ -285,64 +420,119 @@ if run_button:
         
         with col3:
             st.metric(
-                "% of Paths Ending Higher",
+                "% Paths Ending Higher",
                 f"{sum(p > initial_price for p in results['final_prices']) / num_simulations * 100:.2f}%"
             )
             
             st.metric(
-                "% of Paths Ending Lower",
+                "% Paths Ending Lower",
                 f"{sum(p < initial_price for p in results['final_prices']) / num_simulations * 100:.2f}%"
             )
+            
+            st.metric(
+                "Avg Net Change",
+                f"${np.mean([p - initial_price for p in results['final_prices']]):.2f}"
+            )
         
-        # Direction changes distribution
-        st.subheader("Direction Changes Distribution")
-        fig1 = go.Figure()
-        fig1.add_trace(go.Histogram(
-            x=results['direction_changes'],
-            nbinsx=20,
-            marker_color='blue',
-            opacity=0.7
-        ))
-        fig1.add_vline(
-            x=direction_changes_pct,
-            line_dash="dash",
-            line_color="red",
-            annotation_text="Target",
-            annotation_position="top right"
-        )
-        fig1.update_layout(
-            title="Distribution of Direction Changes Across Simulations",
-            xaxis_title="Direction Changes %",
-            yaxis_title="Count",
-            height=400
-        )
-        st.plotly_chart(fig1, use_container_width=True)
-        
-        # Final price distribution
+        # Distribution of final prices
         st.subheader("Final Price Distribution")
-        fig2 = go.Figure()
-        fig2.add_trace(go.Histogram(
+        fig_prices = go.Figure()
+        fig_prices.add_trace(go.Histogram(
             x=results['final_prices'],
             nbinsx=20,
             marker_color='green',
             opacity=0.7
         ))
-        fig2.add_vline(
+        fig_prices.add_vline(
             x=initial_price,
             line_dash="dash",
             line_color="red",
             annotation_text="Initial Price",
             annotation_position="top right"
         )
-        fig2.update_layout(
+        fig_prices.update_layout(
             title="Distribution of Final Prices Across Simulations",
             xaxis_title="Final Price ($)",
             yaxis_title="Count",
             height=400
         )
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig_prices, use_container_width=True)
         
-    # Example paths visualization
+        # Metrics distributions
+        metrics_col1, metrics_col2 = st.columns(2)
+        
+        with metrics_col1:
+            # Direction changes distribution
+            fig_dir = go.Figure()
+            fig_dir.add_trace(go.Histogram(
+                x=results['direction_changes'],
+                nbinsx=20,
+                marker_color='blue',
+                opacity=0.7
+            ))
+            fig_dir.add_vline(
+                x=direction_changes_pct,
+                line_dash="dash",
+                line_color="red",
+                annotation_text="Target",
+                annotation_position="top right"
+            )
+            fig_dir.update_layout(
+                title="Direction Changes Distribution",
+                xaxis_title="Direction Changes %",
+                yaxis_title="Count",
+                height=300
+            )
+            st.plotly_chart(fig_dir, use_container_width=True)
+        
+        with metrics_col2:
+            # Choppiness distribution
+            fig_chop = go.Figure()
+            fig_chop.add_trace(go.Histogram(
+                x=results['choppiness'],
+                nbinsx=20,
+                marker_color='purple',
+                opacity=0.7
+            ))
+            fig_chop.add_vline(
+                x=choppiness,
+                line_dash="dash",
+                line_color="red",
+                annotation_text="Target",
+                annotation_position="top right"
+            )
+            fig_chop.update_layout(
+                title="Choppiness Distribution",
+                xaxis_title="Choppiness",
+                yaxis_title="Count",
+                height=300
+            )
+            st.plotly_chart(fig_chop, use_container_width=True)
+        
+        # Trend strength distribution
+        fig_trend = go.Figure()
+        fig_trend.add_trace(go.Histogram(
+            x=results['trend_strength'],
+            nbinsx=20,
+            marker_color='orange',
+            opacity=0.7
+        ))
+        fig_trend.add_vline(
+            x=trend_strength,
+            line_dash="dash",
+            line_color="red",
+            annotation_text="Target",
+            annotation_position="top right"
+        )
+        fig_trend.update_layout(
+            title="Trend Strength Distribution",
+            xaxis_title="Trend Strength",
+            yaxis_title="Count",
+            height=300
+        )
+        st.plotly_chart(fig_trend, use_container_width=True)
+    
+    # Example paths visualization in tab 2
     with tab2:
         st.header("Example Price Paths")
         
@@ -350,89 +540,107 @@ if run_button:
         num_example_paths = st.slider(
             "Number of example paths to show",
             min_value=1,
-            max_value=100,
+            max_value=50,
             value=10
         )
         
         # Random selection of paths
         random_indices = np.random.choice(len(results['paths']), size=min(num_example_paths, len(results['paths'])), replace=False)
         selected_paths = [results['paths'][i] for i in random_indices]
-        selected_dir_changes = [results['direction_changes'][i] for i in random_indices]
+        selected_metrics = [
+            (results['direction_changes'][i], results['choppiness'][i], results['trend_strength'][i]) 
+            for i in random_indices
+        ]
         
-        # Create visualization with actual direction changes percentages
+        # Create visualization with metrics in legend
         fig = go.Figure()
         
         for i, path in enumerate(selected_paths):
+            dir_change, chop, trend = selected_metrics[i]
             fig.add_trace(go.Scatter(
                 y=path,
                 mode='lines',
-                name=f"Path {i+1} ({selected_dir_changes[i]:.1f}%)"
+                name=f"Path {i+1} (DC: {dir_change:.1f}%, CH: {chop:.1f}, TS: {trend:.2f})"
             ))
         
         fig.update_layout(
-            title=f"Example Price Paths with Target Direction Changes = {direction_changes_pct}%",
+            title=f"Example Price Paths (Target: DC={direction_changes_pct}%, CH={choppiness}, TS={trend_strength})",
             xaxis_title="Tick",
             yaxis_title="Price ($)",
             height=600,
-            legend_title="Path (Direction Changes %)"
+            legend_title="Path (Metrics)"
         )
         
         st.plotly_chart(fig, use_container_width=True)
         
-        # Comparison of path with highest and lowest direction changes
-        st.subheader("Comparison: Most vs. Least Direction Changes")
+        # Examples of extreme cases
+        st.subheader("Examples of Extreme Cases")
         
-        # Find indices of max and min direction changes
-        max_idx = np.argmax(results['direction_changes'])
-        min_idx = np.argmin(results['direction_changes'])
+        # Find indices for extreme cases
+        high_dir_change_idx = np.argmax(results['direction_changes'])
+        low_dir_change_idx = np.argmin(results['direction_changes'])
+        high_chop_idx = np.argmax(results['choppiness'])
+        low_chop_idx = np.argmin(results['choppiness'])
+        high_trend_idx = np.argmax(results['trend_strength'])
+        low_trend_idx = np.argmin(results['trend_strength'])
         
-        # Create comparison chart
-        comparison_fig = make_subplots(
-            rows=2, 
-            cols=1,
+        # Create a subplot grid
+        extreme_fig = make_subplots(
+            rows=3, 
+            cols=2,
             subplot_titles=[
-                f"Most Direction Changes: {results['direction_changes'][max_idx]:.2f}%",
-                f"Least Direction Changes: {results['direction_changes'][min_idx]:.2f}%"
+                f"Highest Direction Changes: {results['direction_changes'][high_dir_change_idx]:.2f}%",
+                f"Lowest Direction Changes: {results['direction_changes'][low_dir_change_idx]:.2f}%",
+                f"Highest Choppiness: {results['choppiness'][high_chop_idx]:.2f}",
+                f"Lowest Choppiness: {results['choppiness'][low_chop_idx]:.2f}",
+                f"Highest Trend Strength: {results['trend_strength'][high_trend_idx]:.2f}",
+                f"Lowest Trend Strength: {results['trend_strength'][low_trend_idx]:.2f}"
             ],
-            vertical_spacing=0.12
+            vertical_spacing=0.1
         )
         
-        # Add the most direction changes path
-        comparison_fig.add_trace(
-            go.Scatter(
-                y=results['paths'][max_idx],
-                mode='lines',
-                name=f"Most Changes ({results['direction_changes'][max_idx]:.2f}%)",
-                line=dict(color='red')
-            ),
+        # Add each extreme case
+        extreme_fig.add_trace(
+            go.Scatter(y=results['paths'][high_dir_change_idx], mode='lines', name="Highest Dir Changes", line=dict(color='red')),
             row=1, col=1
         )
-        
-        # Add the least direction changes path
-        comparison_fig.add_trace(
-            go.Scatter(
-                y=results['paths'][min_idx],
-                mode='lines',
-                name=f"Least Changes ({results['direction_changes'][min_idx]:.2f}%)",
-                line=dict(color='blue')
-            ),
+        extreme_fig.add_trace(
+            go.Scatter(y=results['paths'][low_dir_change_idx], mode='lines', name="Lowest Dir Changes", line=dict(color='blue')),
+            row=1, col=2
+        )
+        extreme_fig.add_trace(
+            go.Scatter(y=results['paths'][high_chop_idx], mode='lines', name="Highest Choppiness", line=dict(color='purple')),
             row=2, col=1
         )
-        
-        comparison_fig.update_layout(
-            height=600,
-            showlegend=True
+        extreme_fig.add_trace(
+            go.Scatter(y=results['paths'][low_chop_idx], mode='lines', name="Lowest Choppiness", line=dict(color='green')),
+            row=2, col=2
+        )
+        extreme_fig.add_trace(
+            go.Scatter(y=results['paths'][high_trend_idx], mode='lines', name="Highest Trend Strength", line=dict(color='orange')),
+            row=3, col=1
+        )
+        extreme_fig.add_trace(
+            go.Scatter(y=results['paths'][low_trend_idx], mode='lines', name="Lowest Trend Strength", line=dict(color='brown')),
+            row=3, col=2
         )
         
-        st.plotly_chart(comparison_fig, use_container_width=True)
-    
-    # Statistics tab
-    with tab3:
-        st.header("Simulation Statistics")
+        extreme_fig.update_layout(
+            height=800,
+            showlegend=False
+        )
         
-        # Create dataframe with all statistics
+        st.plotly_chart(extreme_fig, use_container_width=True)
+    
+    # Metrics analysis in tab 3
+    with tab3:
+        st.header("Metrics Analysis")
+        
+        # Create dataframe with all metrics and statistics
         stats_df = pd.DataFrame({
             'Direction Changes (%)': results['direction_changes'],
+            'Choppiness': results['choppiness'],
+            'Trend Strength': results['trend_strength'],
             'Final Price ($)': results['final_prices'],
             'Max Price ($)': results['max_prices'],
             'Min Price ($)': results['min_prices'],
@@ -442,6 +650,7 @@ if run_button:
         })
         
         # Display the dataframe
+        st.subheader("All Metrics")
         st.dataframe(stats_df, height=400, use_container_width=True)
         
         # Correlation heatmap
@@ -451,7 +660,7 @@ if run_button:
         corr_matrix = stats_df.corr()
         
         # Create heatmap
-        fig = go.Figure(data=go.Heatmap(
+        fig_corr = go.Figure(data=go.Heatmap(
             z=corr_matrix.values,
             x=corr_matrix.columns,
             y=corr_matrix.index,
@@ -459,12 +668,79 @@ if run_button:
             zmin=-1, zmax=1
         ))
         
-        fig.update_layout(
+        fig_corr.update_layout(
             title="Correlation Between Different Metrics",
-            height=500
+            height=600
         )
         
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig_corr, use_container_width=True)
+        
+        # Scatter plots matrix for key relationships
+        st.subheader("Relationship Between Key Metrics")
+        
+        # Create 2x2 scatter plot matrix
+        scatter_fig = make_subplots(
+            rows=2, 
+            cols=2,
+            subplot_titles=[
+                "Direction Changes vs Final Price",
+                "Choppiness vs Final Price",
+                "Trend Strength vs Final Price",
+                "Direction Changes vs Drawdown"
+            ]
+        )
+        
+        # Add scatter plots
+        scatter_fig.add_trace(
+            go.Scatter(
+                x=stats_df['Direction Changes (%)'],
+                y=stats_df['Final Price ($)'],
+                mode='markers',
+                marker=dict(color='blue', size=5, opacity=0.6),
+                name="DC vs Price"
+            ),
+            row=1, col=1
+        )
+        
+        scatter_fig.add_trace(
+            go.Scatter(
+                x=stats_df['Choppiness'],
+                y=stats_df['Final Price ($)'],
+                mode='markers',
+                marker=dict(color='green', size=5, opacity=0.6),
+                name="Chop vs Price"
+            ),
+            row=1, col=2
+        )
+        
+        scatter_fig.add_trace(
+            go.Scatter(
+                x=stats_df['Trend Strength'],
+                y=stats_df['Final Price ($)'],
+                mode='markers',
+                marker=dict(color='purple', size=5, opacity=0.6),
+                name="Trend vs Price"
+            ),
+            row=2, col=1
+        )
+        
+        scatter_fig.add_trace(
+            go.Scatter(
+                x=stats_df['Direction Changes (%)'],
+                y=stats_df['Max Drawdown (%)'],
+                mode='markers',
+                marker=dict(color='red', size=5, opacity=0.6),
+                name="DC vs Drawdown"
+            ),
+            row=2, col=2
+        )
+        
+        scatter_fig.update_layout(
+            height=800,
+            showlegend=False
+        )
+        
+        st.plotly_chart(scatter_fig, use_container_width=True)
         
         # Summary statistics
         st.subheader("Summary Statistics")
@@ -473,21 +749,37 @@ if run_button:
         # Interpretation
         st.subheader("Interpretation")
         
+        # Generate interpretation based on the results
+        avg_dir_change = np.mean(results['direction_changes'])
+        avg_choppiness = np.mean(results['choppiness'])
+        avg_trend_strength = np.mean(results['trend_strength'])
+        correlation_dc_price = corr_matrix.loc['Direction Changes (%)', 'Final Price ($)']
+        correlation_chop_price = corr_matrix.loc['Choppiness', 'Final Price ($)']
+        correlation_trend_price = corr_matrix.loc['Trend Strength', 'Final Price ($)']
+        
         interpretation = f"""
-        The target direction changes percentage was **{direction_changes_pct}%**, and the simulations achieved an average of **{np.mean(results['direction_changes']):.2f}%**.
+        The simulation targeted these metrics:
+        - Direction Changes: **{direction_changes_pct}%** (achieved: **{avg_dir_change:.2f}%**)
+        - Choppiness: **{choppiness}** (achieved: **{avg_choppiness:.2f}**)
+        - Trend Strength: **{trend_strength}** (achieved: **{avg_trend_strength:.2f}**)
         
         **Key observations:**
-        - {'Higher' if np.mean(results['max_drawdowns']) > 20 else 'Lower'} direction changes typically lead to {'higher' if np.mean(results['max_drawdowns']) > 20 else 'lower'} drawdowns
-        - The average volatility across all simulations was **{np.mean(results['volatilities']):.2f}%**
-        - **{sum(p > initial_price for p in results['final_prices']) / num_simulations * 100:.1f}%** of paths ended higher than the starting price
-        - The median final price was **${np.median(results['final_prices']):.2f}**
+        - The correlation between Direction Changes and Final Price is **{correlation_dc_price:.2f}**
+        - The correlation between Choppiness and Final Price is **{correlation_chop_price:.2f}**
+        - The correlation between Trend Strength and Final Price is **{correlation_trend_strength:.2f}**
         
-        This simulation demonstrates how different direction change percentages affect price movement patterns.
+        {'Higher' if avg_dir_change > 50 else 'Lower'} direction changes typically lead to {'more volatile' if avg_dir_change > 50 else 'more trending'} price action.
+        {'Higher' if avg_choppiness > 150 else 'Lower'} choppiness results in {'more oscillation within ranges' if avg_choppiness > 150 else 'cleaner price movements'}.
+        {'Higher' if avg_trend_strength > 0.5 else 'Lower'} trend strength leads to {'stronger directional movements' if avg_trend_strength > 0.5 else 'more price inefficiency'}.
+        
+        **{sum(p > initial_price for p in results['final_prices']) / num_simulations * 100:.1f}%** of paths ended higher than the starting price, suggesting a {'bullish' if sum(p > initial_price for p in results['final_prices']) > num_simulations/2 else 'bearish'} bias in the simulations.
+        
+        This demonstrates how different combinations of these three metrics create distinct price behavior patterns.
         """
         
         st.markdown(interpretation)
-        
-    # Data export tab
+    
+    # Data export in tab 4
     with tab4:
         st.header("Data Export")
         
@@ -499,7 +791,7 @@ if run_button:
         st.download_button(
             label="Download Statistics CSV",
             data=csv_stats,
-            file_name=f"direction_changes_stats_{direction_changes_pct:.0f}pct.csv",
+            file_name=f"multi_metric_stats_DC{direction_changes_pct:.0f}_CH{choppiness:.0f}_TS{trend_strength:.2f}.csv",
             mime="text/csv",
             help="Download statistics for all simulations as a CSV file"
         )
@@ -516,10 +808,13 @@ if run_button:
         # Random selection for export
         export_indices = np.random.choice(len(results['paths']), size=num_paths_export, replace=False)
         export_paths = [results['paths'][i] for i in export_indices]
-        export_dir_changes = [results['direction_changes'][i] for i in export_indices]
+        export_metrics = [
+            f"DC{results['direction_changes'][i]:.1f}_CH{results['choppiness'][i]:.1f}_TS{results['trend_strength'][i]:.2f}"
+            for i in export_indices
+        ]
         
         # Create dataframe for export
-        paths_df = pd.DataFrame({f"Path_{i+1}_{export_dir_changes[i]:.1f}pct": path for i, path in enumerate(export_paths)})
+        paths_df = pd.DataFrame({f"Path_{i+1}_{metric}": path for i, (path, metric) in enumerate(zip(export_paths, export_metrics))})
         
         # Add tick column
         paths_df.insert(0, 'Tick', range(num_ticks))
@@ -529,7 +824,7 @@ if run_button:
         st.download_button(
             label="Download Price Paths CSV",
             data=csv_paths,
-            file_name=f"direction_changes_paths_{direction_changes_pct:.0f}pct.csv",
+            file_name=f"multi_metric_paths_DC{direction_changes_pct:.0f}_CH{choppiness:.0f}_TS{trend_strength:.2f}.csv",
             mime="text/csv",
             help="Download selected price paths as a CSV file"
         )
@@ -554,7 +849,7 @@ if run_button:
             st.download_button(
                 label="Download Complete Dataset",
                 data=csv_all,
-                file_name=f"all_paths_{direction_changes_pct:.0f}pct_{num_simulations}_sims.csv",
+                file_name=f"all_paths_DC{direction_changes_pct:.0f}_CH{choppiness:.0f}_TS{trend_strength:.2f}_{num_simulations}_sims.csv",
                 mime="text/csv",
                 help="Download all simulated price paths"
             )
@@ -566,56 +861,75 @@ else:
         st.info("Set your desired simulation parameters in the sidebar and click 'Run Simulation' to begin.")
         
         st.markdown("""
-        ## Understanding Direction Changes
+        ## Understanding the Metrics
         
-        **Direction changes** is a metric that measures how often price movement changes direction:
+        These three metrics work together to describe different aspects of price behavior:
         
+        ### 1. Direction Changes (%)
+        Measures how frequently the price changes direction:
         - **Low values (0-30%)**: Strong trending behavior with few reversals
         - **Medium values (30-50%)**: Mild trending with some choppiness
         - **Values near 50%**: Similar to a random walk
         - **High values (60-100%)**: Very choppy, oscillating price action
         
-        The simulation allows you to see what different price paths might look like with various direction change percentages.
+        ### 2. Choppiness
+        Measures price oscillation within a range:
+        - **Low values (100-150)**: Cleaner price movements with less oscillation
+        - **Medium values (150-200)**: Moderate oscillation within ranges
+        - **High values (200+)**: Significant oscillation with price repeatedly covering the same range
+        
+        ### 3. Trend Strength
+        Measures the directional strength of price movement:
+        - **Low values (0.1-0.3)**: Price oscillates a lot without making much net progress
+        - **Medium values (0.3-0.6)**: Moderate trending with some inefficiency
+        - **High values (0.6-0.9)**: Strong trending with efficient directional movement
         """)
         
-        # Show example images for different direction change percentages
+        # Show example visuals
         col1, col2, col3 = st.columns(3)
         
         with col1:
-            st.markdown("### Low Direction Changes (25%)")
+            st.markdown("### Low Direction Changes")
             st.markdown("*Strong trend with few reversals*")
             
         with col2:
-            st.markdown("### Medium Direction Changes (50%)")
-            st.markdown("*Random walk behavior*")
+            st.markdown("### Medium Choppiness")
+            st.markdown("*Moderate oscillation within ranges*")
             
         with col3:
-            st.markdown("### High Direction Changes (75%)")
-            st.markdown("*Choppy, oscillating price action*")
-            
+            st.markdown("### High Trend Strength")
+            st.markdown("*Efficient directional movement*")
+    
     with tab2:
         st.info("Run a simulation to see example price paths.")
     
     with tab3:
-        st.info("Run a simulation to see detailed statistics.")
+        st.info("Run a simulation to see detailed metrics analysis.")
     
     with tab4:
         st.info("Run a simulation to export the data.")
 
 # Add explanation in the sidebar
 st.sidebar.markdown("---")
-st.sidebar.subheader("About Direction Changes")
+st.sidebar.subheader("About These Metrics")
 st.sidebar.markdown("""
-**Direction changes** measures the frequency of price reversals:
+**Direction Changes (%)** - Frequency of price reversals:
+- Lower values = stronger trends
+- Higher values = choppier price action
+- 50% = random walk
 
-- **Lower values** indicate stronger trends with fewer reversals
-- **Higher values** indicate choppier, oscillating price action
-- **50%** approximates a random walk
+**Choppiness** - Price oscillation within ranges:
+- Lower values = cleaner price movement
+- Higher values = more oscillation in a range
 
-This metric is used by traders to understand market behavior and adjust trading strategies accordingly.
+**Trend Strength** - Directional efficiency:
+- Lower values = inefficient price action
+- Higher values = efficient directional movement
+
+These metrics together create realistic market behavior patterns.
 """)
 
 # Add footer
 st.sidebar.markdown("---")
-st.sidebar.markdown("*Direction Changes Price Path Simulator*")
+st.sidebar.markdown("*Multi-Metric Crypto Price Path Simulator*")
 st.sidebar.markdown("*Created with Streamlit and Plotly*")
