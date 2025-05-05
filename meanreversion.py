@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 import psycopg2
 import warnings
 import pytz
+import time
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
@@ -223,7 +224,7 @@ class PriceStabilityAnalyzer:
         result_df = pd.DataFrame(results)
         return result_df
 
-    def fetch_and_analyze_data(self, conn, pairs_to_analyze, hours=24):
+    def fetch_and_analyze_data(self, conn, pairs_to_analyze, hours=24, progress_callback=None):
         """
         Fetch data for selected pairs and analyze stability in 15-minute intervals.
         Only for Surf exchange (source_type = 0)
@@ -232,6 +233,7 @@ class PriceStabilityAnalyzer:
             conn: Database connection
             pairs_to_analyze: List of coin pairs to analyze
             hours: Hours to look back for data retrieval
+            progress_callback: Function to call to update progress
             
         Returns:
             Dictionary of DataFrames with stability analysis for each pair
@@ -244,35 +246,58 @@ class PriceStabilityAnalyzer:
         end_time = now.strftime("%Y-%m-%d %H:%M:%S")
         start_time = (now - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
         
-        st.info(f"Retrieving data from the last {hours} hours")
-        st.write(f"Start time: {start_time} (SGT)")
-        st.write(f"End time: {end_time} (SGT)")
+        # Setup progress tracking
+        progress_status = {
+            'message': f"Retrieving data from the last {hours} hours",
+            'progress': 0,
+            'details': f"Start time: {start_time} (SGT), End time: {end_time} (SGT)"
+        }
+        
+        if progress_callback:
+            progress_callback(progress_status)
         
         try:
             # Get relevant partition tables for this time range
+            progress_status['message'] = "Finding partition tables..."
+            if progress_callback:
+                progress_callback(progress_status)
+                
             partition_tables = self._get_partition_tables(conn, start_time, end_time)
             
             if not partition_tables:
                 # If no tables found, try looking one day earlier (for edge cases)
-                st.warning("No tables found for the specified range, trying to look back one more day...")
+                progress_status['message'] = "No tables found, trying one more day back..."
+                if progress_callback:
+                    progress_callback(progress_status)
+                    
                 alt_start_time = (now - timedelta(hours=hours+24)).strftime("%Y-%m-%d %H:%M:%S")
                 partition_tables = self._get_partition_tables(conn, alt_start_time, end_time)
                 
                 if not partition_tables:
-                    st.error("No data tables available for the selected time range, even with extended lookback.")
+                    progress_status['message'] = "No data tables available for the selected time range."
+                    if progress_callback:
+                        progress_callback(progress_status)
                     return None
             
-            # Progress bar
-            progress_bar = st.progress(0)
-            status_text = st.empty()
+            progress_status['message'] = f"Found {len(partition_tables)} partition tables. Starting analysis..."
+            progress_status['details'] = f"Tables: {', '.join(partition_tables)}"
+            if progress_callback:
+                progress_callback(progress_status)
+                time.sleep(0.5)  # Short pause to show message
             
             # Build and execute queries for each pair
             stability_results = {}
             daily_averages = {}
             
             for i, pair in enumerate(pairs_to_analyze):
-                progress_bar.progress((i) / len(pairs_to_analyze))
-                status_text.text(f"Analyzing {pair} ({i+1}/{len(pairs_to_analyze)})")
+                # Update progress
+                progress_pct = (i) / len(pairs_to_analyze)
+                progress_status['progress'] = progress_pct
+                progress_status['message'] = f"Analyzing {pair} ({i+1}/{len(pairs_to_analyze)})"
+                progress_status['details'] = f"Building query..."
+                
+                if progress_callback:
+                    progress_callback(progress_status)
                 
                 # Build query
                 query = self._build_query_for_partition_tables(
@@ -284,11 +309,19 @@ class PriceStabilityAnalyzer:
                 
                 if query:
                     try:
+                        # Update status
+                        progress_status['details'] = f"Executing query for {pair}..."
+                        if progress_callback:
+                            progress_callback(progress_status)
+                        
                         # Execute query
                         df = pd.read_sql_query(query, conn)
                         
                         if len(df) > 0:
-                            st.write(f"Found {len(df)} records for SURF_{pair}")
+                            # Update status
+                            progress_status['details'] = f"Found {len(df)} records for SURF_{pair}. Processing data..."
+                            if progress_callback:
+                                progress_callback(progress_status)
                             
                             # Analyze price stability
                             stability_df = self.analyze_price_stability(
@@ -304,17 +337,32 @@ class PriceStabilityAnalyzer:
                                 daily_avg = stability_df['percentage_in_range'].mean()
                                 daily_averages[pair] = daily_avg
                                 
-                                st.write(f"Daily average: {daily_avg:.2f}% of prices within ±{self.tolerance_percentage}% of interval median")
+                                # Update status
+                                progress_status['details'] = f"Daily average: {daily_avg:.2f}% of prices within ±{self.tolerance_percentage}% of interval median"
+                                if progress_callback:
+                                    progress_callback(progress_status)
                             else:
-                                st.warning(f"No stability data calculated for SURF_{pair}")
+                                # Update status
+                                progress_status['details'] = f"No stability data calculated for SURF_{pair}"
+                                if progress_callback:
+                                    progress_callback(progress_status)
                         else:
-                            st.warning(f"No data found for SURF_{pair}")
+                            # Update status
+                            progress_status['details'] = f"No data found for SURF_{pair}"
+                            if progress_callback:
+                                progress_callback(progress_status)
                     except Exception as e:
-                        st.error(f"Database query error for SURF_{pair}: {e}")
+                        # Update status
+                        progress_status['details'] = f"Database query error for SURF_{pair}: {str(e)}"
+                        if progress_callback:
+                            progress_callback(progress_status)
             
             # Final progress update
-            progress_bar.progress(1.0)
-            status_text.text(f"Analysis complete!")
+            progress_status['progress'] = 1.0
+            progress_status['message'] = f"Analysis complete!"
+            progress_status['details'] = f"Analyzed {len(stability_results)} pairs successfully"
+            if progress_callback:
+                progress_callback(progress_status)
             
             return {
                 'stability_results': stability_results,
@@ -322,7 +370,9 @@ class PriceStabilityAnalyzer:
             }
                 
         except Exception as e:
-            st.error(f"Error fetching and processing data: {e}")
+            progress_status['message'] = f"Error fetching and processing data: {str(e)}"
+            if progress_callback:
+                progress_callback(progress_status)
             import traceback
             traceback.print_exc()
             return None
@@ -439,25 +489,39 @@ if st.session_state.get('analyze_clicked', False):
         # Run analysis
         st.header(f"Price Stability Analysis for SURF")
         
-        # Add a progress container
-        progress_container = st.empty()
-        with progress_container.container():
-            st.info("Starting analysis... This may take a few minutes depending on the number of pairs selected.")
+        # Create improved progress indicators
+        progress_container = st.container()
+        
+        with progress_container:
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            details_text = st.empty()
             
-            with st.spinner("Fetching and analyzing data..."):
+            # Define progress callback
+            def update_progress(status):
+                progress_bar.progress(status['progress'])
+                status_text.write(status['message'])
+                details_text.write(status['details'])
+            
+            with st.spinner("Initializing analysis..."):
+                # Call the analyzer with progress callback
                 results = analyzer.fetch_and_analyze_data(
                     conn=conn,
                     pairs_to_analyze=st.session_state.selected_pairs,
-                    hours=st.session_state.hours
+                    hours=st.session_state.hours,
+                    progress_callback=update_progress
                 )
             
-            # Clear the progress container after analysis is complete
-            progress_container.empty()
+            # Keep progress visible for a moment to show completion
+            time.sleep(1)
         
         if results:
             # Store results in session state
             st.session_state.stability_results = results['stability_results']
             st.session_state.daily_averages = results['daily_averages']
+            
+            # Show completion message
+            st.success(f"Analysis complete! Analyzed {len(results['stability_results'])} pairs successfully.")
         else:
             st.error("Failed to analyze data. Please try again with different parameters.")
         
