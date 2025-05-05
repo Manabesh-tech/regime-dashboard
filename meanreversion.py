@@ -364,46 +364,14 @@ def fetch_trading_pairs():
 # Get trading pairs from database
 all_pairs = fetch_trading_pairs()
 
-# Setup sidebar with analysis options
+# Create tabs for different views
+tab1, tab2 = st.tabs(["Time Series Analysis", "Daily Rankings"])
+
+# Setup sidebar with minimal options - just exchange and hours
 with st.sidebar:
     st.header("Analysis Parameters")
     
-    # Initialize session state for selections if not present
-    if 'selected_pairs' not in st.session_state:
-        st.session_state.selected_pairs = ["ETH/USDT", "BTC/USDT"]  # Default selection
-    
-    # Create buttons with more prominent styling
-    st.markdown("### Quick Selection")
-
-    # Main selection buttons in a single row
-    col1, col2 = st.columns(2)
-
-    with col1:
-        if st.button("Select All Pairs", type="primary", use_container_width=True):
-            st.session_state.selected_pairs = all_pairs
-            st.rerun()
-
-    with col2:
-        if st.button("Clear All", type="secondary", use_container_width=True):
-            st.session_state.selected_pairs = []
-            st.rerun()
-
-    # Additional options in a new row
-    col3, col4 = st.columns(2)
-
-    with col3:
-        if st.button("Major Coins", use_container_width=True):
-            st.session_state.selected_pairs = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "DOGE/USDT"]
-            st.rerun()
-
-    with col4:
-        if st.button("Default Pairs", use_container_width=True):
-            st.session_state.selected_pairs = ["ETH/USDT", "BTC/USDT"]
-            st.rerun()
-
-    st.markdown("---")  # Add a separator
-    
-    # Create the form
+    # Create the form with minimal options
     with st.form("price_stability_form"):
         # Exchange selection
         exchange = st.selectbox(
@@ -422,30 +390,18 @@ with st.sidebar:
             help="How many hours of historical data to retrieve"
         )
         
-        # Create multiselect for pairs
-        selected_pairs = st.multiselect(
-            "Select Pairs to Analyze",
-            options=all_pairs,
-            default=st.session_state.selected_pairs,
-            help="Select one or more cryptocurrency pairs to analyze"
-        )
-        
         # Add submit button
-        submit_button = st.form_submit_button("Analyze Price Stability")
+        submit_button = st.form_submit_button("Analyze All Coins")
         
         # Update session state when form is submitted
         if submit_button:
-            st.session_state.selected_pairs = selected_pairs
             st.session_state.hours = hours
             st.session_state.exchange = exchange
             st.session_state.analyze_clicked = True
             st.rerun()
 
-# Main content - Create tabs for different views
-tab1, tab2 = st.tabs(["Time Series Analysis", "Daily Rankings"])
-
 # Check if we should run the analysis
-if st.session_state.get('analyze_clicked', False):
+if st.session_state.get('analyze_clicked', False) or 'stability_results' not in st.session_state:
     # Clear cache and previous data at start of analysis to ensure fresh data
     st.cache_data.clear()
     
@@ -456,173 +412,188 @@ if st.session_state.get('analyze_clicked', False):
     
     if not conn:
         st.error("Database connection not available.")
-    elif not st.session_state.selected_pairs:
-        st.error("Please enter at least one pair to analyze.")
+    elif not all_pairs:
+        st.error("No trading pairs found in the database.")
     else:
         # Initialize analyzer
         analyzer = PriceStabilityAnalyzer()
         
-        # Run analysis
-        st.header(f"Price Stability Analysis for {st.session_state.exchange.upper()}")
+        # Run analysis on ALL pairs
+        st.header(f"Price Stability Analysis for {st.session_state.get('exchange', 'surf').upper()}")
         
         # Add a progress container
         progress_container = st.empty()
         with progress_container.container():
-            st.info("Starting analysis... This may take a few minutes depending on the number of pairs selected.")
+            st.info("Starting analysis on all available pairs... This may take several minutes.")
             
             with st.spinner("Fetching and analyzing data..."):
                 results = analyzer.fetch_and_analyze_data(
                     conn=conn,
-                    pairs_to_analyze=st.session_state.selected_pairs,
-                    exchange=st.session_state.exchange,
-                    hours=st.session_state.hours
+                    pairs_to_analyze=all_pairs,  # Use ALL pairs
+                    exchange=st.session_state.get('exchange', 'surf'),
+                    hours=st.session_state.get('hours', 24)
                 )
             
             # Clear the progress container after analysis is complete
             progress_container.empty()
         
         if results:
-            stability_results = results['stability_results']
-            daily_averages = results['daily_averages']
-            
-            # Tab 1: Time Series Analysis
-            with tab1:
-                st.header("Time Series Analysis")
-                st.write(f"Percentage of prices within ±{TOLERANCE_PERCENTAGE}% of {INTERVAL_MINUTES}-minute interval median")
-                
-                # Create time series plots for each pair
-                for pair, df in stability_results.items():
-                    st.subheader(f"{pair} Stability")
-                    
-                    # Create line chart
-                    fig = px.line(
-                        df,
-                        x='interval',
-                        y='percentage_in_range',
-                        title=f"{pair} - Percentage of prices within ±{TOLERANCE_PERCENTAGE}% of interval median",
-                        labels={
-                            'interval': 'Time (15-minute intervals)',
-                            'percentage_in_range': '% within ±0.5% of median'
-                        }
-                    )
-                    
-                    # Add reference line at 100%
-                    fig.add_shape(
-                        type="line",
-                        x0=df['interval'].min(),
-                        y0=100,
-                        x1=df['interval'].max(),
-                        y1=100,
-                        line=dict(
-                            color="green",
-                            width=1,
-                            dash="dash",
-                        )
-                    )
-                    
-                    # Add reference line at 50%
-                    fig.add_shape(
-                        type="line",
-                        x0=df['interval'].min(),
-                        y0=50,
-                        x1=df['interval'].max(),
-                        y1=50,
-                        line=dict(
-                            color="red",
-                            width=1,
-                            dash="dash",
-                        )
-                    )
-                    
-                    # Update layout
-                    fig.update_layout(
-                        height=400,
-                        xaxis_title="Time (15-minute intervals)",
-                        yaxis_title="Percentage within ±0.5%",
-                        yaxis=dict(
-                            range=[0, 105]  # Set y-axis range from 0 to 105%
-                        )
-                    )
-                    
-                    st.plotly_chart(fig, use_container_width=True)
-                    
-                    # Add daily average
-                    daily_avg = daily_averages.get(pair, 0)
-                    st.write(f"Daily average: {daily_avg:.2f}% of prices within ±{TOLERANCE_PERCENTAGE}% of interval median")
-                    
-                    # Add download button for the data
-                    csv = df.to_csv(index=False).encode('utf-8')
-                    st.download_button(
-                        label=f"Download {pair} Data",
-                        data=csv,
-                        file_name=f"price_stability_{st.session_state.exchange}_{pair.replace('/', '_')}.csv",
-                        mime="text/csv"
-                    )
-                    
-                    st.markdown("---")
-            
-            # Tab 2: Daily Rankings
-            with tab2:
-                st.header("Daily Ranking by Price Stability")
-                st.write(f"Average percentage of prices within ±{TOLERANCE_PERCENTAGE}% of {INTERVAL_MINUTES}-minute interval median")
-                
-                # Create DataFrame with daily averages
-                if daily_averages:
-                    avg_df = pd.DataFrame({
-                        'Pair': list(daily_averages.keys()),
-                        'Average % within ±0.5%': list(daily_averages.values())
-                    })
-                    
-                    # Sort by average (descending)
-                    avg_df = avg_df.sort_values('Average % within ±0.5%', ascending=False)
-                    
-                    # Add rank column
-                    avg_df.insert(0, 'Rank', range(1, len(avg_df) + 1))
-                    
-                    # Display as table
-                    st.dataframe(avg_df, use_container_width=True)
-                    
-                    # Create bar chart
-                    fig = px.bar(
-                        avg_df,
-                        x='Pair',
-                        y='Average % within ±0.5%',
-                        title=f"Daily Average Stability Ranking ({st.session_state.exchange.upper()})",
-                        labels={
-                            'Pair': 'Cryptocurrency Pair',
-                            'Average % within ±0.5%': '% within ±0.5% of median'
-                        },
-                        color='Average % within ±0.5%',
-                        color_continuous_scale='Viridis'
-                    )
-                    
-                    # Update layout
-                    fig.update_layout(
-                        height=500,
-                        xaxis_title="Cryptocurrency Pair",
-                        yaxis_title="Daily Average % within ±0.5%",
-                        yaxis=dict(
-                            range=[0, max(avg_df['Average % within ±0.5%']) * 1.1]  # Set y-axis range with some padding
-                        )
-                    )
-                    
-                    st.plotly_chart(fig, use_container_width=True)
-                    
-                    # Add download button for the rankings
-                    csv = avg_df.to_csv(index=False).encode('utf-8')
-                    st.download_button(
-                        label="Download Rankings",
-                        data=csv,
-                        file_name=f"price_stability_rankings_{st.session_state.exchange}.csv",
-                        mime="text/csv"
-                    )
-                else:
-                    st.warning("No daily averages calculated.")
+            # Store results in session state to avoid recomputing when switching tabs
+            st.session_state.stability_results = results['stability_results']
+            st.session_state.daily_averages = results['daily_averages']
         else:
             st.error("Failed to analyze data. Please try again with different parameters.")
         
         # Reset the analyze_clicked flag
         st.session_state.analyze_clicked = False
+
+# Display results if available
+if 'stability_results' in st.session_state and 'daily_averages' in st.session_state:
+    stability_results = st.session_state.stability_results
+    daily_averages = st.session_state.daily_averages
+    
+    # Tab 1: Time Series Analysis
+    with tab1:
+        st.header("Time Series Analysis")
+        st.write(f"Percentage of prices within ±{TOLERANCE_PERCENTAGE}% of {INTERVAL_MINUTES}-minute interval median")
+        
+        # Add a multiselect to filter which pairs to display
+        pairs_to_display = st.multiselect(
+            "Select pairs to display",
+            options=list(stability_results.keys()),
+            default=list(stability_results.keys())[:5] if len(stability_results) > 5 else list(stability_results.keys())
+        )
+        
+        # Create time series plots for selected pairs
+        for pair in pairs_to_display:
+            if pair in stability_results:
+                df = stability_results[pair]
+                st.subheader(f"{pair} Stability")
+                
+                # Create line chart
+                fig = px.line(
+                    df,
+                    x='interval',
+                    y='percentage_in_range',
+                    title=f"{pair} - Percentage of prices within ±{TOLERANCE_PERCENTAGE}% of interval median",
+                    labels={
+                        'interval': 'Time (15-minute intervals)',
+                        'percentage_in_range': '% within ±0.5% of median'
+                    }
+                )
+                
+                # Add reference line at 100%
+                fig.add_shape(
+                    type="line",
+                    x0=df['interval'].min(),
+                    y0=100,
+                    x1=df['interval'].max(),
+                    y1=100,
+                    line=dict(
+                        color="green",
+                        width=1,
+                        dash="dash",
+                    )
+                )
+                
+                # Add reference line at 50%
+                fig.add_shape(
+                    type="line",
+                    x0=df['interval'].min(),
+                    y0=50,
+                    x1=df['interval'].max(),
+                    y1=50,
+                    line=dict(
+                        color="red",
+                        width=1,
+                        dash="dash",
+                    )
+                )
+                
+                # Update layout
+                fig.update_layout(
+                    height=400,
+                    xaxis_title="Time (15-minute intervals)",
+                    yaxis_title="Percentage within ±0.5%",
+                    yaxis=dict(
+                        range=[0, 105]  # Set y-axis range from 0 to 105%
+                    )
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Add daily average
+                daily_avg = daily_averages.get(pair, 0)
+                st.write(f"Daily average: {daily_avg:.2f}% of prices within ±{TOLERANCE_PERCENTAGE}% of interval median")
+                
+                # Add download button for the data
+                csv = df.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label=f"Download {pair} Data",
+                    data=csv,
+                    file_name=f"price_stability_{st.session_state.get('exchange', 'surf')}_{pair.replace('/', '_')}.csv",
+                    mime="text/csv"
+                )
+                
+                st.markdown("---")
+    
+    # Tab 2: Daily Rankings
+    with tab2:
+        st.header("Daily Ranking by Price Stability")
+        st.write(f"Average percentage of prices within ±{TOLERANCE_PERCENTAGE}% of {INTERVAL_MINUTES}-minute interval median")
+        
+        # Create DataFrame with daily averages
+        if daily_averages:
+            avg_df = pd.DataFrame({
+                'Pair': list(daily_averages.keys()),
+                'Average % within ±0.5%': list(daily_averages.values())
+            })
+            
+            # Sort by average (descending)
+            avg_df = avg_df.sort_values('Average % within ±0.5%', ascending=False)
+            
+            # Add rank column
+            avg_df.insert(0, 'Rank', range(1, len(avg_df) + 1))
+            
+            # Display as table
+            st.dataframe(avg_df, use_container_width=True)
+            
+            # Create bar chart
+            fig = px.bar(
+                avg_df,
+                x='Pair',
+                y='Average % within ±0.5%',
+                title=f"Daily Average Stability Ranking ({st.session_state.get('exchange', 'surf').upper()})",
+                labels={
+                    'Pair': 'Cryptocurrency Pair',
+                    'Average % within ±0.5%': '% within ±0.5% of median'
+                },
+                color='Average % within ±0.5%',
+                color_continuous_scale='Viridis'
+            )
+            
+            # Update layout
+            fig.update_layout(
+                height=500,
+                xaxis_title="Cryptocurrency Pair",
+                yaxis_title="Daily Average % within ±0.5%",
+                yaxis=dict(
+                    range=[0, max(avg_df['Average % within ±0.5%']) * 1.1]  # Set y-axis range with some padding
+                )
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Add download button for the rankings
+            csv = avg_df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="Download Rankings",
+                data=csv,
+                file_name=f"price_stability_rankings_{st.session_state.get('exchange', 'surf')}.csv",
+                mime="text/csv"
+            )
+        else:
+            st.warning("No daily averages calculated.")
 
 # Add explanation in the sidebar
 st.sidebar.markdown("---")
