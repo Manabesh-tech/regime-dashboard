@@ -21,6 +21,15 @@ with st.sidebar:
         help="How often the price changes direction"
     )
     
+    choppiness = st.slider(
+        "Choppiness",
+        min_value=100.0,
+        max_value=300.0,
+        value=150.0,
+        step=10.0,
+        help="Price oscillation within a range. Higher values = more oscillation"
+    )
+    
     num_ticks = st.select_slider(
         "Number of Ticks",
         options=[100, 500, 1000, 5000],
@@ -48,8 +57,8 @@ with st.sidebar:
     run_button = st.button("Run Simulation", type="primary")
 
 # Function to simulate a price path
-def simulate_price_path(num_ticks, initial_price, direction_change_pct):
-    """Simulates a price path with the given direction change percentage."""
+def simulate_price_path(num_ticks, initial_price, direction_change_pct, target_choppiness):
+    """Simulates a price path with the given direction change percentage and choppiness."""
     # Convert to proportion
     p_change = direction_change_pct / 100.0
     
@@ -60,11 +69,29 @@ def simulate_price_path(num_ticks, initial_price, direction_change_pct):
     # Start with random direction
     current_direction = np.random.choice([-1, 1])
     
-    # Base volatility - simple function of initial price
-    volatility = initial_price * 0.002
+    # Window size for measuring local choppiness
+    window_size = min(20, num_ticks // 10)
+    
+    # Base volatility - derived from initial price and target choppiness
+    base_volatility = initial_price * 0.002 * (target_choppiness / 150)
     
     # Generate price path
     for i in range(1, num_ticks):
+        # Calculate current choppiness if we have enough points
+        if i >= window_size:
+            window_prices = prices[max(0, i-window_size):i]
+            
+            # Calculate current choppiness
+            price_range = max(window_prices) - min(window_prices)
+            sum_movements = np.sum(np.abs(np.diff(window_prices)))
+            current_choppiness = (sum_movements / price_range * 100) if price_range > 0 else 150
+            
+            # Adjust volatility based on current vs target choppiness
+            choppiness_ratio = target_choppiness / current_choppiness if current_choppiness > 0 else 1
+            volatility = base_volatility * min(max(choppiness_ratio * 0.5, 0.5), 1.5)
+        else:
+            volatility = base_volatility
+        
         # Decide whether to change direction
         if np.random.random() < p_change:
             current_direction *= -1
@@ -90,6 +117,21 @@ def calculate_metrics(prices):
     total_periods = len(signs) - 1
     direction_change_pct = (direction_changes / total_periods * 100) if total_periods > 0 else 0
     
+    # Calculate choppiness
+    window = min(14, len(prices) // 10)  # Use a reasonable window size
+    diff = prices.diff().abs()
+    sum_abs_changes = diff.rolling(window, min_periods=1).sum()
+    price_range = prices.rolling(window, min_periods=1).max() - prices.rolling(window, min_periods=1).min()
+    
+    # Avoid division by zero
+    epsilon = 1e-10
+    choppiness_values = 100 * sum_abs_changes / (price_range + epsilon)
+    
+    # Cap extreme values and handle NaN
+    choppiness_values = np.minimum(choppiness_values, 1000)
+    choppiness_values = choppiness_values.fillna(200)
+    choppiness_avg = choppiness_values.mean()
+    
     # Median price
     median_price = prices.median()
     
@@ -106,17 +148,19 @@ def calculate_metrics(prices):
     
     return {
         'direction_changes': direction_change_pct,
+        'choppiness': choppiness_avg,
         'median_price': median_price,
         'zero_crossings': zero_crossings,
         'points_in_range': percentage_in_range
     }
 
 # Run multiple simulations
-def run_simulations(num_simulations, num_ticks, initial_price, direction_changes_pct):
+def run_simulations(num_simulations, num_ticks, initial_price, direction_changes_pct, choppiness):
     """Run multiple simulations and collect results."""
     paths = []
     metrics = {
         'direction_changes': [],
+        'choppiness': [],
         'median_price': [],
         'zero_crossings': [],
         'points_in_range': []
@@ -127,7 +171,7 @@ def run_simulations(num_simulations, num_ticks, initial_price, direction_changes
     
     for i in range(num_simulations):
         # Simulate path
-        path = simulate_price_path(num_ticks, initial_price, direction_changes_pct)
+        path = simulate_price_path(num_ticks, initial_price, direction_changes_pct, choppiness)
         paths.append(path)
         
         # Calculate metrics
@@ -157,7 +201,8 @@ if run_button:
             num_simulations,
             num_ticks,
             initial_price,
-            direction_changes_pct
+            direction_changes_pct,
+            choppiness
         )
     
     # Calculate execution time
@@ -166,7 +211,7 @@ if run_button:
     
     # Display key metrics
     st.header("Key Metrics")
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     
     with col1:
         st.metric("Median Final Price", f"${np.median(results['metrics']['median_price']):.2f}")
@@ -175,9 +220,12 @@ if run_button:
         st.metric("Avg Direction Changes", f"{np.mean(results['metrics']['direction_changes']):.1f}%")
     
     with col3:
-        st.metric("Avg Zero Crossings", f"{int(np.mean(results['metrics']['zero_crossings']))}")
+        st.metric("Avg Choppiness", f"{np.mean(results['metrics']['choppiness']):.1f}")
     
     with col4:
+        st.metric("Avg Zero Crossings", f"{int(np.mean(results['metrics']['zero_crossings']))}")
+    
+    with col5:
         st.metric("Avg % Within ±0.5% of Median", f"{np.mean(results['metrics']['points_in_range']):.1f}%")
     
     # Display example paths
@@ -193,13 +241,14 @@ if run_button:
     for i, idx in enumerate(example_indices):
         path = results['paths'][idx]
         dir_changes = results['metrics']['direction_changes'][idx]
+        chop = results['metrics']['choppiness'][idx]
         zero_cross = results['metrics']['zero_crossings'][idx]
         in_range = results['metrics']['points_in_range'][idx]
         
         fig.add_trace(go.Scatter(
             y=path,
             mode='lines',
-            name=f"Path {i+1} (DC: {dir_changes:.1f}%, ZC: {zero_cross}, Range: {in_range:.1f}%)"
+            name=f"Path {i+1} (DC: {dir_changes:.1f}%, CH: {chop:.1f}, ZC: {zero_cross}, Range: {in_range:.1f}%)"
         ))
     
     fig.update_layout(
@@ -219,6 +268,7 @@ if run_button:
         'Path': range(1, num_simulations + 1),
         'Median Price ($)': results['metrics']['median_price'],
         'Direction Changes (%)': results['metrics']['direction_changes'],
+        'Choppiness': results['metrics']['choppiness'],
         'Zero Crossings': results['metrics']['zero_crossings'],
         'Points Within ±0.5% (%)': results['metrics']['points_in_range']
     })
@@ -255,13 +305,19 @@ else:
     st.markdown("""
     ## About This Simulator
     
-    This simplified tool generates price paths based on a single parameter:
+    This simplified tool generates price paths based on two key parameters:
     
     ### Direction Changes (%)
     Controls how often the price changes direction:
     - Low values (5-30%): Strong trending behavior
     - Medium values (30-60%): Mild trending with some reversals
     - High values (60-95%): Very choppy, oscillating price action
+    
+    ### Choppiness
+    Controls how much the price oscillates within its range:
+    - Low values (100-150): Cleaner price movements
+    - Medium values (150-200): Moderate oscillation
+    - High values (200-300): Significant oscillation within a range
     
     After simulation, you'll see:
     - Median price across all simulations
