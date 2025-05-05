@@ -7,22 +7,24 @@ from datetime import datetime, timedelta
 import psycopg2
 import warnings
 import pytz
-from scipy import stats
-import math
+from statistics import median
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
 
 # Set page config
 st.set_page_config(
-    page_title="Crypto Mean Reversion vs PNL Monitor",
+    page_title="Crypto Price Stability Analysis",
     page_icon="📊",
     layout="wide"
 )
 
-# --- DB CONFIG ---
+# Always clear cache at startup to ensure fresh data
+st.cache_data.clear()
+
+# Configure database connection
 def init_db_connection():
-    # DB parameters
+    # DB parameters - these should be stored in Streamlit secrets in production
     db_params = {
         'host': 'aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com',
         'port': 5432,
@@ -47,95 +49,70 @@ def init_db_connection():
 # Initialize connection
 conn, db_params = init_db_connection()
 
-# Define timezone constants
-UTC_TZ = pytz.UTC
-SG_TZ = pytz.timezone('Asia/Singapore')
-
 # Main title
-st.title("Crypto Mean Reversion vs Cumulative PNL Monitor")
+st.title("Cryptocurrency Price Stability Analysis")
 
 # Set up the timezone
-now_utc = datetime.now(UTC_TZ)
-now_sg = now_utc.astimezone(SG_TZ)
+singapore_timezone = pytz.timezone('Asia/Singapore')
+now_utc = datetime.now(pytz.utc)
+now_sg = now_utc.astimezone(singapore_timezone)
 st.write(f"Current Singapore Time: {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
 
-# Create session state variables for caching if not already present
-if 'analyzed_data' not in st.session_state:
-    st.session_state.analyzed_data = []
-if 'data_processed' not in st.session_state:
-    st.session_state.data_processed = False
-if 'last_selected_pairs' not in st.session_state:
-    st.session_state.last_selected_pairs = []
-if 'last_hours' not in st.session_state:
-    st.session_state.last_hours = 0
-if 'last_exchange' not in st.session_state:
-    st.session_state.last_exchange = None
-if 'pnl_data_cache' not in st.session_state:
-    st.session_state.pnl_data_cache = {}
-
-class MeanReversionAnalyzer:
-    """Analyzer for mean reversion behaviors in cryptocurrency prices"""
+class PriceStabilityAnalyzer:
+    """Analyzer for cryptocurrency price stability within intervals"""
     
     def __init__(self):
-        self.data = {}  # Main data storage
-        self.time_series_data = {}  # For tracking metrics over time
+        self.interval_minutes = 15  # 15-minute intervals
+        self.tolerance_percentage = 0.5  # ±0.5% tolerance
+        self.exchanges = ['rollbit', 'surf']
         
-        # Metrics for mean reversion analysis
-        self.metrics = [
-            'direction_changes_30min',  # Number of direction changes in last 30 min
-            'absolute_range_pct',       # (local high - local low) / local low
-            'dc_range_ratio',           # Direction changes / range percentage ratio
-            'hurst_exponent'            # Hurst exponent
-        ]
-        
-        # Display names for metrics
-        self.metric_display_names = {
-            'direction_changes_30min': 'Direction Changes (30min)',
-            'absolute_range_pct': 'Range %',
-            'dc_range_ratio': 'Dir Changes/Range Ratio',
-            'hurst_exponent': 'Hurst Exponent'
-        }
-    
     def _get_partition_tables(self, conn, start_date, end_date):
-        """Get partition tables for date range, ensuring we cover all needed dates"""
+        """
+        Get list of partition tables that need to be queried based on date range.
+        Returns a list of table names (oracle_price_log_partition_YYYYMMDD)
+        """
+        # Convert to datetime objects if they're strings
         if isinstance(start_date, str):
             start_date = pd.to_datetime(start_date)
         if isinstance(end_date, str) and end_date:
             end_date = pd.to_datetime(end_date)
         elif end_date is None:
-            end_date = datetime.now()
+            # Use explicit Singapore timezone when getting current date
+            singapore_tz = pytz.timezone('Asia/Singapore')
+            end_date = datetime.now(singapore_tz)
             
-        # Ensure no timezone info for the database query
-        if start_date.tzinfo:
-            start_date = start_date.replace(tzinfo=None)
-        if end_date.tzinfo:
-            end_date = end_date.replace(tzinfo=None)
-            
-        # Generate list of dates needed (year-month-day format)
-        current_date = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
+        # Ensure timezone is explicitly set to Singapore
+        singapore_tz = pytz.timezone('Asia/Singapore')
+        if start_date.tzinfo is None:
+            start_date = singapore_tz.localize(start_date)
+        if end_date.tzinfo is None:
+            end_date = singapore_tz.localize(end_date)
+        
+        # Convert to Singapore time
+        start_date = start_date.astimezone(singapore_tz)
+        end_date = end_date.astimezone(singapore_tz)
+        
+        # Remove timezone after conversion for compatibility with database
+        start_date = start_date.replace(tzinfo=None)
+        end_date = end_date.replace(tzinfo=None)
+                
+        # Generate list of dates between start and end
+        current_date = start_date
         dates = []
         
-        # Ensure we include the entire days needed for the analysis
         while current_date <= end_date:
             dates.append(current_date.strftime("%Y%m%d"))
             current_date += timedelta(days=1)
         
-        # If we're doing 24-hour analysis, make sure we include today AND yesterday
-        # to handle cases where the current time is early in the day
-        if (end_date - start_date).total_seconds() <= 86400:  # 24 hours in seconds
-            yesterday = (end_date - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-            yesterday_str = yesterday.strftime("%Y%m%d")
-            if yesterday_str not in dates:
-                dates.append(yesterday_str)
-        
-        # Generate table names from dates
+        # Create table names from dates
         table_names = [f"oracle_price_log_partition_{date}" for date in dates]
         
-        # Check which tables actually exist in the database
+        # Verify which tables actually exist in the database
         cursor = conn.cursor()
         existing_tables = []
         
         for table in table_names:
+            # Check if table exists
             cursor.execute("""
                 SELECT EXISTS (
                     SELECT FROM information_schema.tables 
@@ -155,264 +132,167 @@ class MeanReversionAnalyzer:
         return existing_tables
 
     def _build_query_for_partition_tables(self, tables, pair_name, start_time, end_time, exchange):
-        """Build query for partition tables, handling Singapore timezone conversion appropriately"""
+        """
+        Build a complete UNION query for multiple partition tables.
+        """
         if not tables:
             return ""
+        
+        # Convert the times to datetime objects if they're strings
+        if isinstance(start_time, str):
+            start_time = pd.to_datetime(start_time)
+        if isinstance(end_time, str):
+            end_time = pd.to_datetime(end_time)
+        
+        # Format with timezone information explicitly
+        start_time_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
+        end_time_str = end_time.strftime("%Y-%m-%d %H:%M:%S")
             
         union_parts = []
         
-        # Determine the source_type based on exchange
-        source_type = 0 if exchange == 'surf' else 1
-        
         for table in tables:
-            # Include both UTC and Singapore time in the query results
-            query = f"""
-            SELECT 
-                pair_name,
-                created_at AS timestamp_utc,
-                created_at + INTERVAL '8 hour' AS timestamp_sg,
-                final_price AS price
-            FROM 
-                public.{table}
-            WHERE 
-                created_at >= '{start_time}'::timestamp
-                AND created_at <= '{end_time}'::timestamp
-                AND source_type = {source_type}
-                AND pair_name = '{pair_name}'
-            """
+            # For Surf data (production)
+            if exchange == 'surf':
+                query = f"""
+                SELECT 
+                    pair_name,
+                    created_at + INTERVAL '8 hour' AS timestamp,
+                    final_price AS price
+                FROM 
+                    public.{table}
+                WHERE 
+                    created_at >= '{start_time_str}'::timestamp - INTERVAL '8 hour'
+                    AND created_at <= '{end_time_str}'::timestamp - INTERVAL '8 hour'
+                    AND source_type = 0
+                    AND pair_name = '{pair_name}'
+                """
+            else:
+                # For Rollbit data
+                query = f"""
+                SELECT 
+                    pair_name,
+                    created_at + INTERVAL '8 hour' AS timestamp,
+                    final_price AS price
+                FROM 
+                    public.{table}
+                WHERE 
+                    created_at >= '{start_time_str}'::timestamp - INTERVAL '8 hour'
+                    AND created_at <= '{end_time_str}'::timestamp - INTERVAL '8 hour'
+                    AND source_type = 1
+                    AND pair_name = '{pair_name}'
+                """
             
             union_parts.append(query)
         
-        # Combine all queries with UNION and sort by timestamp
-        complete_query = " UNION ".join(union_parts) + " ORDER BY timestamp_utc"
+        # Join with UNION and add ORDER BY at the end
+        complete_query = " UNION ".join(union_parts) + " ORDER BY timestamp ASC"
         return complete_query
 
-    def calculate_hurst_exponent(self, prices, min_k=5, max_k=None):
-        """Calculate Hurst exponent"""
-        try:
-            prices = np.array(prices)
-            if len(prices) < 50:
-                return 0.5
-                
-            returns = np.log(prices[1:] / prices[:-1])
-            
-            if max_k is None:
-                max_k = min(int(len(returns) / 4), 120)
-            
-            if max_k <= min_k:
-                max_k = min_k + 5
-                
-            k_values = list(range(min_k, max_k))
-            rs_values = []
-            
-            for k in k_values:
-                segments = len(returns) // k
-                if segments == 0:
-                    continue
-                
-                rs_array = []
-                
-                for i in range(segments):
-                    segment = returns[i*k:(i+1)*k]
-                    mean = np.mean(segment)
-                    deviation = np.cumsum(segment - mean)
-                    r = max(deviation) - min(deviation)
-                    s = np.std(segment)
-                    
-                    if s > 0:
-                        rs = r / s
-                        rs_array.append(rs)
-                
-                if rs_array:
-                    rs_values.append(np.mean(rs_array))
-                    
-            if len(rs_values) < 3:
-                return 0.5
-                
-            log_k = np.log10(k_values[:len(rs_values)])
-            log_rs = np.log10(rs_values)
-            
-            slope, _, _, _, _ = stats.linregress(log_k, log_rs)
-            
-            hurst = slope
-            
-            if hurst < 0:
-                hurst = 0
-            elif hurst > 1:
-                hurst = 1
-                
-            return hurst
-        except Exception as e:
-            return 0.5
-
-    def calculate_direction_changes(self, prices):
-        """Calculate direction changes"""
-        try:
-            price_changes = np.diff(prices)
-            signs = np.sign(price_changes)
-            direction_changes = np.sum(signs[1:] != signs[:-1])
-            return int(direction_changes)
-        except Exception as e:
-            return 0
-
-    def calculate_range_percentage(self, prices):
-        """Calculate range percentage"""
-        try:
-            local_high = np.max(prices)
-            local_low = np.min(prices)
-            if local_low > 0:
-                range_pct = ((local_high - local_low) / local_low) * 100
-                return range_pct
-            return 0
-        except Exception as e:
-            return 0
-
-    def generate_30min_intervals(self, start_time, end_time):
-        """Generate 30-minute intervals from start time to end time"""
-        intervals = []
-        current_time = start_time
+    def analyze_price_stability(self, df, interval_minutes=15, tolerance_percentage=0.5):
+        """
+        Analyze price stability within 15-minute intervals.
         
-        while current_time < end_time:
-            next_time = current_time + timedelta(minutes=30)
-            intervals.append((current_time, next_time))
-            current_time = next_time
+        Args:
+            df: DataFrame with 'timestamp' and 'price' columns
+            interval_minutes: Size of the time interval in minutes (default 15)
+            tolerance_percentage: Percentage tolerance around median (default 0.5%)
             
-        return intervals
-
-    def process_historical_data(self, df, pair_name, exchange, lookback_hours=24):
-        """Process historical data to generate 30-minute interval metrics"""
-        try:
-            # Ensure timestamp columns have proper timezone
-            df['timestamp_utc'] = pd.to_datetime(df['timestamp_utc'])
-            
-            # Create UTC timestamp with timezone info
-            df['timestamp'] = df['timestamp_utc'].dt.tz_localize(UTC_TZ)
-            
-            # Create or ensure proper Singapore timestamp
-            if 'timestamp_sg' not in df.columns:
-                df['timestamp_sg'] = df['timestamp'].dt.tz_convert(SG_TZ)
-            else:
-                df['timestamp_sg'] = pd.to_datetime(df['timestamp_sg']).dt.tz_localize(SG_TZ)
-            
-            # Sort by timestamp
-            df = df.sort_values('timestamp')
-            
-            # Extract the time range
-            end_time = df['timestamp'].max()
-            start_time = end_time - pd.Timedelta(hours=lookback_hours)
-            
-            # Filter data to lookback period
-            df_lookback = df[df['timestamp'] >= start_time]
-            
-            if len(df_lookback) < 20:
-                # Not enough data points
-                st.warning(f"Not enough data points for {pair_name} on {exchange}: {len(df_lookback)} points")
-                return
-            
-            # Generate 30-minute intervals
-            intervals = self.generate_30min_intervals(start_time, end_time)
-            
-            # Initialize data structure if needed
-            if pair_name not in self.time_series_data:
-                self.time_series_data[pair_name] = {}
-            if exchange not in self.time_series_data[pair_name]:
-                self.time_series_data[pair_name][exchange] = []
-            else:
-                # Clear any existing data for this pair/exchange to avoid duplication
-                self.time_series_data[pair_name][exchange] = []
-            
-            # Process each interval
-            for interval_start, interval_end in intervals:
-                # Filter data for this interval
-                df_interval = df_lookback[(df_lookback['timestamp'] >= interval_start) & 
-                                         (df_lookback['timestamp'] < interval_end)]
+        Returns:
+            DataFrame with intervals and percentage of data points within tolerance
+        """
+        if df.empty:
+            return pd.DataFrame()
+        
+        # Ensure timestamp is in datetime format
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        
+        # Create interval labels (15-minute bins)
+        df['interval'] = df['timestamp'].dt.floor(f'{interval_minutes}min')
+        
+        # Group by interval
+        interval_groups = df.groupby('interval')
+        
+        results = []
+        for interval, group in interval_groups:
+            if len(group) >= 3:  # Need at least a few points to make meaningful calculation
+                prices = group['price'].values
+                med_price = np.median(prices)
                 
-                # Skip if not enough data points
-                if len(df_interval) < 5:
-                    continue
+                # Calculate upper and lower bounds (±0.5% of median)
+                lower_bound = med_price * (1 - tolerance_percentage/100)
+                upper_bound = med_price * (1 + tolerance_percentage/100)
                 
-                # Get prices for this interval
-                prices = pd.to_numeric(df_interval['price'], errors='coerce').dropna().values
+                # Count how many points fall within the range
+                in_range = ((prices >= lower_bound) & (prices <= upper_bound)).sum()
+                percentage_in_range = (in_range / len(prices)) * 100
                 
-                # Skip if not enough valid prices
-                if len(prices) < 5:
-                    continue
-                
-                # Calculate metrics
-                direction_changes = self.calculate_direction_changes(prices)
-                range_pct = self.calculate_range_percentage(prices)
-                dc_range_ratio = direction_changes / (range_pct + 1e-10)  # Avoid division by zero
-                hurst = self.calculate_hurst_exponent(prices, min_k=3, max_k=min(len(prices)//3, 20))
-                
-                # For consistency, ensure these are timezone-aware datetimes
-                if interval_end.tzinfo is None:
-                    interval_end = interval_end.replace(tzinfo=UTC_TZ)
-                if interval_start.tzinfo is None:
-                    interval_start = interval_start.replace(tzinfo=UTC_TZ)
-                
-                # Get Singapore timestamps
-                interval_end_sg = interval_end.astimezone(SG_TZ)
-                interval_start_sg = interval_start.astimezone(SG_TZ)
-                
-                self.time_series_data[pair_name][exchange].append({
-                    'timestamp': interval_end,
-                    'timestamp_sg': interval_end_sg,
-                    'interval_start': interval_start,
-                    'interval_start_sg': interval_start_sg,
-                    'data_points': len(prices),
-                    'direction_changes_30min': direction_changes,
-                    'absolute_range_pct': range_pct,
-                    'dc_range_ratio': dc_range_ratio,
-                    'hurst_exponent': hurst
+                results.append({
+                    'interval': interval,
+                    'median_price': med_price,
+                    'points_count': len(prices),
+                    'percentage_in_range': percentage_in_range
                 })
-            
-        except Exception as e:
-            st.error(f"Error processing historical data for {pair_name} on {exchange}: {e}")
+        
+        result_df = pd.DataFrame(results)
+        return result_df
 
-    def fetch_and_analyze(self, conn, pairs_to_analyze, exchange, hours=24):
-        """Fetch data for specified pairs and analyze mean reversion metrics"""
-        # Calculate time range in UTC to ensure consistent time handling
-        end_time_utc = datetime.now(UTC_TZ)
-        start_time_utc = end_time_utc - timedelta(hours=hours)
+    def fetch_and_analyze_data(self, conn, pairs_to_analyze, exchange, hours=24):
+        """
+        Fetch data for selected pairs and analyze stability in 15-minute intervals.
         
-        # Convert to strings for database queries (removing timezone info)
-        end_time_str = end_time_utc.replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
-        start_time_str = start_time_utc.replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
+        Args:
+            conn: Database connection
+            pairs_to_analyze: List of coin pairs to analyze
+            exchange: Exchange to fetch data from ('rollbit' or 'surf')
+            hours: Hours to look back for data retrieval
+            
+        Returns:
+            Dictionary of DataFrames with stability analysis for each pair
+        """
+        # Use explicit Singapore timezone for all time calculations
+        singapore_tz = pytz.timezone('Asia/Singapore')
+        now = datetime.now(singapore_tz)
         
-        # Calculate the time range in Singapore time for display
-        end_time_sg = end_time_utc.astimezone(SG_TZ)
-        start_time_sg = start_time_utc.astimezone(SG_TZ)
+        # Calculate times in Singapore timezone
+        end_time = now.strftime("%Y-%m-%d %H:%M:%S")
+        start_time = (now - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
         
-        st.info(f"Retrieving data from {start_time_sg.strftime('%Y-%m-%d %H:%M:%S')} to {end_time_sg.strftime('%Y-%m-%d %H:%M:%S')} (SGT) - {hours} hours")
+        st.info(f"Retrieving data from the last {hours} hours")
+        st.write(f"Start time: {start_time} (SGT)")
+        st.write(f"End time: {end_time} (SGT)")
         
         try:
-            # Get partition tables for the time range
-            partition_tables = self._get_partition_tables(conn, start_time_utc, end_time_utc)
+            # Get relevant partition tables for this time range
+            partition_tables = self._get_partition_tables(conn, start_time, end_time)
             
             if not partition_tables:
-                st.error("No data tables available for the selected time range.")
-                return None
+                # If no tables found, try looking one day earlier (for edge cases)
+                st.warning("No tables found for the specified range, trying to look back one more day...")
+                alt_start_time = (now - timedelta(hours=hours+24)).strftime("%Y-%m-%d %H:%M:%S")
+                partition_tables = self._get_partition_tables(conn, alt_start_time, end_time)
+                
+                if not partition_tables:
+                    st.error("No data tables available for the selected time range, even with extended lookback.")
+                    return None
             
-            st.write(f"Found {len(partition_tables)} partition tables: {', '.join(partition_tables)}")
-            
-            # Setup progress tracking
+            # Progress bar
             progress_bar = st.progress(0)
             status_text = st.empty()
             
-            results = []
+            # Build and execute queries for each pair
+            stability_results = {}
+            daily_averages = {}
             
-            # Process each pair
             for i, pair in enumerate(pairs_to_analyze):
-                progress_percentage = (i) / len(pairs_to_analyze)
-                progress_bar.progress(progress_percentage)
+                progress_bar.progress((i) / len(pairs_to_analyze))
                 status_text.text(f"Analyzing {pair} ({i+1}/{len(pairs_to_analyze)})")
                 
-                # Build query - just for the selected exchange
+                # Build query
                 query = self._build_query_for_partition_tables(
                     partition_tables,
                     pair_name=pair,
-                    start_time=start_time_str,
-                    end_time=end_time_str,
+                    start_time=start_time,
+                    end_time=end_time,
                     exchange=exchange
                 )
                 
@@ -422,892 +302,338 @@ class MeanReversionAnalyzer:
                         df = pd.read_sql_query(query, conn)
                         
                         if len(df) > 0:
-                            # Process historical data for time series analysis
-                            self.process_historical_data(df, pair, exchange, lookback_hours=hours)
+                            st.write(f"Found {len(df)} records for {exchange.upper()}_{pair}")
                             
-                            # Debug timestamp range
-                            min_time_utc = df['timestamp_utc'].min()
-                            max_time_utc = df['timestamp_utc'].max()
+                            # Analyze price stability
+                            stability_df = self.analyze_price_stability(
+                                df, 
+                                interval_minutes=self.interval_minutes,
+                                tolerance_percentage=self.tolerance_percentage
+                            )
                             
-                            # Convert to proper datetime objects with timezone info
-                            min_time_utc = pd.to_datetime(min_time_utc).tz_localize(UTC_TZ)
-                            max_time_utc = pd.to_datetime(max_time_utc).tz_localize(UTC_TZ)
-                            
-                            min_time_sg = min_time_utc.astimezone(SG_TZ)
-                            max_time_sg = max_time_utc.astimezone(SG_TZ)
-                            
-                            time_span = max_time_utc - min_time_utc
-                            days_span = time_span.total_seconds() / 86400  # Convert to days
-                            
-                            # Log the actual data timespan to help with debugging
-                            st.write(f"{exchange}_{pair}: {len(df)} data points spanning {days_span:.1f} days ({min_time_sg} to {max_time_sg})")
-                            
-                            # Add to results
-                            results.append({
-                                'pair': pair,
-                                'exchange': exchange,
-                                'data_points': len(df),
-                                'time_range': f"{min_time_sg} to {max_time_sg}"
-                            })
+                            if not stability_df.empty:
+                                stability_results[pair] = stability_df
+                                
+                                # Calculate daily average
+                                daily_avg = stability_df['percentage_in_range'].mean()
+                                daily_averages[pair] = daily_avg
+                                
+                                st.write(f"Daily average: {daily_avg:.2f}% of prices within ±{self.tolerance_percentage}% of interval median")
+                            else:
+                                st.warning(f"No stability data calculated for {exchange.upper()}_{pair}")
                         else:
                             st.warning(f"No data found for {exchange.upper()}_{pair}")
                     except Exception as e:
                         st.error(f"Database query error for {exchange.upper()}_{pair}: {e}")
             
-            # Complete progress
+            # Final progress update
             progress_bar.progress(1.0)
-            status_text.text(f"Processing complete!")
+            status_text.text(f"Analysis complete!")
             
-            return results
+            return {
+                'stability_results': stability_results,
+                'daily_averages': daily_averages
+            }
                 
         except Exception as e:
             st.error(f"Error fetching and processing data: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
-# Function to fetch 30-minute PNL data for a specific pair and specific time period
-def fetch_platform_pnl_for_pair(conn, pair_name, hours=24):
-    """Fetch platform PNL data for a specific pair"""
-    # Check if already cached
-    cache_key = f"{pair_name}_{hours}"
-    if cache_key in st.session_state.pnl_data_cache:
-        return st.session_state.pnl_data_cache[cache_key]
-    
-    # Set up time range in UTC to match the metrics data
-    now_utc = datetime.now(UTC_TZ)
-    start_time_utc = now_utc - timedelta(hours=hours)
-    
-    # Create strings for database query (without timezone info)
-    start_time_str = start_time_utc.replace(tzinfo=None).strftime('%Y-%m-%d %H:%M:%S')
-    end_time_str = now_utc.replace(tzinfo=None).strftime('%Y-%m-%d %H:%M:%S')
-    
-    # Construct the query for 30-minute intervals
-    query = f"""
-    WITH time_intervals AS (
-      -- Generate 30-minute intervals for the past hours
-      SELECT
-        generate_series(
-          date_trunc('hour', '{start_time_str}'::timestamp) + 
-          INTERVAL '30 min' * floor(EXTRACT(MINUTE FROM '{start_time_str}'::timestamp) / 30),
-          '{end_time_str}'::timestamp,
-          INTERVAL '30 minutes'
-        ) AS interval_time
-    ),
-    
-    order_pnl AS (
-      -- Calculate platform order PNL
-      SELECT
-        date_trunc('hour', "created_at") + 
-        INTERVAL '30 min' * floor(EXTRACT(MINUTE FROM "created_at") / 30) AS "timestamp",
-        COALESCE(SUM(-1 * "taker_pnl" * "collateral_price"), 0) AS "platform_order_pnl"
-      FROM
-        "public"."trade_fill_fresh"
-      WHERE
-        "created_at" BETWEEN '{start_time_str}' AND '{end_time_str}'
-        AND "pair_id" IN (SELECT "pair_id" FROM "public"."trade_pool_pairs" WHERE "pair_name" = '{pair_name}')
-        AND "taker_way" IN (0, 1, 2, 3, 4)
-      GROUP BY
-        date_trunc('hour', "created_at") + 
-        INTERVAL '30 min' * floor(EXTRACT(MINUTE FROM "created_at") / 30)
-    ),
-    
-    fee_data AS (
-      -- Calculate user fee payments
-      SELECT
-        date_trunc('hour', "created_at") + 
-        INTERVAL '30 min' * floor(EXTRACT(MINUTE FROM "created_at") / 30) AS "timestamp",
-        COALESCE(SUM("taker_fee" * "collateral_price"), 0) AS "user_fee_payments"
-      FROM
-        "public"."trade_fill_fresh"
-      WHERE
-        "created_at" BETWEEN '{start_time_str}' AND '{end_time_str}'
-        AND "pair_id" IN (SELECT "pair_id" FROM "public"."trade_pool_pairs" WHERE "pair_name" = '{pair_name}')
-        AND "taker_fee_mode" = 1
-        AND "taker_way" IN (1, 3)
-      GROUP BY
-        date_trunc('hour', "created_at") + 
-        INTERVAL '30 min' * floor(EXTRACT(MINUTE FROM "created_at") / 30)
-    ),
-    
-    funding_pnl AS (
-      -- Calculate platform funding fee PNL
-      SELECT
-        date_trunc('hour', "created_at") + 
-        INTERVAL '30 min' * floor(EXTRACT(MINUTE FROM "created_at") / 30) AS "timestamp",
-        COALESCE(SUM(-1 * "funding_fee" * "collateral_price"), 0) AS "platform_funding_pnl"
-      FROM
-        "public"."trade_fill_fresh"
-      WHERE
-        "created_at" BETWEEN '{start_time_str}' AND '{end_time_str}'
-        AND "pair_id" IN (SELECT "pair_id" FROM "public"."trade_pool_pairs" WHERE "pair_name" = '{pair_name}')
-        AND "taker_way" = 0
-      GROUP BY
-        date_trunc('hour', "created_at") + 
-        INTERVAL '30 min' * floor(EXTRACT(MINUTE FROM "created_at") / 30)
-    ),
-    
-    rebate_data AS (
-      -- Calculate platform rebate payments
-      SELECT
-        date_trunc('hour', "created_at") + 
-        INTERVAL '30 min' * floor(EXTRACT(MINUTE FROM "created_at") / 30) AS "timestamp",
-        COALESCE(SUM(-1 * "amount" * "coin_price"), 0) AS "platform_rebate_payments"
-      FROM
-        "public"."user_cashbooks"
-      WHERE
-        "created_at" BETWEEN '{start_time_str}' AND '{end_time_str}'
-        AND "pair_id" IN (SELECT "pair_id" FROM "public"."trade_pool_pairs" WHERE "pair_name" = '{pair_name}')
-        AND "remark" = '给邀请人返佣'
-      GROUP BY
-        date_trunc('hour', "created_at") + 
-        INTERVAL '30 min' * floor(EXTRACT(MINUTE FROM "created_at") / 30)
-    )
-    
-    -- Final query
-    SELECT
-      t.interval_time AS "timestamp_utc",
-      t.interval_time + INTERVAL '8 hour' AS "timestamp_sg",
-      COALESCE(o."platform_order_pnl", 0) +
-      COALESCE(f."user_fee_payments", 0) +
-      COALESCE(ff."platform_funding_pnl", 0) +
-      COALESCE(r."platform_rebate_payments", 0) AS "platform_total_pnl"
-    FROM
-      time_intervals t
-    LEFT JOIN
-      order_pnl o ON t.interval_time = o."timestamp"
-    LEFT JOIN
-      fee_data f ON t.interval_time = f."timestamp"
-    LEFT JOIN
-      funding_pnl ff ON t.interval_time = ff."timestamp"
-    LEFT JOIN
-      rebate_data r ON t.interval_time = r."timestamp"
-    ORDER BY
-      t.interval_time ASC
+# Function to fetch trading pairs from database
+@st.cache_data(ttl=600)
+def fetch_trading_pairs():
+    query = """
+    SELECT pair_name 
+    FROM trade_pool_pairs 
+    WHERE status = 1
+    ORDER BY pair_name
     """
     
     try:
-        # Execute query
-        df = pd.read_sql_query(query, conn)
-        
-        if df.empty:
-            st.warning(f"No PNL data found for {pair_name}")
-            return None
-        
-        # Convert timestamp columns to pandas datetime with timezone info
-        df['timestamp_utc'] = pd.to_datetime(df['timestamp_utc'])
-        df['timestamp'] = df['timestamp_utc'].dt.tz_localize(UTC_TZ)
-        
-        if 'timestamp_sg' in df.columns:
-            df['timestamp_sg'] = pd.to_datetime(df['timestamp_sg']).dt.tz_localize(SG_TZ)
-        else:
-            df['timestamp_sg'] = df['timestamp'].dt.tz_convert(SG_TZ)
-        
-        # Sort by timestamp
-        df = df.sort_values('timestamp')
-        
-        # Calculate cumulative PNL
-        df['cumulative_pnl'] = df['platform_total_pnl'].cumsum()
-        
-        # Cache the result
-        st.session_state.pnl_data_cache[cache_key] = df
-        
-        return df
+        df = pd.read_sql(query, conn)
+        return df['pair_name'].tolist()
     except Exception as e:
-        st.error(f"Error fetching PNL data for {pair_name}: {e}")
-        return None
+        st.error(f"Error fetching trading pairs: {e}")
+        return ["BTC/USDT", "ETH/USDT"]  # Default pairs if database query fails
 
-# Function to create visualization of mean reversion metrics vs PNL
-def create_metric_vs_pnl_chart(metrics_df, pnl_df, metric_name, metric_display_name, pair_name, exchange, use_sg_time=True):
-    """Create visualization comparing a mean reversion metric with cumulative PNL"""
-    
-    # Check if data is available
-    if metrics_df is None or metrics_df.empty or pnl_df is None or pnl_df.empty:
-        return None
-    
-    try:
-        # Make copies to avoid modifying originals
-        metrics_df_copy = metrics_df.copy()
-        pnl_df_copy = pnl_df.copy()
-        
-        # Choose which timestamp column to use (UTC or Singapore time)
-        x_column = 'timestamp_sg' if use_sg_time else 'timestamp'
-        
-        # Ensure both dataframes have the column
-        if x_column not in metrics_df_copy.columns or x_column not in pnl_df_copy.columns:
-            st.warning(f"Missing {x_column} column in data. Falling back to using 'timestamp'.")
-            x_column = 'timestamp'
-        
-        # Ensure timestamps have proper timezone info
-        for df in [metrics_df_copy, pnl_df_copy]:
-            if x_column in df.columns:
-                # Convert to datetime if not already
-                if not pd.api.types.is_datetime64_any_dtype(df[x_column]):
-                    df[x_column] = pd.to_datetime(df[x_column])
-                
-                # Ensure proper timezone
-                if df[x_column].dt.tz is None:
-                    if use_sg_time:
-                        df[x_column] = df[x_column].dt.tz_localize(SG_TZ)
-                    else:
-                        df[x_column] = df[x_column].dt.tz_localize(UTC_TZ)
-        
-        # Sort by timestamp
-        metrics_df_copy = metrics_df_copy.sort_values(x_column)
-        pnl_df_copy = pnl_df_copy.sort_values(x_column)
-        
-        # Find common time range
-        common_start = max(metrics_df_copy[x_column].min(), pnl_df_copy[x_column].min())
-        common_end = min(metrics_df_copy[x_column].max(), pnl_df_copy[x_column].max())
-        
-        # Filter to common time range
-        metrics_df_copy = metrics_df_copy[(metrics_df_copy[x_column] >= common_start) & 
-                                         (metrics_df_copy[x_column] <= common_end)]
-        pnl_df_copy = pnl_df_copy[(pnl_df_copy[x_column] >= common_start) & 
-                                  (pnl_df_copy[x_column] <= common_end)]
-        
-        # Check time ranges
-        metrics_min_time = metrics_df_copy[x_column].min()
-        metrics_max_time = metrics_df_copy[x_column].max()
-        pnl_min_time = pnl_df_copy[x_column].min()
-        pnl_max_time = pnl_df_copy[x_column].max()
-        
-        # Add debug info
-        st.write(f"Metrics time range: {metrics_min_time} to {metrics_max_time}")
-        st.write(f"PNL time range: {pnl_min_time} to {pnl_max_time}")
-        
-        # Create the figure
-        fig = go.Figure()
-        
-        # Add cumulative PNL line
-        fig.add_trace(go.Scatter(
-            x=pnl_df_copy[x_column],
-            y=pnl_df_copy['cumulative_pnl'],
-            name='Cumulative PNL (USD)',
-            line=dict(color='green', width=3)
-        ))
-        
-        # Add metric line on second y-axis
-        fig.add_trace(go.Scatter(
-            x=metrics_df_copy[x_column],
-            y=metrics_df_copy[metric_name],
-            name=metric_display_name,
-            line=dict(color='blue', width=2),
-            yaxis='y2'
-        ))
-        
-        # Configure layout
-        timezone_label = "Singapore" if use_sg_time else "UTC"
-        fig.update_layout(
-            title=f"{metric_display_name} vs Cumulative PNL: {pair_name} ({exchange})",
-            xaxis_title=f"Time ({timezone_label})",
-            yaxis=dict(
-                title="Cumulative PNL (USD)",
-                titlefont=dict(color="green"),
-                tickfont=dict(color="green"),
-                side="left"
-            ),
-            yaxis2=dict(
-                title=metric_display_name,
-                titlefont=dict(color="blue"),
-                tickfont=dict(color="blue"),
-                anchor="x",
-                overlaying="y",
-                side="right"
-            ),
-            legend=dict(x=0.01, y=0.99),
-            height=500
-        )
-        
-        # Add reference line for Hurst Exponent
-        if metric_name == 'hurst_exponent':
-            fig.add_shape(
-                type="line",
-                x0=metrics_df_copy[x_column].min(),
-                x1=metrics_df_copy[x_column].max(),
-                y0=0.5,
-                y1=0.5,
-                line=dict(
-                    color="red",
-                    width=1,
-                    dash="dash",
-                ),
-                yref='y2'
-            )
-            
-            # Add annotation for Hurst exponent
-            fig.add_annotation(
-                x=metrics_df_copy[x_column].max(),
-                y=0.5,
-                text="Random Walk (H=0.5)",
-                showarrow=False,
-                yshift=10,
-                yref='y2'
-            )
-        
-        return fig
-    
-    except Exception as e:
-        st.error(f"Error creating chart: {e}")
-        return None
+# Get trading pairs from database
+all_pairs = fetch_trading_pairs()
 
-# Function to calculate correlation between a metric and PNL
-def calculate_metric_pnl_correlation(metrics_df, pnl_df, metric_name):
-    """Calculate correlation between a mean reversion metric and PNL"""
-    
-    # Check if data is available
-    if metrics_df is None or metrics_df.empty or pnl_df is None or pnl_df.empty:
-        return None
-    
-    try:
-        # Make copies to avoid modifying originals
-        metrics_df_copy = metrics_df.copy()
-        pnl_df_copy = pnl_df.copy()
-        
-        # Ensure timestamps have proper timezone info
-        if 'timestamp' in metrics_df_copy.columns and metrics_df_copy['timestamp'].dt.tz is None:
-            metrics_df_copy['timestamp'] = metrics_df_copy['timestamp'].dt.tz_localize(UTC_TZ)
-            
-        if 'timestamp' in pnl_df_copy.columns and pnl_df_copy['timestamp'].dt.tz is None:
-            pnl_df_copy['timestamp'] = pnl_df_copy['timestamp'].dt.tz_localize(UTC_TZ)
-        
-        # Find common time range
-        common_start = max(metrics_df_copy['timestamp'].min(), pnl_df_copy['timestamp'].min())
-        common_end = min(metrics_df_copy['timestamp'].max(), pnl_df_copy['timestamp'].max())
-        
-        # Filter data to common time range
-        metrics_df_copy = metrics_df_copy[(metrics_df_copy['timestamp'] >= common_start) & 
-                                         (metrics_df_copy['timestamp'] <= common_end)]
-        pnl_df_copy = pnl_df_copy[(pnl_df_copy['timestamp'] >= common_start) & 
-                                 (pnl_df_copy['timestamp'] <= common_end)]
-        
-        # Create common timeline with 15-minute intervals
-        common_index = pd.date_range(start=common_start, end=common_end, freq='15min', tz=UTC_TZ)
-        
-        # Create Series from the metrics data
-        metric_series = pd.Series(index=metrics_df_copy['timestamp'], data=metrics_df_copy[metric_name].values)
-        metric_resampled = metric_series.reindex(common_index, method='nearest')
-        
-        # Create Series from the PNL data
-        pnl_series = pd.Series(index=pnl_df_copy['timestamp'], data=pnl_df_copy['cumulative_pnl'].values)
-        pnl_resampled = pnl_series.reindex(common_index, method='nearest')
-        
-        # Remove NaN values
-        valid_data = pd.DataFrame({
-            'metric': metric_resampled,
-            'pnl': pnl_resampled
-        }).dropna()
-        
-        # Calculate correlation if we have enough data points
-        if len(valid_data) > 5:
-            correlation = valid_data['metric'].corr(valid_data['pnl'])
-            return correlation
-        else:
-            return None
-    
-    except Exception as e:
-        st.error(f"Error calculating correlation: {e}")
-        return None
-
-# Setup sidebar with options
+# Setup sidebar with analysis options
 with st.sidebar:
     st.header("Analysis Parameters")
-    all_pairs = [
-        "PEPE/USDT", "PAXG/USDT", "DOGE/USDT", "BTC/USDT", "EOS/USDT",
-        "BNB/USDT", "MERL/USDT", "FHE/USDT", "IP/USDT", "ORCA/USDT",
-        "TRUMP/USDT", "LIBRA/USDT", "AI16Z/USDT", "OM/USDT", "TRX/USDT",
-        "S/USDT", "PI/USDT", "JUP/USDT", "BABY/USDT", "PARTI/USDT",
-        "ADA/USDT", "HYPE/USDT", "VIRTUAL/USDT", "SUI/USDT", "SATS/USDT",
-        "XRP/USDT", "ORDI/USDT", "WIF/USDT", "VANA/USDT", "PENGU/USDT",
-        "VINE/USDT", "GRIFFAIN/USDT", "MEW/USDT", "POPCAT/USDT", "FARTCOIN/USDT",
-        "TON/USDT", "MELANIA/USDT", "SOL/USDT", "PNUT/USDT", "CAKE/USDT",
-        "TST/USDT", "ETH/USDT"
-    ]
     
     # Initialize session state for selections if not present
     if 'selected_pairs' not in st.session_state:
-        st.session_state.selected_pairs = ["ETH/USDT", "BTC/USDT", "SOL/USDT"]  # Default selection
+        st.session_state.selected_pairs = ["ETH/USDT", "BTC/USDT"]  # Default selection
     
-    # Create buttons outside the form for quick selections
-    col1, col2, col3 = st.columns(3)
-    
+    # Create buttons with more prominent styling
+    st.markdown("### Quick Selection")
+
+    # Main selection buttons in a single row
+    col1, col2 = st.columns(2)
+
     with col1:
-        if st.button("Select Major Coins"):
-            st.session_state.selected_pairs = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "DOGE/USDT"]
-            st.rerun()
-            
-    with col2:
-        if st.button("Select All"):
+        if st.button("Select All Pairs", type="primary", use_container_width=True):
             st.session_state.selected_pairs = all_pairs
             st.rerun()
-            
-    with col3:
-        if st.button("Clear Selection"):
+
+    with col2:
+        if st.button("Clear All", type="secondary", use_container_width=True):
             st.session_state.selected_pairs = []
             st.rerun()
-    
-    st.write("Analysis Window: 24 Hours (fixed for proper cumulative PNL analysis)")
+
+    # Additional options in a new row
+    col3, col4 = st.columns(2)
+
+    with col3:
+        if st.button("Major Coins", use_container_width=True):
+            st.session_state.selected_pairs = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "DOGE/USDT"]
+            st.rerun()
+
+    with col4:
+        if st.button("Default Pairs", use_container_width=True):
+            st.session_state.selected_pairs = ["ETH/USDT", "BTC/USDT"]
+            st.rerun()
+
+    st.markdown("---")  # Add a separator
     
     # Create the form
-    with st.form("mean_reversion_form"):
-        # Data retrieval window - fixed to 24 hours for proper cumulative PNL analysis
-        hours = 24
+    with st.form("price_stability_form"):
+        # Exchange selection
+        exchange = st.selectbox(
+            "Select Exchange",
+            options=["surf", "rollbit"],
+            index=0,
+            help="Choose exchange to analyze"
+        )
+        
+        # Data retrieval window
+        hours = st.number_input(
+            "Hours to Look Back",
+            min_value=1,
+            max_value=168,
+            value=24,
+            help="How many hours of historical data to retrieve"
+        )
         
         # Create multiselect for pairs
         selected_pairs = st.multiselect(
             "Select Pairs to Analyze",
             options=all_pairs,
             default=st.session_state.selected_pairs,
-            help="Select cryptocurrency pairs to analyze"
+            help="Select one or more cryptocurrency pairs to analyze"
         )
         
-        # Update session state
-        st.session_state.selected_pairs = selected_pairs
+        # Add submit button
+        submit_button = st.form_submit_button("Analyze Price Stability")
         
-        # Set the pairs variable for the analyzer
-        pairs = selected_pairs
-        
-        # Exchange selection
-        exchange_filter = st.radio(
-            "Select Exchange",
-            ["surf", "rollbit"],
-            index=0,
-            help="Select exchange for analysis"
-        )
-        
-        # Display Singapore Time checkbox
-        display_sg_time = st.checkbox("Display Singapore Time", value=True, 
-                                     help="Display times in Singapore timezone (SGT) instead of UTC")
-        
-        # Show a warning if no pairs are selected
-        if not pairs:
-            st.warning("Please select at least one pair to analyze.")
-        
-        # Submit button
-        submit_button = st.form_submit_button("Analyze Mean Reversion vs PNL")
+        # Update session state when form is submitted
+        if submit_button:
+            st.session_state.selected_pairs = selected_pairs
+            st.session_state.hours = hours
+            st.session_state.exchange = exchange
+            st.session_state.analyze_clicked = True
+            st.rerun()
 
-# Check if we need to run analysis
-should_run_analysis = (
-    submit_button and 
-    conn is not None and 
-    len(pairs) > 0 and 
-    (not st.session_state.data_processed or 
-     st.session_state.last_selected_pairs != pairs or 
-     st.session_state.last_hours != hours or
-     st.session_state.last_exchange != exchange_filter)
-)
+# Main content - Create tabs for different views
+tab1, tab2 = st.tabs(["Time Series Analysis", "Daily Rankings"])
 
-# Run analysis if needed
-if should_run_analysis:
-    # Initialize analyzer
-    analyzer = MeanReversionAnalyzer()
+# Check if we should run the analysis
+if st.session_state.get('analyze_clicked', False):
+    # Clear cache and previous data at start of analysis to ensure fresh data
+    st.cache_data.clear()
     
-    # Run analysis
-    with st.spinner("Fetching and analyzing data..."):
-        results = analyzer.fetch_and_analyze(
-            conn=conn,
-            pairs_to_analyze=pairs,
-            exchange=exchange_filter,
-            hours=hours
-        )
-        
-        # Store analysis results and state
-        if results:
-            st.session_state.analyzed_data = results
-            st.session_state.analyzer = analyzer
-            st.session_state.data_processed = True
-            st.session_state.last_selected_pairs = pairs.copy()
-            st.session_state.last_hours = hours
-            st.session_state.last_exchange = exchange_filter
-            
-            # Clear PNL data cache when new analysis is run
-            st.session_state.pnl_data_cache = {}
-        else:
-            st.error("No results returned from analysis.")
-            st.session_state.data_processed = False
-
-# Only proceed if we have processed data
-if st.session_state.data_processed and 'analyzer' in st.session_state:
-    # Get the saved analyzer
-    analyzer = st.session_state.analyzer
+    # Clear previous results from the page
+    for tab in [tab1, tab2]:
+        with tab:
+            st.empty()  # Clear the tab content
     
-    # Create metrics visualization with cumulative PNL
-    st.header("Mean Reversion Metrics vs Cumulative PNL (24 Hours)")
-    
-    # Get pairs that were analyzed (for the selected exchange)
-    analyzed_pairs = []
-    for pair in pairs:
-        if pair in analyzer.time_series_data and exchange_filter in analyzer.time_series_data[pair]:
-            analyzed_pairs.append(pair)
-    
-    if analyzed_pairs:
-        # Select a pair for detailed analysis
-        selected_pair = st.selectbox(
-            "Select Pair for Analysis", 
-            analyzed_pairs,
-            index=0
-        )
-        
-        # Get mean reversion metrics for the selected pair
-        if selected_pair in analyzer.time_series_data and exchange_filter in analyzer.time_series_data[selected_pair]:
-            metrics_data = analyzer.time_series_data[selected_pair][exchange_filter]
-            
-            # Convert to DataFrame
-            metrics_df = pd.DataFrame(metrics_data)
-            
-            if not metrics_df.empty:
-                # Get PNL data for the selected pair
-                pnl_df = fetch_platform_pnl_for_pair(conn, selected_pair, hours=hours)
-                
-                if pnl_df is not None and not pnl_df.empty:
-                    # Create tabs for different metrics
-                    tab1, tab2, tab3, tab4 = st.tabs([
-                        "Hurst Exponent vs PNL", 
-                        "Direction Changes/Range vs PNL", 
-                        "Direction Changes vs PNL", 
-                        "Range % vs PNL"
-                    ])
-                    
-                    with tab1:
-                        # Create chart for Hurst Exponent
-                        fig = create_metric_vs_pnl_chart(
-                            metrics_df,
-                            pnl_df,
-                            'hurst_exponent',
-                            'Hurst Exponent',
-                            selected_pair,
-                            exchange_filter,
-                            use_sg_time=display_sg_time
-                        )
-                        
-                        if fig:
-                            st.plotly_chart(fig, use_container_width=True)
-                            
-                            # Calculate correlation
-                            correlation = calculate_metric_pnl_correlation(metrics_df, pnl_df, 'hurst_exponent')
-                            
-                            if correlation is not None:
-                                st.write(f"**Correlation:** {correlation:.3f}")
-                                
-                                if correlation < -0.3:
-                                    st.success("Negative correlation suggests mean reversion (Hurst < 0.5) is associated with higher PNL")
-                                elif correlation > 0.3:
-                                    st.info("Positive correlation suggests trending (Hurst > 0.5) is associated with higher PNL")
-                                else:
-                                    st.warning("No strong correlation between Hurst exponent and PNL")
-                        else:
-                            st.warning("Could not create chart for Hurst Exponent")
-                    
-                    with tab2:
-                        # Create chart for Direction Changes/Range Ratio
-                        fig = create_metric_vs_pnl_chart(
-                            metrics_df,
-                            pnl_df,
-                            'dc_range_ratio',
-                            'Direction Changes/Range Ratio',
-                            selected_pair,
-                            exchange_filter,
-                            use_sg_time=display_sg_time
-                        )
-                        
-                        if fig:
-                            st.plotly_chart(fig, use_container_width=True)
-                            
-                            # Calculate correlation
-                            correlation = calculate_metric_pnl_correlation(metrics_df, pnl_df, 'dc_range_ratio')
-                            
-                            if correlation is not None:
-                                st.write(f"**Correlation:** {correlation:.3f}")
-                                
-                                if correlation > 0.3:
-                                    st.success("Positive correlation suggests higher direction changes relative to range are associated with higher PNL")
-                                elif correlation < -0.3:
-                                    st.info("Negative correlation suggests lower direction changes relative to range are associated with higher PNL")
-                                else:
-                                    st.warning("No strong correlation between DC/Range ratio and PNL")
-                        else:
-                            st.warning("Could not create chart for Direction Changes/Range Ratio")
-                            
-                    with tab3:
-                        # Create chart for Direction Changes
-                        fig = create_metric_vs_pnl_chart(
-                            metrics_df,
-                            pnl_df,
-                            'direction_changes_30min',
-                            'Direction Changes (30min)',
-                            selected_pair,
-                            exchange_filter,
-                            use_sg_time=display_sg_time
-                        )
-                        
-                        if fig:
-                            st.plotly_chart(fig, use_container_width=True)
-                            
-                            # Calculate correlation
-                            correlation = calculate_metric_pnl_correlation(metrics_df, pnl_df, 'direction_changes_30min')
-                            
-                            if correlation is not None:
-                                st.write(f"**Correlation:** {correlation:.3f}")
-                                
-                                if correlation > 0.3:
-                                    st.success("Positive correlation suggests higher direction changes are associated with higher PNL")
-                                elif correlation < -0.3:
-                                    st.info("Negative correlation suggests lower direction changes are associated with higher PNL")
-                                else:
-                                    st.warning("No strong correlation between direction changes and PNL")
-                        else:
-                            st.warning("Could not create chart for Direction Changes")
-                            
-                    with tab4:
-                        # Create chart for Range Percentage
-                        fig = create_metric_vs_pnl_chart(
-                            metrics_df,
-                            pnl_df,
-                            'absolute_range_pct',
-                            'Range %',
-                            selected_pair,
-                            exchange_filter,
-                            use_sg_time=display_sg_time
-                        )
-                        
-                        if fig:
-                            st.plotly_chart(fig, use_container_width=True)
-                            
-                            # Calculate correlation
-                            correlation = calculate_metric_pnl_correlation(metrics_df, pnl_df, 'absolute_range_pct')
-                            
-                            if correlation is not None:
-                                st.write(f"**Correlation:** {correlation:.3f}")
-                                
-                                if correlation > 0.3:
-                                    st.info("Positive correlation suggests higher price range is associated with higher PNL")
-                                elif correlation < -0.3:
-                                    st.success("Negative correlation suggests lower price range is associated with higher PNL")
-                                else:
-                                    st.warning("No strong correlation between price range and PNL")
-                        else:
-                            st.warning("Could not create chart for Range Percentage")
-                            
-                    # Show multi-pair correlation analysis
-                    st.header("Multi-Pair Correlation Analysis")
-                    
-                    # Analyze all pairs
-                    correlation_data = []
-                    
-                    with st.spinner("Calculating correlations across all pairs..."):
-                        for pair in analyzed_pairs:
-                            try:
-                                # Get metrics data
-                                pair_metrics_df = pd.DataFrame(analyzer.time_series_data[pair][exchange_filter])
-                                
-                                # Get PNL data
-                                pair_pnl_df = fetch_platform_pnl_for_pair(conn, pair, hours=hours)
-                                
-                                if not pair_metrics_df.empty and pair_pnl_df is not None and not pair_pnl_df.empty:
-                                    # Calculate correlations
-                                    hurst_corr = calculate_metric_pnl_correlation(pair_metrics_df, pair_pnl_df, 'hurst_exponent')
-                                    dc_range_corr = calculate_metric_pnl_correlation(pair_metrics_df, pair_pnl_df, 'dc_range_ratio')
-                                    dc_corr = calculate_metric_pnl_correlation(pair_metrics_df, pair_pnl_df, 'direction_changes_30min')
-                                    range_corr = calculate_metric_pnl_correlation(pair_metrics_df, pair_pnl_df, 'absolute_range_pct')
-                                    
-                                    # Get final PNL
-                                    final_pnl = pair_pnl_df['cumulative_pnl'].iloc[-1] if len(pair_pnl_df) > 0 else 0
-                                    
-                                    # Calculate average metric values
-                                    avg_hurst = pair_metrics_df['hurst_exponent'].mean() if 'hurst_exponent' in pair_metrics_df.columns else None
-                                    avg_dc_range = pair_metrics_df['dc_range_ratio'].mean() if 'dc_range_ratio' in pair_metrics_df.columns else None
-                                    
-                                    # Add to correlation data
-                                    correlation_data.append({
-                                        'Pair': pair,
-                                        'Hurst-PNL Corr': hurst_corr if hurst_corr is not None else float('nan'),
-                                        'DC/Range-PNL Corr': dc_range_corr if dc_range_corr is not None else float('nan'),
-                                        'DC-PNL Corr': dc_corr if dc_corr is not None else float('nan'),
-                                        'Range-PNL Corr': range_corr if range_corr is not None else float('nan'),
-                                        'Final PNL': final_pnl,
-                                        'Avg Hurst': avg_hurst if avg_hurst is not None else float('nan'),
-                                        'Avg DC/Range': avg_dc_range if avg_dc_range is not None else float('nan')
-                                    })
-                            except Exception as e:
-                                st.error(f"Error processing correlation for {pair}: {e}")
-                        
-                    # Display correlation table
-                    if correlation_data:
-                        # Convert to DataFrame
-                        correlation_df = pd.DataFrame(correlation_data)
-                        
-                        # Sort by Final PNL (highest first)
-                        correlation_df = correlation_df.sort_values('Final PNL', ascending=False)
-                        
-                        # Function to color correlations
-                        def color_correlation(val):
-                            if pd.isna(val):
-                                return ''
-                            elif val > 0.5:
-                                return 'background-color: rgba(0, 200, 0, 0.5); color: black'
-                            elif val > 0.3:
-                                return 'background-color: rgba(150, 200, 150, 0.5); color: black'
-                            elif val < -0.5:
-                                return 'background-color: rgba(200, 0, 0, 0.5); color: black'
-                            elif val < -0.3:
-                                return 'background-color: rgba(200, 150, 150, 0.5); color: black'
-                            else:
-                                return 'background-color: rgba(200, 200, 200, 0.5); color: black'
-                        
-                        # Function to color PNL
-                        def color_pnl(val):
-                            if pd.isna(val):
-                                return ''
-                            elif val > 5000:
-                                return 'background-color: rgba(0, 200, 0, 0.8); color: black'
-                            elif val > 1000:
-                                return 'background-color: rgba(100, 200, 100, 0.5); color: black'
-                            elif val > 0:
-                                return 'background-color: rgba(200, 255, 200, 0.5); color: black'
-                            elif val > -1000:
-                                return 'background-color: rgba(255, 200, 200, 0.5); color: black'
-                            else:
-                                return 'background-color: rgba(255, 100, 100, 0.5); color: black'
-                        
-                        # Style the DataFrame
-                        styled_df = correlation_df.style.format({
-                            'Hurst-PNL Corr': '{:.3f}',
-                            'DC/Range-PNL Corr': '{:.3f}',
-                            'DC-PNL Corr': '{:.3f}',
-                            'Range-PNL Corr': '{:.3f}',
-                            'Final PNL': '${:.2f}',
-                            'Avg Hurst': '{:.3f}',
-                            'Avg DC/Range': '{:.3f}'
-                        })
-                        
-                        # Apply color styling
-                        styled_df = styled_df.applymap(color_correlation, subset=['Hurst-PNL Corr', 'DC/Range-PNL Corr', 'DC-PNL Corr', 'Range-PNL Corr'])
-                        styled_df = styled_df.applymap(color_pnl, subset=['Final PNL'])
-                        
-                        # Show table
-                        st.subheader(f"Correlation Between Mean Reversion Metrics and PNL by Pair ({exchange_filter})")
-                        st.dataframe(styled_df, height=400, use_container_width=True)
-                        
-                        # Create scatter plot
-                        try:
-                            # Drop rows with NaN values
-                            plot_df = correlation_df.dropna(subset=['Avg Hurst', 'Final PNL'])
-                            
-                            if not plot_df.empty:
-                                fig = px.scatter(
-                                    plot_df,
-                                    x='Avg Hurst',
-                                    y='Final PNL',
-                                    color='Avg DC/Range',
-                                    size=abs(plot_df['Hurst-PNL Corr']).fillna(0.1) * 10 + 5,
-                                    hover_name='Pair',
-                                    title=f'Average Hurst Exponent vs Final PNL (Color = Avg DC/Range) - {exchange_filter}',
-                                    labels={
-                                        'Avg Hurst': 'Average Hurst Exponent', 
-                                        'Final PNL': 'Final PNL (USD)',
-                                        'Avg DC/Range': 'Avg Direction Changes / Range'
-                                    },
-                                    color_continuous_scale='Viridis'
-                                )
-                                
-                                # Add reference line at Hurst = 0.5
-                                if len(plot_df) > 0:
-                                    fig.add_shape(
-                                        type="line",
-                                        x0=0.5,
-                                        y0=plot_df['Final PNL'].min(),
-                                        x1=0.5,
-                                        y1=plot_df['Final PNL'].max(),
-                                        line=dict(
-                                            color="red",
-                                            width=1,
-                                            dash="dash",
-                                        )
-                                    )
-                                    
-                                    # Add annotation
-                                    fig.add_annotation(
-                                        x=0.5,
-                                        y=plot_df['Final PNL'].min(),
-                                        text="Random Walk (H=0.5)",
-                                        showarrow=False,
-                                        yshift=-20
-                                    )
-                                
-                                st.plotly_chart(fig, use_container_width=True)
-                            else:
-                                st.warning("Not enough data points with valid values for scatter plot")
-                        
-                        except Exception as e:
-                            st.error(f"Error creating scatter plot: {e}")
-                        
-                        # Calculate summary statistics
-                        st.subheader("Summary Insights")
-                        
-                        try:
-                            # Calculate average correlations
-                            avg_hurst_corr = correlation_df['Hurst-PNL Corr'].mean()
-                            avg_dc_range_corr = correlation_df['DC/Range-PNL Corr'].mean()
-                            avg_dc_corr = correlation_df['DC-PNL Corr'].mean()
-                            avg_range_corr = correlation_df['Range-PNL Corr'].mean()
-                            
-                            # Count profitable pairs
-                            profitable_pairs = len(correlation_df[correlation_df['Final PNL'] > 0])
-                            unprofitable_pairs = len(correlation_df[correlation_df['Final PNL'] <= 0])
-                            
-                            # Calculate average Hurst for profitable vs. unprofitable pairs
-                            avg_hurst_profitable = correlation_df[correlation_df['Final PNL'] > 0]['Avg Hurst'].mean()
-                            avg_hurst_unprofitable = correlation_df[correlation_df['Final PNL'] <= 0]['Avg Hurst'].mean() if unprofitable_pairs > 0 else None
-                            
-                            # Display summary
-                            col1, col2 = st.columns(2)
-                            
-                            with col1:
-                                st.write(f"**Profitable Pairs:** {profitable_pairs} out of {len(correlation_df)}")
-                                st.write(f"**Average Correlations:**")
-                                st.write(f"- Hurst-PNL: {avg_hurst_corr:.3f}")
-                                st.write(f"- DC/Range-PNL: {avg_dc_range_corr:.3f}")
-                                st.write(f"- Direction Changes-PNL: {avg_dc_corr:.3f}")
-                                st.write(f"- Range-PNL: {avg_range_corr:.3f}")
-                            
-                            with col2:
-                                st.write(f"**Average Hurst for Profitable Pairs:** {avg_hurst_profitable:.3f}")
-                                if avg_hurst_unprofitable is not None:
-                                    st.write(f"**Average Hurst for Unprofitable Pairs:** {avg_hurst_unprofitable:.3f}")
-                                
-                                # Insight about mean reversion
-                                if avg_hurst_profitable < 0.5:
-                                    st.success("**Mean reversion (Hurst < 0.5) appears beneficial for profitability across pairs**")
-                                elif avg_hurst_profitable > 0.5:
-                                    st.info("**Trending behavior (Hurst > 0.5) appears beneficial for profitability across pairs**")
-                                else:
-                                    st.warning("**No clear pattern between Hurst exponent and profitability across pairs**")
-                        
-                        except Exception as e:
-                            st.error(f"Error calculating summary statistics: {e}")
-                    
-                    else:
-                        st.warning("No correlation data available for multi-pair analysis")
-                else:
-                    st.error(f"No PNL data available for {selected_pair}")
-            else:
-                st.error(f"No mean reversion metrics available for {selected_pair}")
-        else:
-            st.error(f"No data available for {selected_pair} on {exchange_filter}")
+    if not conn:
+        st.error("Database connection not available.")
+    elif not st.session_state.selected_pairs:
+        st.error("Please enter at least one pair to analyze.")
     else:
-        st.error("No pairs were successfully analyzed. Please try different pairs or parameters.")
-else:
-    st.info("Select pairs and click 'Analyze Mean Reversion vs PNL' to begin analysis")
+        # Initialize analyzer
+        analyzer = PriceStabilityAnalyzer()
+        
+        # Run analysis
+        st.header(f"Price Stability Analysis for {st.session_state.exchange.upper()}")
+        
+        # Add a progress container
+        progress_container = st.empty()
+        with progress_container.container():
+            st.info("Starting analysis... This may take a few minutes depending on the number of pairs selected.")
+            
+            with st.spinner("Fetching and analyzing data..."):
+                results = analyzer.fetch_and_analyze_data(
+                    conn=conn,
+                    pairs_to_analyze=st.session_state.selected_pairs,
+                    exchange=st.session_state.exchange,
+                    hours=st.session_state.hours
+                )
+            
+            # Clear the progress container after analysis is complete
+            progress_container.empty()
+        
+        if results:
+            stability_results = results['stability_results']
+            daily_averages = results['daily_averages']
+            
+            # Tab 1: Time Series Analysis
+            with tab1:
+                st.header("Time Series Analysis")
+                st.write(f"Percentage of prices within ±{analyzer.tolerance_percentage}% of {analyzer.interval_minutes}-minute interval median")
+                
+                # Create time series plots for each pair
+                for pair, df in stability_results.items():
+                    st.subheader(f"{pair} Stability")
+                    
+                    # Create line chart
+                    fig = px.line(
+                        df,
+                        x='interval',
+                        y='percentage_in_range',
+                        title=f"{pair} - Percentage of prices within ±{analyzer.tolerance_percentage}% of interval median",
+                        labels={
+                            'interval': 'Time (15-minute intervals)',
+                            'percentage_in_range': '% within ±0.5% of median'
+                        }
+                    )
+                    
+                    # Add reference line at 100%
+                    fig.add_shape(
+                        type="line",
+                        x0=df['interval'].min(),
+                        y0=100,
+                        x1=df['interval'].max(),
+                        y1=100,
+                        line=dict(
+                            color="green",
+                            width=1,
+                            dash="dash",
+                        )
+                    )
+                    
+                    # Add reference line at 50%
+                    fig.add_shape(
+                        type="line",
+                        x0=df['interval'].min(),
+                        y0=50,
+                        x1=df['interval'].max(),
+                        y1=50,
+                        line=dict(
+                            color="red",
+                            width=1,
+                            dash="dash",
+                        )
+                    )
+                    
+                    # Update layout
+                    fig.update_layout(
+                        height=400,
+                        xaxis_title="Time (15-minute intervals)",
+                        yaxis_title="Percentage within ±0.5%",
+                        yaxis=dict(
+                            range=[0, 105]  # Set y-axis range from 0 to 105%
+                        )
+                    )
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Add daily average
+                    daily_avg = daily_averages.get(pair, 0)
+                    st.write(f"Daily average: {daily_avg:.2f}% of prices within ±{analyzer.tolerance_percentage}% of interval median")
+                    
+                    # Add download button for the data
+                    csv = df.to_csv(index=False).encode('utf-8')
+                    st.download_button(
+                        label=f"Download {pair} Data",
+                        data=csv,
+                        file_name=f"price_stability_{st.session_state.exchange}_{pair.replace('/', '_')}.csv",
+                        mime="text/csv"
+                    )
+                    
+                    st.markdown("---")
+            
+            # Tab 2: Daily Rankings
+            with tab2:
+                st.header("Daily Ranking by Price Stability")
+                st.write(f"Average percentage of prices within ±{analyzer.tolerance_percentage}% of {analyzer.interval_minutes}-minute interval median")
+                
+                # Create DataFrame with daily averages
+                if daily_averages:
+                    avg_df = pd.DataFrame({
+                        'Pair': list(daily_averages.keys()),
+                        'Average % within ±0.5%': list(daily_averages.values())
+                    })
+                    
+                    # Sort by average (descending)
+                    avg_df = avg_df.sort_values('Average % within ±0.5%', ascending=False)
+                    
+                    # Add rank column
+                    avg_df.insert(0, 'Rank', range(1, len(avg_df) + 1))
+                    
+                    # Display as table
+                    st.dataframe(avg_df, use_container_width=True)
+                    
+                    # Create bar chart
+                    fig = px.bar(
+                        avg_df,
+                        x='Pair',
+                        y='Average % within ±0.5%',
+                        title=f"Daily Average Stability Ranking ({st.session_state.exchange.upper()})",
+                        labels={
+                            'Pair': 'Cryptocurrency Pair',
+                            'Average % within ±0.5%': '% within ±0.5% of median'
+                        },
+                        color='Average % within ±0.5%',
+                        color_continuous_scale='Viridis'
+                    )
+                    
+                    # Update layout
+                    fig.update_layout(
+                        height=500,
+                        xaxis_title="Cryptocurrency Pair",
+                        yaxis_title="Daily Average % within ±0.5%",
+                        yaxis=dict(
+                            range=[0, max(avg_df['Average % within ±0.5%']) * 1.1]  # Set y-axis range with some padding
+                        )
+                    )
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Add download button for the rankings
+                    csv = avg_df.to_csv(index=False).encode('utf-8')
+                    st.download_button(
+                        label="Download Rankings",
+                        data=csv,
+                        file_name=f"price_stability_rankings_{st.session_state.exchange}.csv",
+                        mime="text/csv"
+                    )
+                else:
+                    st.warning("No daily averages calculated.")
+        else:
+            st.error("Failed to analyze data. Please try again with different parameters.")
+        
+        # Reset the analyze_clicked flag
+        st.session_state.analyze_clicked = False
 
 # Add explanation in the sidebar
 st.sidebar.markdown("---")
-st.sidebar.subheader("About This Dashboard")
-st.sidebar.markdown("""
-This dashboard analyzes cryptocurrency price data to detect mean reversion patterns and compares them with cumulative PNL:
+st.sidebar.subheader("About This Analysis")
+st.sidebar.markdown(f"""
+This dashboard analyzes cryptocurrency price stability by:
 
-- **Hurst Exponent**: Values < 0.5 indicate mean reversion behavior
-- **Direction Changes/Range Ratio**: Higher values suggest more mean reversion
-- **Cumulative PNL**: Platform profit reset to zero at the start of the analysis period
+1. Dividing price data into {analyzer.interval_minutes}-minute intervals
+2. Calculating the median price for each interval
+3. Measuring what percentage of prices fall within ±{analyzer.tolerance_percentage}% of the median
+4. Plotting these percentages over time
+5. Calculating daily averages and ranking the coins by stability
 
-The analysis helps identify which mean reversion characteristics correlate with higher platform profitability.
+Higher percentages indicate more stable prices within the tolerance range.
 """)
 
 # Add footer
