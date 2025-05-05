@@ -74,24 +74,6 @@ with st.sidebar:
         help="Starting price for all simulations"
     )
     
-    price_volatility = st.slider(
-        "Price Volatility (%)",
-        min_value=0.01,
-        max_value=5.0,
-        value=0.5,
-        step=0.01,
-        help="Average size of price moves as a percentage"
-    )
-    
-    trend_bias = st.slider(
-        "Trend Bias (%)",
-        min_value=-1.0,
-        max_value=1.0,
-        value=0.0,
-        step=0.05,
-        help="Bias towards upward (positive) or downward (negative) movement"
-    )
-    
     num_simulations = st.number_input(
         "Number of Simulations",
         min_value=10,
@@ -104,8 +86,7 @@ with st.sidebar:
     run_button = st.button("Run Simulation", type="primary", use_container_width=True)
 
 # Function to simulate a price path with target metrics
-def simulate_price_path(num_ticks, initial_price, target_dir_change_pct, target_choppiness, target_trend_strength, 
-                         volatility_pct, trend_bias):
+def simulate_price_path(num_ticks, initial_price, target_dir_change_pct, target_choppiness, target_trend_strength):
     """
     Simulates a price path with target metrics.
     
@@ -115,8 +96,6 @@ def simulate_price_path(num_ticks, initial_price, target_dir_change_pct, target_
         target_dir_change_pct: Target percentage of direction changes (0-100)
         target_choppiness: Target choppiness value (higher means more oscillation)
         target_trend_strength: Target trend strength (higher means stronger trend)
-        volatility_pct: Price volatility as a percentage
-        trend_bias: Bias towards upward or downward movement
     
     Returns:
         Pandas Series with the simulated price path
@@ -134,8 +113,9 @@ def simulate_price_path(num_ticks, initial_price, target_dir_change_pct, target_
     # Window size for calculating running metrics (for adjustments)
     window_size = min(20, num_ticks // 10)
     
-    # Calculate base volatility
-    base_volatility = initial_price * (volatility_pct / 100.0)
+    # Base volatility (derived from the target metrics)
+    # Higher choppiness or lower trend strength means higher volatility
+    base_volatility = initial_price * 0.002 * (target_choppiness / 150) * (1 / target_trend_strength)
     
     # Generate subsequent prices
     for i in range(1, num_ticks):
@@ -190,9 +170,6 @@ def simulate_price_path(num_ticks, initial_price, target_dir_change_pct, target_
         
         # Calculate the price change
         price_change = adjusted_volatility * current_direction
-        
-        # Add trend bias
-        price_change += initial_price * (trend_bias / 100.0)
         
         # Update price
         prices[i] = prices[i-1] + price_change
@@ -258,7 +235,7 @@ def calculate_trend_strength(prices, window=14):
 
 # Function to run multiple simulations and return statistics
 def run_multiple_simulations(num_simulations, num_ticks, initial_price, target_dir_change_pct, 
-                             target_choppiness, target_trend_strength, volatility_pct, trend_bias):
+                             target_choppiness, target_trend_strength):
     """
     Run multiple simulations and collect statistics.
     
@@ -291,9 +268,7 @@ def run_multiple_simulations(num_simulations, num_ticks, initial_price, target_d
             initial_price, 
             target_dir_change_pct, 
             target_choppiness, 
-            target_trend_strength, 
-            volatility_pct, 
-            trend_bias
+            target_trend_strength
         )
         all_paths.append(path)
         
@@ -354,9 +329,7 @@ if run_button:
             initial_price=initial_price,
             target_dir_change_pct=direction_changes_pct,
             target_choppiness=choppiness,
-            target_trend_strength=trend_strength,
-            volatility_pct=price_volatility,
-            trend_bias=trend_bias
+            target_trend_strength=trend_strength
         )
         execution_time = time.time() - start_time
     
@@ -368,8 +341,6 @@ if run_button:
         'trend_strength': trend_strength,
         'num_ticks': num_ticks,
         'initial_price': initial_price,
-        'price_volatility': price_volatility,
-        'trend_bias': trend_bias,
         'num_simulations': num_simulations,
         'execution_time': execution_time
     }
