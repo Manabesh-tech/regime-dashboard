@@ -67,7 +67,6 @@ class PriceStabilityAnalyzer:
     def __init__(self):
         self.interval_minutes = INTERVAL_MINUTES
         self.tolerance_percentage = TOLERANCE_PERCENTAGE
-        self.exchanges = ['rollbit', 'surf']
         
     def _get_partition_tables(self, conn, start_date, end_date):
         """
@@ -134,9 +133,10 @@ class PriceStabilityAnalyzer:
         
         return existing_tables
 
-    def _build_query_for_partition_tables(self, tables, pair_name, start_time, end_time, exchange):
+    def _build_query_for_partition_tables(self, tables, pair_name, start_time, end_time):
         """
         Build a complete UNION query for multiple partition tables.
+        Surf data only (source_type = 0)
         """
         if not tables:
             return ""
@@ -154,36 +154,20 @@ class PriceStabilityAnalyzer:
         union_parts = []
         
         for table in tables:
-            # For Surf data (production)
-            if exchange == 'surf':
-                query = f"""
-                SELECT 
-                    pair_name,
-                    created_at + INTERVAL '8 hour' AS timestamp,
-                    final_price AS price
-                FROM 
-                    public.{table}
-                WHERE 
-                    created_at >= '{start_time_str}'::timestamp - INTERVAL '8 hour'
-                    AND created_at <= '{end_time_str}'::timestamp - INTERVAL '8 hour'
-                    AND source_type = 0
-                    AND pair_name = '{pair_name}'
-                """
-            else:
-                # For Rollbit data
-                query = f"""
-                SELECT 
-                    pair_name,
-                    created_at + INTERVAL '8 hour' AS timestamp,
-                    final_price AS price
-                FROM 
-                    public.{table}
-                WHERE 
-                    created_at >= '{start_time_str}'::timestamp - INTERVAL '8 hour'
-                    AND created_at <= '{end_time_str}'::timestamp - INTERVAL '8 hour'
-                    AND source_type = 1
-                    AND pair_name = '{pair_name}'
-                """
+            # For Surf data (production) only
+            query = f"""
+            SELECT 
+                pair_name,
+                created_at + INTERVAL '8 hour' AS timestamp,
+                final_price AS price
+            FROM 
+                public.{table}
+            WHERE 
+                created_at >= '{start_time_str}'::timestamp - INTERVAL '8 hour'
+                AND created_at <= '{end_time_str}'::timestamp - INTERVAL '8 hour'
+                AND source_type = 0
+                AND pair_name = '{pair_name}'
+            """
             
             union_parts.append(query)
         
@@ -239,14 +223,14 @@ class PriceStabilityAnalyzer:
         result_df = pd.DataFrame(results)
         return result_df
 
-    def fetch_and_analyze_data(self, conn, pairs_to_analyze, exchange, hours=24):
+    def fetch_and_analyze_data(self, conn, pairs_to_analyze, hours=24):
         """
         Fetch data for selected pairs and analyze stability in 15-minute intervals.
+        Only for Surf exchange (source_type = 0)
         
         Args:
             conn: Database connection
             pairs_to_analyze: List of coin pairs to analyze
-            exchange: Exchange to fetch data from ('rollbit' or 'surf')
             hours: Hours to look back for data retrieval
             
         Returns:
@@ -295,8 +279,7 @@ class PriceStabilityAnalyzer:
                     partition_tables,
                     pair_name=pair,
                     start_time=start_time,
-                    end_time=end_time,
-                    exchange=exchange
+                    end_time=end_time
                 )
                 
                 if query:
@@ -305,7 +288,7 @@ class PriceStabilityAnalyzer:
                         df = pd.read_sql_query(query, conn)
                         
                         if len(df) > 0:
-                            st.write(f"Found {len(df)} records for {exchange.upper()}_{pair}")
+                            st.write(f"Found {len(df)} records for SURF_{pair}")
                             
                             # Analyze price stability
                             stability_df = self.analyze_price_stability(
@@ -323,11 +306,11 @@ class PriceStabilityAnalyzer:
                                 
                                 st.write(f"Daily average: {daily_avg:.2f}% of prices within ±{self.tolerance_percentage}% of interval median")
                             else:
-                                st.warning(f"No stability data calculated for {exchange.upper()}_{pair}")
+                                st.warning(f"No stability data calculated for SURF_{pair}")
                         else:
-                            st.warning(f"No data found for {exchange.upper()}_{pair}")
+                            st.warning(f"No data found for SURF_{pair}")
                     except Exception as e:
-                        st.error(f"Database query error for {exchange.upper()}_{pair}: {e}")
+                        st.error(f"Database query error for SURF_{pair}: {e}")
             
             # Final progress update
             progress_bar.progress(1.0)
@@ -367,20 +350,47 @@ all_pairs = fetch_trading_pairs()
 # Create tabs for different views
 tab1, tab2 = st.tabs(["Time Series Analysis", "Daily Rankings"])
 
-# Setup sidebar with minimal options - just exchange and hours
+# Setup sidebar with analysis options
 with st.sidebar:
     st.header("Analysis Parameters")
     
-    # Create the form with minimal options
+    # Initialize session state for selections if not present
+    if 'selected_pairs' not in st.session_state:
+        st.session_state.selected_pairs = ["BTC/USDT", "ETH/USDT"]  # Default selection
+    
+    # Create buttons with more prominent styling
+    st.markdown("### Quick Selection")
+
+    # Main selection buttons in a single row
+    col1, col2 = st.columns(2)
+
+    with col1:
+        if st.button("Select All Pairs", type="primary", use_container_width=True):
+            st.session_state.selected_pairs = all_pairs
+            st.rerun()
+
+    with col2:
+        if st.button("Clear All", type="secondary", use_container_width=True):
+            st.session_state.selected_pairs = []
+            st.rerun()
+
+    # Additional options in a new row
+    col3, col4 = st.columns(2)
+
+    with col3:
+        if st.button("Major Coins", use_container_width=True):
+            st.session_state.selected_pairs = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "DOGE/USDT"]
+            st.rerun()
+
+    with col4:
+        if st.button("Default Pairs", use_container_width=True):
+            st.session_state.selected_pairs = ["ETH/USDT", "BTC/USDT"]
+            st.rerun()
+
+    st.markdown("---")  # Add a separator
+    
+    # Create the form
     with st.form("price_stability_form"):
-        # Exchange selection
-        exchange = st.selectbox(
-            "Select Exchange",
-            options=["surf", "rollbit"],
-            index=0,
-            help="Choose exchange to analyze"
-        )
-        
         # Data retrieval window
         hours = st.number_input(
             "Hours to Look Back",
@@ -390,18 +400,26 @@ with st.sidebar:
             help="How many hours of historical data to retrieve"
         )
         
+        # Create multiselect for pairs
+        selected_pairs = st.multiselect(
+            "Select Pairs to Analyze",
+            options=all_pairs,
+            default=st.session_state.selected_pairs,
+            help="Select one or more cryptocurrency pairs to analyze"
+        )
+        
         # Add submit button
-        submit_button = st.form_submit_button("Analyze All Coins")
+        submit_button = st.form_submit_button("Analyze Price Stability")
         
         # Update session state when form is submitted
         if submit_button:
+            st.session_state.selected_pairs = selected_pairs
             st.session_state.hours = hours
-            st.session_state.exchange = exchange
             st.session_state.analyze_clicked = True
             st.rerun()
 
 # Check if we should run the analysis
-if st.session_state.get('analyze_clicked', False) or 'stability_results' not in st.session_state:
+if st.session_state.get('analyze_clicked', False):
     # Clear cache and previous data at start of analysis to ensure fresh data
     st.cache_data.clear()
     
@@ -412,33 +430,32 @@ if st.session_state.get('analyze_clicked', False) or 'stability_results' not in 
     
     if not conn:
         st.error("Database connection not available.")
-    elif not all_pairs:
-        st.error("No trading pairs found in the database.")
+    elif not st.session_state.selected_pairs:
+        st.error("Please enter at least one pair to analyze.")
     else:
         # Initialize analyzer
         analyzer = PriceStabilityAnalyzer()
         
-        # Run analysis on ALL pairs
-        st.header(f"Price Stability Analysis for {st.session_state.get('exchange', 'surf').upper()}")
+        # Run analysis
+        st.header(f"Price Stability Analysis for SURF")
         
         # Add a progress container
         progress_container = st.empty()
         with progress_container.container():
-            st.info("Starting analysis on all available pairs... This may take several minutes.")
+            st.info("Starting analysis... This may take a few minutes depending on the number of pairs selected.")
             
             with st.spinner("Fetching and analyzing data..."):
                 results = analyzer.fetch_and_analyze_data(
                     conn=conn,
-                    pairs_to_analyze=all_pairs,  # Use ALL pairs
-                    exchange=st.session_state.get('exchange', 'surf'),
-                    hours=st.session_state.get('hours', 24)
+                    pairs_to_analyze=st.session_state.selected_pairs,
+                    hours=st.session_state.hours
                 )
             
             # Clear the progress container after analysis is complete
             progress_container.empty()
         
         if results:
-            # Store results in session state to avoid recomputing when switching tabs
+            # Store results in session state
             st.session_state.stability_results = results['stability_results']
             st.session_state.daily_averages = results['daily_averages']
         else:
@@ -457,85 +474,76 @@ if 'stability_results' in st.session_state and 'daily_averages' in st.session_st
         st.header("Time Series Analysis")
         st.write(f"Percentage of prices within ±{TOLERANCE_PERCENTAGE}% of {INTERVAL_MINUTES}-minute interval median")
         
-        # Add a multiselect to filter which pairs to display
-        pairs_to_display = st.multiselect(
-            "Select pairs to display",
-            options=list(stability_results.keys()),
-            default=list(stability_results.keys())[:5] if len(stability_results) > 5 else list(stability_results.keys())
-        )
-        
-        # Create time series plots for selected pairs
-        for pair in pairs_to_display:
-            if pair in stability_results:
-                df = stability_results[pair]
-                st.subheader(f"{pair} Stability")
-                
-                # Create line chart
-                fig = px.line(
-                    df,
-                    x='interval',
-                    y='percentage_in_range',
-                    title=f"{pair} - Percentage of prices within ±{TOLERANCE_PERCENTAGE}% of interval median",
-                    labels={
-                        'interval': 'Time (15-minute intervals)',
-                        'percentage_in_range': '% within ±0.5% of median'
-                    }
+        # Create time series plots for each pair
+        for pair, df in stability_results.items():
+            st.subheader(f"{pair} Stability")
+            
+            # Create line chart
+            fig = px.line(
+                df,
+                x='interval',
+                y='percentage_in_range',
+                title=f"{pair} - Percentage of prices within ±{TOLERANCE_PERCENTAGE}% of interval median",
+                labels={
+                    'interval': 'Time (15-minute intervals)',
+                    'percentage_in_range': '% within ±0.5% of median'
+                }
+            )
+            
+            # Add reference line at 100%
+            fig.add_shape(
+                type="line",
+                x0=df['interval'].min(),
+                y0=100,
+                x1=df['interval'].max(),
+                y1=100,
+                line=dict(
+                    color="green",
+                    width=1,
+                    dash="dash",
                 )
-                
-                # Add reference line at 100%
-                fig.add_shape(
-                    type="line",
-                    x0=df['interval'].min(),
-                    y0=100,
-                    x1=df['interval'].max(),
-                    y1=100,
-                    line=dict(
-                        color="green",
-                        width=1,
-                        dash="dash",
-                    )
+            )
+            
+            # Add reference line at 50%
+            fig.add_shape(
+                type="line",
+                x0=df['interval'].min(),
+                y0=50,
+                x1=df['interval'].max(),
+                y1=50,
+                line=dict(
+                    color="red",
+                    width=1,
+                    dash="dash",
                 )
-                
-                # Add reference line at 50%
-                fig.add_shape(
-                    type="line",
-                    x0=df['interval'].min(),
-                    y0=50,
-                    x1=df['interval'].max(),
-                    y1=50,
-                    line=dict(
-                        color="red",
-                        width=1,
-                        dash="dash",
-                    )
+            )
+            
+            # Update layout
+            fig.update_layout(
+                height=400,
+                xaxis_title="Time (15-minute intervals)",
+                yaxis_title="Percentage within ±0.5%",
+                yaxis=dict(
+                    range=[0, 105]  # Set y-axis range from 0 to 105%
                 )
-                
-                # Update layout
-                fig.update_layout(
-                    height=400,
-                    xaxis_title="Time (15-minute intervals)",
-                    yaxis_title="Percentage within ±0.5%",
-                    yaxis=dict(
-                        range=[0, 105]  # Set y-axis range from 0 to 105%
-                    )
-                )
-                
-                st.plotly_chart(fig, use_container_width=True)
-                
-                # Add daily average
-                daily_avg = daily_averages.get(pair, 0)
-                st.write(f"Daily average: {daily_avg:.2f}% of prices within ±{TOLERANCE_PERCENTAGE}% of interval median")
-                
-                # Add download button for the data
-                csv = df.to_csv(index=False).encode('utf-8')
-                st.download_button(
-                    label=f"Download {pair} Data",
-                    data=csv,
-                    file_name=f"price_stability_{st.session_state.get('exchange', 'surf')}_{pair.replace('/', '_')}.csv",
-                    mime="text/csv"
-                )
-                
-                st.markdown("---")
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Add daily average
+            daily_avg = daily_averages.get(pair, 0)
+            st.write(f"Daily average: {daily_avg:.2f}% of prices within ±{TOLERANCE_PERCENTAGE}% of interval median")
+            
+            # Add download button for the data
+            csv = df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label=f"Download {pair} Data",
+                data=csv,
+                file_name=f"price_stability_surf_{pair.replace('/', '_')}.csv",
+                mime="text/csv"
+            )
+            
+            st.markdown("---")
     
     # Tab 2: Daily Rankings
     with tab2:
@@ -563,7 +571,7 @@ if 'stability_results' in st.session_state and 'daily_averages' in st.session_st
                 avg_df,
                 x='Pair',
                 y='Average % within ±0.5%',
-                title=f"Daily Average Stability Ranking ({st.session_state.get('exchange', 'surf').upper()})",
+                title=f"Daily Average Stability Ranking (SURF)",
                 labels={
                     'Pair': 'Cryptocurrency Pair',
                     'Average % within ±0.5%': '% within ±0.5% of median'
@@ -589,7 +597,7 @@ if 'stability_results' in st.session_state and 'daily_averages' in st.session_st
             st.download_button(
                 label="Download Rankings",
                 data=csv,
-                file_name=f"price_stability_rankings_{st.session_state.get('exchange', 'surf')}.csv",
+                file_name=f"price_stability_rankings_surf.csv",
                 mime="text/csv"
             )
         else:
