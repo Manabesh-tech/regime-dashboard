@@ -774,22 +774,124 @@ def main():
     
     # Try to get available pairs
     try:
-        available_pairs = get_available_pairs()
+        all_available_pairs = get_available_pairs()
+        st.write(f"Found {len(all_available_pairs)} available pairs")
     except:
-        available_pairs = ["BTC", "SOL", "ETH", "DOGE", "XRP", "PNUT","SUI"]
+        all_available_pairs = ["BTC", "SOL", "ETH", "DOGE", "XRP", "PNUT", "SUI"]
     
-    # Pair selection
-    col1, col2 = st.columns([2, 1])
+    # Common pairs for quick selection
+    common_pairs = ["BTC", "ETH", "SOL", "DOGE", "XRP", "SUI", "AVAX", "LINK", "DOT", "ADA", "LTC"]
+    common_pairs = [p for p in common_pairs if p in all_available_pairs]
     
-    with col1:
-        selected_pair = st.selectbox(
-            "Select Pair",
-            options=available_pairs,
-            index=0 if available_pairs else None
-        )
+    # Create tabs for pair selection
+    select_tab, all_pairs_tab = st.tabs(["Select Pair", "View All Pairs"])
     
-    with col2:
-        run_analysis = st.button("ANALYZE NOW", use_container_width=True)
+    with select_tab:
+        # Create multiple columns for selection options
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            # Selection method
+            selection_method = st.radio(
+                "Selection Method",
+                ["Common Pairs", "Search & Select", "View by Category"],
+                horizontal=True
+            )
+            
+            if selection_method == "Common Pairs":
+                selected_pair = st.selectbox(
+                    "Select Pair",
+                    options=common_pairs,
+                    index=0 if common_pairs else None
+                )
+            
+            elif selection_method == "Search & Select":
+                # Search box for pairs
+                search_term = st.text_input("Search for a pair")
+                filtered_pairs = [p for p in all_available_pairs if search_term.upper() in p.upper()]
+                
+                if filtered_pairs:
+                    selected_pair = st.selectbox(
+                        "Select from filtered pairs",
+                        options=filtered_pairs,
+                        index=0
+                    )
+                else:
+                    st.warning("No matching pairs found")
+                    selected_pair = None
+            
+            elif selection_method == "View by Category":
+                # Group pairs by first letter
+                by_letter = {}
+                for pair in all_available_pairs:
+                    first_char = pair[0]
+                    if first_char not in by_letter:
+                        by_letter[first_char] = []
+                    by_letter[first_char].append(pair)
+                
+                # Let user select letter group
+                available_letters = sorted(by_letter.keys())
+                selected_letter = st.selectbox("Select first letter", options=available_letters)
+                
+                if selected_letter:
+                    letter_pairs = by_letter[selected_letter]
+                    selected_pair = st.selectbox(
+                        f"Select from pairs starting with {selected_letter}",
+                        options=letter_pairs,
+                        index=0 if letter_pairs else None
+                    )
+                else:
+                    selected_pair = None
+        
+        with col2:
+            run_analysis = st.button("ANALYZE NOW", use_container_width=True)
+            
+            # Add a fast-select section for common pairs
+            st.markdown("### Quick Select")
+            quick_cols = st.columns(3)
+            quick_select_pair = None
+            
+            for i, pair in enumerate(common_pairs[:9]):  # Show top 9 common pairs
+                col_idx = i % 3
+                with quick_cols[col_idx]:
+                    if st.button(pair, key=f"quick_{pair}", use_container_width=True):
+                        quick_select_pair = pair
+            
+            # If quick select button was pressed, override the selection
+            if quick_select_pair:
+                selected_pair = quick_select_pair
+                st.success(f"Quick selected: {selected_pair}")
+    
+    with all_pairs_tab:
+        # Show all available pairs in a more organized way
+        st.write("### All Available Pairs")
+        
+        # Create a DataFrame to display pairs in a table format
+        chunks = [all_available_pairs[i:i+5] for i in range(0, len(all_available_pairs), 5)]
+        max_len = max(len(chunk) for chunk in chunks)
+        
+        # Pad all chunks to have the same length
+        padded_chunks = []
+        for chunk in chunks:
+            padded_chunk = chunk + [None] * (max_len - len(chunk))
+            padded_chunks.append(padded_chunk)
+        
+        # Create dataframe for display
+        pairs_df = pd.DataFrame(padded_chunks)
+        st.dataframe(pairs_df, use_container_width=True, hide_index=True)
+        
+        # Display count
+        st.info(f"Total available pairs: {len(all_available_pairs)}")
+        
+        # Add a search box for filtering
+        search_in_all = st.text_input("Search in all pairs")
+        if search_in_all:
+            matching_pairs = [p for p in all_available_pairs if search_in_all.upper() in p.upper()]
+            if matching_pairs:
+                st.write(f"Found {len(matching_pairs)} matching pairs:")
+                st.write(", ".join(matching_pairs))
+            else:
+                st.warning("No matching pairs found")
     
     # Explanation of metrics
     st.markdown("""
