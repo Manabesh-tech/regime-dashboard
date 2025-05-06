@@ -89,7 +89,7 @@ def get_session():
 
 # Get available pairs from the database
 def get_available_pairs():
-    """Fetch available trading pairs"""
+    """Fetch all available trading pairs from all recent tables"""
     default_pairs = ["BTC", "SOL", "ETH", "DOGE", "XRP"]
     
     try:
@@ -97,33 +97,49 @@ def get_available_pairs():
             if not session:
                 return default_pairs
 
-            # Get current date for table name
-            current_date = datetime.now().strftime("%Y%m%d")
-            table_name = f"oracle_exchange_price_partition_v1_{current_date}"
+            # Get dates for last few days to check all recent tables
+            all_pairs = set()
+            checked_tables = []
             
-            # Query
-            query = text(f"""
-                SELECT DISTINCT pair_name 
-                FROM {table_name}
-                ORDER BY pair_name
-            """)
-            
-            result = session.execute(query)
-            pairs = [row[0] for row in result]
-            
-            # If current date doesn't have data, try yesterday
-            if not pairs:
-                yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
-                table_name = f"oracle_exchange_price_partition_v1_{yesterday}"
-                query = text(f"""
-                    SELECT DISTINCT pair_name 
-                    FROM {table_name}
-                    ORDER BY pair_name
+            # Check data from the past 7 days to get a comprehensive list
+            for days_back in range(7):
+                # Generate table name for each day
+                check_date = (datetime.now() - timedelta(days=days_back)).strftime("%Y%m%d")
+                table_name = f"oracle_exchange_price_partition_v1_{check_date}"
+                checked_tables.append(table_name)
+                
+                # Check if the table exists
+                check_table_query = text(f"""
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.tables 
+                        WHERE table_schema = 'public' 
+                        AND table_name = :table_name
+                    );
                 """)
-                result = session.execute(query)
-                pairs = [row[0] for row in result]
+                
+                table_exists = session.execute(check_table_query, {"table_name": table_name}).scalar()
+                
+                if table_exists:
+                    # Query for distinct pairs
+                    query = text(f"""
+                        SELECT DISTINCT pair_name 
+                        FROM {table_name}
+                        ORDER BY pair_name
+                    """)
+                    
+                    result = session.execute(query)
+                    for row in result:
+                        all_pairs.add(row[0])  # Add to set to avoid duplicates
+                    
+                    if all_pairs:
+                        # We have enough pairs, no need to check more tables
+                        st.success(f"Found {len(all_pairs)} unique pairs from table: {table_name}")
             
-            return sorted(pairs) if pairs else default_pairs
+            if all_pairs:
+                return sorted(list(all_pairs))
+            else:
+                st.warning(f"No pairs found in any recent tables. Checked: {', '.join(checked_tables)}")
+                return default_pairs
 
     except Exception as e:
         st.error(f"Error fetching pairs: {e}")
