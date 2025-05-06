@@ -91,7 +91,7 @@ def get_session():
 PREDEFINED_PAIRS = [
     "BTC", "ETH", "SOL", "BNB", "XRP",
     "AVAX", "DOGE", "ADA", "TRX", "DOT",
-    "LINK", "MATIC", "SUI", "PNUT", "TRUMP"
+    "LINK", "VIRTUAL", "SUI", "PNUT", "TRUMP","FARTCOIN"
 ]
 
 # Get available pairs from the database
