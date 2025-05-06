@@ -87,61 +87,18 @@ def get_session():
     finally:
         session.close()
 
-# Pre-defined pairs as a fast fallback
+# Pre-defined pairs as a fallback
 PREDEFINED_PAIRS = [
     "BTC", "ETH", "SOL", "BNB", "XRP",
-    "AVAX", "DOGE", "ADA", "TRX", "DOT"
+    "AVAX", "DOGE", "ADA", "TRX", "DOT",
+    "LINK", "MATIC", "SUI", "PNUT", "TRUMP"
 ]
 
 # Get available pairs from the database
-@st.cache_data(ttl=300)  # Cache for 5 minutes
 def get_available_pairs():
-    """Fetch all available trading pairs from the database"""
-    try:
-        with get_session() as session:
-            if not session:
-                return PREDEFINED_PAIRS  # Fallback to predefined pairs
-
-            # First try the trade_pool_pairs table (main source)
-            query = text("SELECT pair_name FROM trade_pool_pairs WHERE status = 1")
-            try:
-                result = session.execute(query)
-                pairs = [row[0] for row in result]
-                if pairs:
-                    return sorted(pairs)
-            except Exception as e:
-                # Silent error handling if table doesn't exist
-                pass
-
-            # Fallback to oracle tables from the past few days
-            all_pairs = set()
-            for days_back in range(5):
-                check_date = (datetime.now() - timedelta(days=days_back)).strftime("%Y%m%d")
-                table_name = f"oracle_exchange_price_partition_v1_{check_date}"
-                
-                # Check if table exists
-                check_table = text("""
-                    SELECT EXISTS (
-                        SELECT FROM information_schema.tables 
-                        WHERE table_schema = 'public' 
-                        AND table_name = :table_name
-                    );
-                """)
-                
-                if session.execute(check_table, {"table_name": table_name}).scalar():
-                    pairs_query = text(f"SELECT DISTINCT pair_name FROM {table_name}")
-                    try:
-                        pairs_result = session.execute(pairs_query)
-                        for row in pairs_result:
-                            all_pairs.add(row[0])
-                    except:
-                        continue
-            
-            return sorted(list(all_pairs)) if all_pairs else PREDEFINED_PAIRS
-
-    except Exception as e:
-        # Silent error handling
-        return PREDEFINED_PAIRS
+    """Fallback to predefined pairs instead of querying the database"""
+    # Due to database connection issues, we'll use the predefined list
+    return PREDEFINED_PAIRS
 
 def _calculate_trend_strength(prices, window):
     """Calculate average Trend Strength - measures the directional strength of price movements.
