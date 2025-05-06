@@ -171,12 +171,18 @@ if app_state.last_refresh:
     st.write(f"Last data refresh: {app_state.last_refresh.strftime('%H:%M:%S')}")
 
 # --- OPTIMIZED DATA FETCHING FUNCTIONS ---
+# Modified to use connection string instead of engine object for caching
 @st.cache_data(ttl=600)
-def fetch_all_pairs(engine):
+def fetch_all_pairs():
     """Fetch all trading pairs with error handling and timeout"""
     query = "SELECT DISTINCT pair_name FROM public.trade_pool_pairs ORDER BY pair_name"
     
     try:
+        # Get database connection from app state
+        engine = get_db_connection()
+        if not engine:
+            return ["BTC/USDT", "ETH/USDT", "SOL/USDT", "DOGE/USDT", "PEPE/USDT"]
+            
         with engine.connect() as conn:
             # Set statement timeout to 10 seconds
             conn.execute(text("SET statement_timeout = 10000"))
@@ -192,8 +198,9 @@ def fetch_all_pairs(engine):
         # Return a fallback list
         return ["BTC/USDT", "ETH/USDT", "SOL/USDT", "DOGE/USDT", "PEPE/USDT"]
 
+# Modified to not require engine parameter for caching
 @st.cache_data(ttl=600)
-def fetch_top_users(engine, limit=100):
+def fetch_top_users(limit=100):
     """Fetch top users by trading volume with optimized query"""
     # Calculate the date range internally
     now_utc = datetime.now(pytz.utc)
@@ -217,6 +224,11 @@ def fetch_top_users(engine, limit=100):
     """
     
     try:
+        # Get database connection from app state
+        engine = get_db_connection()
+        if not engine:
+            return [f"user_{i}" for i in range(1, 11)]
+            
         with engine.connect() as conn:
             # Set statement timeout to 20 seconds
             conn.execute(text("SET statement_timeout = 20000"))
@@ -233,8 +245,11 @@ def fetch_top_users(engine, limit=100):
         # Return some mock user IDs for testing
         return [f"user_{i}" for i in range(1, 11)]
 
+# Store database connection string for caching
+DB_CONNECTION_STRING = "streamlit_app_database"
+
 @st.cache_data(ttl=600)
-def fetch_user_pnl_data(engine, taker_account_id, pair_name, start_time, end_time):
+def fetch_user_pnl_data(taker_account_id, pair_name, start_time, end_time, connection_string=DB_CONNECTION_STRING):
     """Fetch user PNL data with optimized query and error handling"""
     
     query = f"""
@@ -319,7 +334,7 @@ def fetch_user_pnl_data(engine, taker_account_id, pair_name, start_time, end_tim
         return {"pnl": 0, "trades": 0}
 
 @st.cache_data(ttl=600)
-def fetch_user_metadata(engine, taker_account_id):
+def fetch_user_metadata(taker_account_id, connection_string=DB_CONNECTION_STRING):
     """Fetch user metadata with optimized query"""
     
     query = f"""
@@ -336,6 +351,11 @@ def fetch_user_metadata(engine, taker_account_id):
     """
     
     try:
+        # Get database connection
+        engine = get_db_connection()
+        if not engine:
+            return {"pnl": 0, "trades": 0}
+            
         with engine.connect() as conn:
             # Set statement timeout to 5 seconds
             conn.execute(text("SET statement_timeout = 5000"))
@@ -371,7 +391,7 @@ def fetch_user_metadata(engine, taker_account_id):
         }
 
 # Function to handle async data fetching for each user-pair combination
-def fetch_user_pair_data(engine, user_id, pair_name, time_boundaries):
+def fetch_user_pair_data(user_id, pair_name, time_boundaries):
     """Fetch data for a single user-pair combination"""
     periods = ["today", "yesterday", "day_before_yesterday", "this_week", "this_month", "all_time"]
     pair_data = {}
@@ -381,7 +401,7 @@ def fetch_user_pair_data(engine, user_id, pair_name, time_boundaries):
         end_time = time_boundaries[period]["end"]
         
         # Fetch PNL data for this user, pair, and time period
-        period_data = fetch_user_pnl_data(engine, user_id, pair_name, start_time, end_time)
+        period_data = fetch_user_pnl_data(user_id, pair_name, start_time, end_time)
         
         # Store the results
         pair_data[period] = period_data
@@ -393,8 +413,8 @@ def fetch_user_pair_data(engine, user_id, pair_name, time_boundaries):
 with st.spinner("Loading data..."):
     # Fetch pairs and users in parallel for faster startup
     if not app_state.data_loaded:
-        app_state.pairs = fetch_all_pairs(app_state.engine)
-        app_state.users = fetch_top_users(app_state.engine)
+        app_state.pairs = fetch_all_pairs()
+        app_state.users = fetch_top_users()
         app_state.data_loaded = True
 
 # --- UI CONTROLS ---
@@ -501,7 +521,6 @@ for batch_idx in range(num_batches):
             futures.append(
                 executor.submit(
                     fetch_user_pair_data, 
-                    app_state.engine, 
                     user_id, 
                     pair_name, 
                     app_state.time_boundaries
