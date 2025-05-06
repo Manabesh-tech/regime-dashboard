@@ -260,8 +260,8 @@ def analyze_tiers(pair_name, progress_bar=None):
                     if progress_bar:
                         progress_bar.progress(0.2, text=f"Found {len(table_data)} rows in {table_name}")
                             
-                    # Skip if we have enough data - reduced to 250,000 for faster processing
-                    if len(all_data) >= 250000:  # Reduced from 600,000
+                    # Skip if we have enough data - reduced to 150,000 for faster processing
+                    if len(all_data) >= 150000:  # Reduced from 250,000 for faster processing
                         break
             
             if not all_data:
@@ -332,6 +332,15 @@ def analyze_tiers(pair_name, progress_bar=None):
             # Define range groups for time-based windows
             range_groups = list(range(1, 11))  # 1 to 10 groups
             
+            # Initialize exchange-average metrics storage
+            exchange_avg_metrics = {exchange: {
+                'avg_choppiness': [],
+                'avg_trend_strength': [],
+                'avg_chop_trend_ratio': [],
+                'total_valid_points': 0,
+                'total_win_count': 0
+            } for exchange in exchanges}
+            
             # Process each exchange separately
             for exchange in exchanges:
                 # Filter data for this exchange
@@ -341,7 +350,7 @@ def analyze_tiers(pair_name, progress_bar=None):
                 exchange_df.sort_values('created_at', ascending=False, inplace=True)
                 
                 # Calculate number of windows for this exchange
-                window_size = 5000
+                window_size = 2500  # Use 2500 instead of 5000 for faster processing
                 total_points = len(exchange_df)
                 num_windows = total_points // window_size
                 
@@ -540,10 +549,35 @@ def analyze_tiers(pair_name, progress_bar=None):
             # Calculate final metrics
             total_wins = sum(win_counts.values())
             
+            # Calculate exchange averages after all processing
+            for exchange in exchanges:
+                if exchange in exchange_avg_metrics:
+                    metrics = exchange_avg_metrics[exchange]
+                    
+                    # Calculate average metrics
+                    if metrics['avg_choppiness']:
+                        metrics['avg_choppiness'] = sum(metrics['avg_choppiness']) / len(metrics['avg_choppiness'])
+                    else:
+                        metrics['avg_choppiness'] = 0
+                        
+                    if metrics['avg_trend_strength']:
+                        metrics['avg_trend_strength'] = sum(metrics['avg_trend_strength']) / len(metrics['avg_trend_strength'])
+                    else:
+                        metrics['avg_trend_strength'] = 0
+                        
+                    if metrics['avg_chop_trend_ratio']:
+                        metrics['avg_chop_trend_ratio'] = sum(metrics['avg_chop_trend_ratio']) / len(metrics['avg_chop_trend_ratio'])
+                    else:
+                        metrics['avg_chop_trend_ratio'] = 0
+                        
+                    # Count wins for this exchange
+                    wins = sum(1 for tier_key, win_count in win_counts.items() if tier_key.startswith(f"{exchange}:"))
+                    metrics['win_count'] = wins
+            
             if total_wins == 0:
                 if progress_bar:
                     progress_bar.progress(1.0, text="No valid winners found in any window")
-                return None, metadata
+                return None, metadata, None  # Return None for exchange_metrics
             
             # Create average choppiness across all exchanges for each tier
             tier_to_avg_choppiness = {}
@@ -674,7 +708,7 @@ def analyze_tiers(pair_name, progress_bar=None):
             if not results:
                 if progress_bar:
                     progress_bar.progress(1.0, text="No valid tiers found")
-                return None, metadata
+                return None, metadata, None
                 
             results_df = pd.DataFrame(results)
             
@@ -682,10 +716,30 @@ def analyze_tiers(pair_name, progress_bar=None):
             results_df = results_df.sort_values(['efficiency', 'current_choppiness'], ascending=[False, False])
             results_df['rank'] = range(1, len(results_df) + 1)
             
+            # Create exchange average metrics table
+            exchange_metrics_data = []
+            for exchange, metrics in exchange_avg_metrics.items():
+                exchange_metrics_data.append({
+                    'Exchange': exchange,
+                    'Avg Choppiness': round(metrics['avg_choppiness'], 1),
+                    'Avg Trend Str': round(metrics['avg_trend_strength'], 3),
+                    'Avg Chop/Trend': round(metrics['avg_chop_trend_ratio'], 2),
+                    'Win Count': metrics['win_count'],
+                    'Valid Points': metrics['total_valid_points']
+                })
+            
+            # Create exchange metrics dataframe
+            if exchange_metrics_data:
+                exchange_metrics_df = pd.DataFrame(exchange_metrics_data)
+                # Sort by Avg Choppiness (descending)
+                exchange_metrics_df = exchange_metrics_df.sort_values('Avg Choppiness', ascending=False)
+            else:
+                exchange_metrics_df = None
+            
             if progress_bar:
                 progress_bar.progress(1.0, text="Analysis complete!")
                 
-            return results_df, metadata
+            return results_df, metadata, exchange_metrics_df
             
     except Exception as e:
         if progress_bar:
