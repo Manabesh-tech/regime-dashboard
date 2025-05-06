@@ -87,88 +87,61 @@ def get_session():
     finally:
         session.close()
 
+# Pre-defined pairs as a fast fallback
+PREDEFINED_PAIRS = [
+    "BTC", "ETH", "SOL", "BNB", "XRP",
+    "AVAX", "DOGE", "ADA", "TRX", "DOT"
+]
+
 # Get available pairs from the database
+@st.cache_data(ttl=300)  # Cache for 5 minutes
 def get_available_pairs():
-    """Fetch all available trading pairs from all recent tables"""
-    # Fallback pairs if database connection fails
-    fallback_pairs = ["BTC", "SOL", "ETH", "DOGE", "XRP"]
-    
+    """Fetch all available trading pairs from the database"""
     try:
         with get_session() as session:
             if not session:
-                return fallback_pairs
-            
-            # Get all pairs from the production database
-            # This query gets all unique pairs from the most recent tables
-            query = text("""
-                SELECT DISTINCT pair_name 
-                FROM (
-                    -- Check trade_pool_pairs table first (primary source of pairs)
-                    SELECT pair_name FROM trade_pool_pairs WHERE status = 1
-                    UNION
-                    -- Also check oracle log tables from the past few days for all pairs in use
-                    SELECT DISTINCT pair_name 
-                    FROM oracle_exchange_price_partition_v1_20250506
-                    UNION
-                    SELECT DISTINCT pair_name 
-                    FROM oracle_exchange_price_partition_v1_20250505
-                    UNION
-                    SELECT DISTINCT pair_name 
-                    FROM oracle_exchange_price_partition_v1_20250504
-                    UNION
-                    SELECT DISTINCT pair_name 
-                    FROM oracle_exchange_price_partition_v1_20250503
-                ) AS combined_pairs
-                ORDER BY pair_name
-            """)
-            
+                return PREDEFINED_PAIRS  # Fallback to predefined pairs
+
+            # First try the trade_pool_pairs table (main source)
+            query = text("SELECT pair_name FROM trade_pool_pairs WHERE status = 1")
             try:
                 result = session.execute(query)
                 pairs = [row[0] for row in result]
-                return pairs if pairs else fallback_pairs
-            except:
-                # If the combined query fails, try a simpler approach with dynamic date generation
-                all_pairs = set()
+                if pairs:
+                    return sorted(pairs)
+            except Exception as e:
+                # Silent error handling if table doesn't exist
+                pass
+
+            # Fallback to oracle tables from the past few days
+            all_pairs = set()
+            for days_back in range(5):
+                check_date = (datetime.now() - timedelta(days=days_back)).strftime("%Y%m%d")
+                table_name = f"oracle_exchange_price_partition_v1_{check_date}"
                 
-                # Try to get pairs from trade_pool_pairs table first
-                try:
-                    pool_query = text("SELECT pair_name FROM trade_pool_pairs WHERE status = 1")
-                    pool_result = session.execute(pool_query)
-                    for row in pool_result:
-                        all_pairs.add(row[0])
-                except:
-                    pass
-                    
-                # Then check recent partition tables
-                for days_back in range(5):  # Check last 5 days
-                    check_date = (datetime.now() - timedelta(days=days_back)).strftime("%Y%m%d")
-                    table_name = f"oracle_exchange_price_partition_v1_{check_date}"
-                    
+                # Check if table exists
+                check_table = text("""
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.tables 
+                        WHERE table_schema = 'public' 
+                        AND table_name = :table_name
+                    );
+                """)
+                
+                if session.execute(check_table, {"table_name": table_name}).scalar():
+                    pairs_query = text(f"SELECT DISTINCT pair_name FROM {table_name}")
                     try:
-                        # Check if table exists first
-                        table_check = text(f"""
-                            SELECT EXISTS (
-                                SELECT FROM information_schema.tables 
-                                WHERE table_schema = 'public' 
-                                AND table_name = :table_name
-                            )
-                        """)
-                        
-                        table_exists = session.execute(table_check, {"table_name": table_name}).scalar()
-                        
-                        if table_exists:
-                            pairs_query = text(f"SELECT DISTINCT pair_name FROM {table_name}")
-                            pairs_result = session.execute(pairs_query)
-                            for row in pairs_result:
-                                all_pairs.add(row[0])
+                        pairs_result = session.execute(pairs_query)
+                        for row in pairs_result:
+                            all_pairs.add(row[0])
                     except:
                         continue
-                
-                return sorted(list(all_pairs)) if all_pairs else fallback_pairs
+            
+            return sorted(list(all_pairs)) if all_pairs else PREDEFINED_PAIRS
 
     except Exception as e:
-        # Silently handle errors and return fallback pairs
-        return fallback_pairs
+        # Silent error handling
+        return PREDEFINED_PAIRS
 
 def _calculate_trend_strength(prices, window):
     """Calculate average Trend Strength - measures the directional strength of price movements.
