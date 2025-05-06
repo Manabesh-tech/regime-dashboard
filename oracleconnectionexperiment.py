@@ -146,7 +146,7 @@ def analyze_tiers(pair_name, progress_bar=None):
     try:
         with get_session() as session:
             if not session:
-                return None, metadata
+                return None, metadata, None
 
             # Define tier columns and mapping
             tier_columns = [
@@ -180,19 +180,19 @@ def analyze_tiers(pair_name, progress_bar=None):
             singapore_tz = pytz.timezone('Asia/Singapore')
             now_sg = datetime.now(singapore_tz)
             
-            # Explicitly set the exact 24-hour period we want to analyze
+            # Explicitly set the exact 12-hour period we want to analyze (reduced from 24hr)
             end_time = now_sg.replace(tzinfo=None)
-            start_time = end_time - timedelta(hours=24)
+            start_time = end_time - timedelta(hours=12)  # Reduced to 12 hours
             
             if progress_bar:
-                progress_bar.progress(0.05, text=f"Analyzing data from {start_time} to {end_time} (24 hour period)")
+                progress_bar.progress(0.05, text=f"Analyzing data from {start_time} to {end_time} (12 hour period)")
             
             # Get current date in Singapore time
             current_date_sg = now_sg.strftime("%Y%m%d")
             
-            # Add 3 days prior for data collection to ensure we get 24 hours coverage
+            # Add 3 days prior for data collection to ensure we get 12 hours coverage
             dates_to_check = []
-            for i in range(4):  # Today, yesterday, day before, and day before that
+            for i in range(3):  # Reduced from 4 days to 3 for faster loading
                 check_date = (now_sg - timedelta(days=i)).strftime("%Y%m%d")
                 dates_to_check.append(check_date)
             
@@ -206,7 +206,7 @@ def analyze_tiers(pair_name, progress_bar=None):
                 table_name = f"oracle_exchange_price_partition_v1_{date}"
                 
                 # Check if table exists
-                table_exists_query = text(f"""
+                table_exists_query = text("""
                     SELECT EXISTS (
                         SELECT FROM information_schema.tables 
                         WHERE table_schema = 'public' 
@@ -219,12 +219,12 @@ def analyze_tiers(pair_name, progress_bar=None):
                         progress_bar.progress(0.1, text=f"Table {table_name} does not exist, trying next date...")
                     continue
                 
-                # Get timestamp from 24 hours ago in UTC
-                utc_24h_ago = now_sg.replace(tzinfo=None) - timedelta(hours=24)
+                # Get timestamp from 12 hours ago in UTC (reduced from 24)
+                utc_12h_ago = now_sg.replace(tzinfo=None) - timedelta(hours=12)
                 
                 # Query with optimized filters and fewer columns to reduce data transfer
                 if progress_bar:
-                    progress_bar.progress(0.1, text=f"Fetching data from {table_name} (optimized)...")
+                    progress_bar.progress(0.1, text=f"Fetching data from {table_name}...")
                 
                 # Only fetch columns we need for better performance
                 query = text(f"""
@@ -243,7 +243,7 @@ def analyze_tiers(pair_name, progress_bar=None):
                                           'gateFuture', 'mexcFuture', 'hyperliquidFuture')
                         ORDER BY 
                             created_at DESC
-                        LIMIT 300000
+                        LIMIT 200000
                     )
                     SELECT * FROM latest_data
                     ORDER BY 
@@ -267,7 +267,7 @@ def analyze_tiers(pair_name, progress_bar=None):
             if not all_data:
                 if progress_bar:
                     progress_bar.progress(1.0, text=f"No data found for {pair_name}")
-                return None, metadata
+                return None, metadata, None
             
             # Update metadata with data points count
             metadata['total_data_points'] = len(all_data)
@@ -496,6 +496,12 @@ def analyze_tiers(pair_name, progress_bar=None):
                             exchange_tier_chop_trend_ratio[exchange_tier_key] = []
                         exchange_tier_chop_trend_ratio[exchange_tier_key].append(chop_trend_ratio)
                         
+                        # Add to exchange average metrics
+                        exchange_avg_metrics[exchange]['avg_choppiness'].append(avg_choppiness)
+                        exchange_avg_metrics[exchange]['avg_trend_strength'].append(trend_strength)
+                        exchange_avg_metrics[exchange]['avg_chop_trend_ratio'].append(chop_trend_ratio)
+                        exchange_avg_metrics[exchange]['total_valid_points'] += valid_points
+                        
                         # Check if this is the best choppiness for this window
                         if avg_choppiness > best_choppiness:
                             best_choppiness = avg_choppiness
@@ -528,6 +534,10 @@ def analyze_tiers(pair_name, progress_bar=None):
                         if best_tier not in win_counts:
                             win_counts[best_tier] = 0
                         win_counts[best_tier] += 1
+                        
+                        # Count win for exchange metrics
+                        exchange, _ = best_tier.split(':', 1)
+                        exchange_avg_metrics[exchange]['total_win_count'] += 1
                 
                 # After processing all windows for this exchange, update validity rates
                 for tier_col in tier_columns:
@@ -542,9 +552,6 @@ def analyze_tiers(pair_name, progress_bar=None):
                     if exchange_total_points > 0:
                         validity_rate = (valid_points / exchange_total_points) * 100
                         exchange_tier_validity[exchange_tier_key] = validity_rate
-            
-            if progress_bar:
-                progress_bar.progress(0.9, text="Calculating final rankings...")
             
             # Calculate final metrics
             total_wins = sum(win_counts.values())
@@ -569,10 +576,6 @@ def analyze_tiers(pair_name, progress_bar=None):
                         metrics['avg_chop_trend_ratio'] = sum(metrics['avg_chop_trend_ratio']) / len(metrics['avg_chop_trend_ratio'])
                     else:
                         metrics['avg_chop_trend_ratio'] = 0
-                        
-                    # Count wins for this exchange
-                    wins = sum(1 for tier_key, win_count in win_counts.items() if tier_key.startswith(f"{exchange}:"))
-                    metrics['win_count'] = wins
             
             if total_wins == 0:
                 if progress_bar:
@@ -724,7 +727,7 @@ def analyze_tiers(pair_name, progress_bar=None):
                     'Avg Choppiness': round(metrics['avg_choppiness'], 1),
                     'Avg Trend Str': round(metrics['avg_trend_strength'], 3),
                     'Avg Chop/Trend': round(metrics['avg_chop_trend_ratio'], 2),
-                    'Win Count': metrics['win_count'],
+                    'Win Count': metrics.get('total_win_count', 0),
                     'Valid Points': metrics['total_valid_points']
                 })
             
@@ -747,7 +750,7 @@ def analyze_tiers(pair_name, progress_bar=None):
         st.error(f"Analysis error: {e}")
         import traceback
         st.error(traceback.format_exc())
-        return None, metadata
+        return None, metadata, None
 
 # Format numbers for display
 def format_column(value, column_name):
@@ -769,48 +772,7 @@ def format_column(value, column_name):
         return f"{int(value)}"
     else:
         return str(value)
-        
-# Calculate exchange-specific metrics 
-def calculate_exchange_metrics(rankings_df):
-    """
-    Calculate average metrics per exchange across all tiers
-    """
-    if rankings_df is None or rankings_df.empty:
-        return None
-        
-    # Create a copy to avoid modifying the original
-    df = rankings_df.copy()
-    
-    # Extract exchange from the exchange:tier column
-    if 'exchange_tier' in df.columns:
-        df['exchange'] = df['exchange_tier'].apply(lambda x: x.split(':', 1)[0] if ':' in str(x) else x)
-    
-    # Group by exchange and calculate average metrics
-    exchange_metrics = df.groupby('exchange').agg({
-        'current_choppiness': 'mean',
-        'avg_choppiness': 'mean',
-        'current_trend_strength': 'mean',
-        'avg_trend_strength': 'mean',
-        'current_chop_trend_ratio': 'mean',
-        'avg_chop_trend_ratio': 'mean',
-        'dropout_rate': 'mean',
-        'win_rate': 'mean',
-        'validity_rate': 'mean',
-        'efficiency': 'mean',
-        'valid_points': 'sum'
-    }).reset_index()
-    
-    # Round values for display
-    for col in exchange_metrics.columns:
-        if col != 'exchange' and col != 'valid_points':
-            exchange_metrics[col] = exchange_metrics[col].round(2)
-    
-    # Sort by average choppiness (descending)
-    exchange_metrics = exchange_metrics.sort_values('avg_choppiness', ascending=False)
-    
-    return exchange_metrics
 
-# Main function
 def main():
     # Get current time in Singapore
     singapore_tz = pytz.timezone('Asia/Singapore')
@@ -825,7 +787,7 @@ def main():
     try:
         available_pairs = get_available_pairs()
     except:
-        available_pairs = ["BTC", "SOL", "ETH", "DOGE", "XRP", "PNUT", "SUI"]
+        available_pairs = PREDEFINED_PAIRS
     
     # Pair selection - simple dropdown
     col1, col2 = st.columns([2, 1])
@@ -843,7 +805,7 @@ def main():
     # Explanation of metrics
     st.markdown("""
     **Key Metrics:**
-    - **Win Rate:** Percentage of 5000-tick windows where this tier had the highest choppiness
+    - **Win Rate:** Percentage of windows where this tier had the highest choppiness
     - **Validity Rate:** Percentage of exchange's data points that have valid data for this tier
     - **Efficiency Score:** Win Rate % × Validity Rate % ÷ 100
     - **Current Choppiness:** Most recent choppiness value using 20-tick rolling window
@@ -866,8 +828,20 @@ def main():
         # Create progress bar
         progress_bar = st.progress(0, text="Starting analysis...")
         
-        # Run analysis
-        rankings, analysis_metadata = analyze_tiers(selected_pair, progress_bar)
+        # Run analysis - modified to handle both 2 and 3 return values
+        analysis_result = analyze_tiers(selected_pair, progress_bar)
+        
+        # Unpack the results properly based on number of returned values
+        if isinstance(analysis_result, tuple):
+            if len(analysis_result) == 3:
+                rankings, analysis_metadata, exchange_metrics = analysis_result
+            else:
+                rankings, analysis_metadata = analysis_result
+                exchange_metrics = None
+        else:
+            # Handle unexpected return type
+            st.error("Unexpected return type from analyze_tiers function")
+            return
         
         if rankings is not None and not rankings.empty:
             # Display detailed time and data coverage information
@@ -922,9 +896,47 @@ def main():
                 coverage_percent = (total_points / theoretical_max) * 100
                 st.markdown(f"**Overall Data Density:** {coverage_percent:.1f}% of theoretical maximum ({theoretical_max:,} points at 500ms intervals)")
             
+            # Show exchange metrics if available
+            if exchange_metrics is not None and not exchange_metrics.empty:
+                st.header("Exchange Comparison")
+                st.markdown("This table shows the average metrics across all tiers for each exchange")
+                
+                # Format the display dataframe
+                display_exchange_metrics = exchange_metrics.copy()
+                
+                # Format numeric columns
+                for col in display_exchange_metrics.columns:
+                    if col == 'Exchange':
+                        continue
+                    elif col == 'Valid Points':
+                        display_exchange_metrics[col] = display_exchange_metrics[col].apply(lambda x: f"{int(x):,}")
+                    elif col == 'Avg Trend Str':
+                        display_exchange_metrics[col] = display_exchange_metrics[col].apply(lambda x: f"{x:.3f}")
+                    elif col == 'Avg Chop/Trend':
+                        display_exchange_metrics[col] = display_exchange_metrics[col].apply(lambda x: f"{x:.2f}")
+                    else:
+                        display_exchange_metrics[col] = display_exchange_metrics[col].apply(lambda x: f"{x:.1f}")
+                
+                # Display the table
+                st.dataframe(
+                    display_exchange_metrics,
+                    use_container_width=True,
+                    hide_index=True
+                )
+                
+                # Add explanation
+                st.markdown("""
+                **Exchange Metrics Explanation:**
+                - **Avg Choppiness:** Higher values indicate more price oscillation within trading ranges
+                - **Avg Trend Str:** Higher values indicate stronger directional trends (0-1 scale)
+                - **Avg Chop/Trend:** Higher values suggest more choppiness relative to trend strength
+                - **Win Count:** Number of tiers in this exchange that ranked highest in a time window
+                - **Valid Points:** Total number of valid data points in the analysis
+                """)
+            
             # Show results
             st.header("Global Tier Rankings")
-            st.markdown("**Efficiency Formula:** Win Rate % × (100% - Dropout Rate %)")
+            st.markdown("**Efficiency Formula:** Win Rate % × Validity Rate % ÷ 100")
             
             # Verify win rates sum to approximately 100%
             total_win_rate = rankings['win_rate'].sum()
