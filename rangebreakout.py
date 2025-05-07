@@ -495,6 +495,29 @@ if selected_tokens and refresh_pressed:
             else:
                 st.markdown(f"- **{block_labels[block]}**: More range traders (lower than average breakouts)")
         
+        # Trading recommendation
+        st.subheader("Exchange Strategy Recommendations")
+        
+        st.markdown("""
+        Based on the analysis of breakout patterns across different time blocks, here are some strategic recommendations:
+        
+        1. **Liquidity Management:**
+           - Increase liquidity during peak breakout times to handle higher volumes
+           - Optimize spread during range-bound periods
+           
+        2. **Risk Management:**
+           - Adjust risk parameters by time of day
+           - Monitor liquidation risks more closely during breakout periods
+           
+        3. **User Experience:**
+           - Provide different trading tools based on time of day
+           - Show relevant indicators (breakout vs. range) based on current market phase
+           
+        4. **Marketing and User Acquisition:**
+           - Target different trader types in campaigns based on their active hours
+           - Create educational content specific to both trading styles
+        """)
+        
         # Show detailed breakout charts for individual tokens
         st.subheader("Individual Token Analysis")
         
