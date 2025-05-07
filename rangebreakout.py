@@ -93,7 +93,7 @@ with col3:
     # Refresh button
     refresh_pressed = st.button("Refresh Data", type="primary", use_container_width=True)
     if refresh_pressed:
-        # Using st.rerun() instead of deprecated st.experimental_rerun
+        # Clear cache when refreshing data
         st.cache_data.clear()
 
 # Singapore time
@@ -396,8 +396,6 @@ def process_token_data(token):
 
 # Only process data if there are tokens selected AND refresh button was pressed
 if selected_tokens and refresh_pressed:
-    # Cache was already cleared when refresh button was pressed
-    
     # Process data for all selected tokens
     results = {}
     all_blocks_avg = pd.DataFrame()
@@ -474,13 +472,17 @@ if selected_tokens and refresh_pressed:
             highest_block = highest_overall.index[0]
             lowest_block = highest_overall.index[-1]
             
+            # Fix for KeyError: Extract values before using them in the f-string
+            high_val = highest_overall.iloc[0]  # Use position-based indexing
+            low_val = highest_overall.iloc[-1]  # Use position-based indexing
+            
             st.subheader("Range vs. Breakout Trading Patterns")
             
             st.markdown(f"""
             ### Key Findings:
             
-            - **Peak Breakout Period:** {block_labels[highest_block]} (Avg: {float(highest_overall.iloc[0]):.2f} breakouts)
-            - **Lowest Breakout Period:** {block_labels[lowest_block]} (Avg: {float(highest_overall.iloc[-1]):.2f} breakouts)
+            - **Peak Breakout Period:** {block_labels[highest_block]} (Avg: {high_val:.2f} breakouts)
+            - **Lowest Breakout Period:** {block_labels[lowest_block]} (Avg: {low_val:.2f} breakouts)
             """)
             
             # Trader type analysis
@@ -489,9 +491,10 @@ if selected_tokens and refresh_pressed:
             """)
             
             blocks_sorted = highest_overall.sort_values(ascending=False)
+            avg_all_blocks = highest_overall.mean()
             
             for block, value in blocks_sorted.items():
-                if value > highest_overall.mean():
+                if value > avg_all_blocks:
                     st.markdown(f"- **{block_labels[block]}**: More breakout traders (higher than average breakouts)")
                 else:
                     st.markdown(f"- **{block_labels[block]}**: More range traders (lower than average breakouts)")
