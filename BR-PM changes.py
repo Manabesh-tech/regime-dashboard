@@ -10,7 +10,7 @@ import math
 
 # Page configuration
 st.set_page_config(
-    page_title="Exchange Parameter Dashboard",
+    page_title="Surf vs Rollbit Parameters",
     page_icon="📊",
     layout="wide"
 )
