@@ -26,9 +26,9 @@ def init_db_connection():
     db_params = {
         'host': 'aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com',
         'port': 5432,
-        'database': 'report_dev',
-        'user': 'public_rw',
-        'password': 'aTJ92^kl04hllk'
+        'database': 'replication_report',
+        'user': 'public_replication',
+        'password': '866^FKC4hllk'
     }
     
     try:
@@ -183,7 +183,7 @@ class SurfAnalyzer:
             if environment == 'PROD':
                 query = f"""
                 SELECT 
-                    REPLACE(pair_name, 'PROD', '') AS pair_name,
+                    pair_name,
                     created_at + INTERVAL '8 hour' AS timestamp,
                     final_price AS price
                 FROM 
@@ -191,14 +191,14 @@ class SurfAnalyzer:
                 WHERE 
                     created_at >= '{start_time_str}'::timestamp - INTERVAL '8 hour'
                     AND created_at <= '{end_time_str}'::timestamp - INTERVAL '8 hour'
-                    AND LOWER(pair_name) LIKE '%prod%'
-                    AND REPLACE(pair_name, 'PROD', '') = '{pair_name}'
+                    AND source_type = 0
+                    AND pair_name = '{pair_name}'
                 """
             # For SIT data
             elif environment == 'SIT':
                 query = f"""
                 SELECT 
-                    REPLACE(pair_name, 'SIT', '') AS pair_name,
+                    pair_name,
                     created_at + INTERVAL '8 hour' AS timestamp,
                     final_price AS price
                 FROM 
@@ -206,8 +206,8 @@ class SurfAnalyzer:
                 WHERE 
                     created_at >= '{start_time_str}'::timestamp - INTERVAL '8 hour'
                     AND created_at <= '{end_time_str}'::timestamp - INTERVAL '8 hour'
-                    AND LOWER(pair_name) LIKE '%sit%'
-                    AND REPLACE(pair_name, 'SIT', '') = '{pair_name}'
+                    AND source_type = 0
+                    AND pair_name = '{pair_name}'
                 """
             # For UAT data
             else:  # UAT
@@ -705,61 +705,8 @@ if st.session_state.get('analyze_clicked', False):
                             metrics_df = analyzer.create_metrics_table(metric_name, point_count)
                             
                             if metrics_df is not None:
-                                # Style based on metric
-                                def style_metric_table(val):
-                                    """Style cells based on metric."""
-                                    if pd.isna(val):
-                                        return 'background-color: #f2f2f2'  # Light gray for missing values
-                                    
-                                    # Color scales for different metrics
-                                    if metric_name == 'choppiness':
-                                        if val < 100:
-                                            return 'background-color: #ccffcc'  # Light green (good)
-                                        elif val < 200:
-                                            return 'background-color: #ffffcc'  # Light yellow
-                                        elif val < 300:
-                                            return 'background-color: #ffeecc'  # Light orange
-                                        else:
-                                            return 'background-color: #ffcccc'  # Light red (bad)
-                                    
-                                    elif metric_name == 'direction_changes':
-                                        if val < 40:
-                                            return 'background-color: #ccffcc'  # Light green (good)
-                                        elif val < 50:
-                                            return 'background-color: #ffffcc'  # Light yellow
-                                        elif val < 60:
-                                            return 'background-color: #ffeecc'  # Light orange
-                                        else:
-                                            return 'background-color: #ffcccc'  # Light red (bad)
-                                    
-                                    elif metric_name == 'trend_strength':
-                                        if val > 0.5:
-                                            return 'background-color: #ccffcc'  # Light green (good)
-                                        elif val > 0.3:
-                                            return 'background-color: #ffffcc'  # Light yellow
-                                        elif val > 0.2:
-                                            return 'background-color: #ffeecc'  # Light orange
-                                        else:
-                                            return 'background-color: #ffcccc'  # Light red (bad)
-                                    
-                                    elif metric_name == 'tick_atr_pct':
-                                        if val < 0.1:
-                                            return 'background-color: #ccffcc'  # Light green (good)
-                                        elif val < 0.25:
-                                            return 'background-color: #ffffcc'  # Light yellow
-                                        elif val < 0.5:
-                                            return 'background-color: #ffeecc'  # Light orange
-                                        else:
-                                            return 'background-color: #ffcccc'  # Light red (bad)
-                                            
-                                    return ''
-                                
-                                # Display styled table
-                                st.dataframe(
-                                    metrics_df.style.applymap(style_metric_table),
-                                    height=400,
-                                    use_container_width=True,
-                                )
+                                # Display unstyled table to avoid styling errors
+                                st.dataframe(metrics_df, height=400, use_container_width=True)
                                 
                                 # Add download button for CSV
                                 csv_data = metrics_df.to_csv(index=False).encode('utf-8')
