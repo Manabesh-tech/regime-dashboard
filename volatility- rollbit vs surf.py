@@ -70,17 +70,15 @@ class ExchangeAnalyzer:
         
         # Metrics to calculate and compare
         self.metrics = [
-            'direction_changes',   # Frequency of price direction reversals (%)
-            'variance',            # Price variance (replaces choppiness)
-            'annualized_variance', # Annualized variance (new metric)
-            'tick_atr_pct',        # ATR % (Average True Range as percentage of mean price)
-            'trend_strength'       # Measures directional strength
+            'direction_changes',    # Frequency of price direction reversals (%)
+            'annualized_variance',  # Annualized variance (replacing choppiness)
+            'tick_atr_pct',         # ATR % (Average True Range as percentage of mean price)
+            'trend_strength'        # Measures directional strength
         ]
         
         # Display names for metrics (for printing)
         self.metric_display_names = {
             'direction_changes': 'Direction Changes (%)',
-            'variance': 'Variance',
             'annualized_variance': 'Annualized Variance',
             'tick_atr_pct': 'Tick ATR %',
             'trend_strength': 'Trend Strength'
@@ -89,7 +87,6 @@ class ExchangeAnalyzer:
         # Short names for metrics (for tables to avoid overflow)
         self.metric_short_names = {
             'direction_changes': 'Dir Chg',
-            'variance': 'Var',
             'annualized_variance': 'Ann Var',
             'tick_atr_pct': 'ATR%',
             'trend_strength': 'Trend'
@@ -100,11 +97,10 @@ class ExchangeAnalyzer:
         
         # The desired direction for each metric (whether higher or lower is better)
         self.metric_desired_direction = {
-            'direction_changes': 'lower',  
-            'variance': 'lower',        
+            'direction_changes': 'lower',
             'annualized_variance': 'lower',
-            'tick_atr_pct': 'lower',       
-            'trend_strength': 'lower'     
+            'tick_atr_pct': 'lower',
+            'trend_strength': 'lower'
         }
         
         # Assume each tick is roughly 500ms (0.5 seconds)
@@ -393,9 +389,6 @@ class ExchangeAnalyzer:
                     # Calculate each metric with improved error handling
                     direction_changes = self._calculate_direction_changes(sample)
                     
-                    # Calculate variance (replacing choppiness)
-                    variance = self._calculate_variance(sample)
-                    
                     # Calculate annualized variance
                     annualized_variance = self._calculate_annualized_variance(sample)
                     
@@ -410,8 +403,6 @@ class ExchangeAnalyzer:
                     # Store results in the metrics dictionary
                     if coin_key not in self.exchange_data['direction_changes'][point_count]:
                         self.exchange_data['direction_changes'][point_count][coin_key] = {}
-                    if coin_key not in self.exchange_data['variance'][point_count]:
-                        self.exchange_data['variance'][point_count][coin_key] = {}
                     if coin_key not in self.exchange_data['annualized_variance'][point_count]:
                         self.exchange_data['annualized_variance'][point_count][coin_key] = {}
                     if coin_key not in self.exchange_data['tick_atr_pct'][point_count]:
@@ -423,7 +414,6 @@ class ExchangeAnalyzer:
                     
                     # Store metrics
                     self.exchange_data['direction_changes'][point_count][coin_key][exchange] = direction_changes
-                    self.exchange_data['variance'][point_count][coin_key][exchange] = variance
                     self.exchange_data['annualized_variance'][point_count][coin_key][exchange] = annualized_variance
                     self.exchange_data['tick_atr_pct'][point_count][coin_key][exchange] = tick_atr_pct
                     self.exchange_data['trend_strength'][point_count][coin_key][exchange] = trend_strength
