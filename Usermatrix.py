@@ -25,7 +25,7 @@ def get_database_connection():
             f"postgresql+psycopg2://{db_config['user']}:{db_config['password']}"
             f"@{db_config['host']}:{db_config['port']}/{db_config['database']}"
         )
-        return create_engine(db_uri, pool_pre_ping=True, pool_size=10, max_overflow=20)
+        return create_engine(db_uri, pool_pre_ping=True)
     except Exception as e:
         st.error(f"Database connection error: {e}")
         return None
@@ -106,7 +106,7 @@ st.title("📊 User PNL Matrix Dashboard")
 st.subheader("Performance Analysis by User (Singapore Time)")
 st.write(f"Current Singapore Time: {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
 
-# --- OPTIMIZED DATA FETCH FUNCTIONS ---
+# --- CACHING DATA FETCH FUNCTIONS ---
 @st.cache_data(ttl=600)
 def fetch_all_pairs():
     """Fetch all trading pairs"""
@@ -166,231 +166,198 @@ def fetch_top_users(limit=100):
         st.error(f"Error fetching users: {e}")
         return [f"user_{i}" for i in range(1, 11)]
 
+# --- OPTIMIZED BATCH DATA FETCH ---
 @st.cache_data(ttl=600)
-def fetch_all_user_metadata(user_ids):
-    """Fetch metadata for all specified users in a single query"""
-    if not user_ids:
+def fetch_user_pnl_batch(users, pairs, period, start_time, end_time):
+    """Fetch PNL data for multiple users and pairs for a specific time period in one query"""
+    if not users or not pairs:
         return {}
     
-    # Prepare a properly formatted list for SQL IN clause
-    # This handles formatting and escaping correctly
-    placeholders = ', '.join([f"'{user_id}'" for user_id in user_ids])
+    result = {}
+    for user in users:
+        result[user] = {}
+        for pair in pairs:
+            result[user][pair] = {"pnl": 0, "trades": 0}
+    
+    # Create formatted strings for SQL IN clause
+    user_ids_str = "'" + "', '".join(users) + "'"
+    pair_names_str = "'" + "', '".join(pairs) + "'"
     
     query = f"""
+    WITH pair_mapping AS (
+        SELECT pair_id, pair_name
+        FROM public.trade_pool_pairs
+        WHERE pair_name IN ({pair_names_str})
+    )
+    
     SELECT 
-        "taker_account_id" as user_identifier,
-        MIN(created_at) as first_trade_date,
-        TO_CHAR(MIN(created_at), 'YYYY-MM-DD') as first_trade_date_str,
-        COUNT(*) as all_time_trades,
-        SUM(ABS("deal_size" * "deal_price")) as all_time_volume
+        t.taker_account_id AS user_id,
+        p.pair_name,
+        COUNT(*) AS trade_count,
+        SUM(t.taker_pnl * t.collateral_price) AS order_pnl
     FROM 
-        "public"."trade_fill_fresh"
+        public.trade_fill_fresh t
+    JOIN 
+        pair_mapping p ON t.pair_id = p.pair_id
     WHERE 
-        "taker_account_id" IN ({placeholders})
-        AND "taker_way" IN (1, 2, 3, 4)
+        t.created_at BETWEEN '{start_time}' AND '{end_time}'
+        AND t.taker_account_id IN ({user_ids_str})
+        AND t.taker_way IN (1, 2, 3, 4)
     GROUP BY 
-        "taker_account_id"
+        t.taker_account_id, p.pair_name
     """
     
     try:
         engine = get_database_connection()
         if not engine:
-            return {user_id: {
-                "first_trade_date": "Unknown",
-                "all_time_trades": 0,
-                "all_time_volume": 0,
-                "account_age_days": 0
-            } for user_id in user_ids}
+            return result
             
         df = pd.read_sql(text(query), engine)
         
-        if df.empty:
-            return {user_id: {
-                "first_trade_date": "Unknown",
-                "all_time_trades": 0,
-                "all_time_volume": 0,
-                "account_age_days": 0
-            } for user_id in user_ids}
+        if not df.empty:
+            for _, row in df.iterrows():
+                user_id = row['user_id']
+                pair_name = row['pair_name']
+                if user_id in result and pair_name in result[user_id]:
+                    result[user_id][pair_name] = {
+                        "pnl": float(row['order_pnl']),
+                        "trades": int(row['trade_count'])
+                    }
         
-        # Process results into a dictionary
-        result = {}
-        now_utc = datetime.now(pytz.utc)
+        # Get fee data in a separate query
+        fee_query = f"""
+        WITH pair_mapping AS (
+            SELECT pair_id, pair_name
+            FROM public.trade_pool_pairs
+            WHERE pair_name IN ({pair_names_str})
+        )
         
-        for _, row in df.iterrows():
-            user_id = row['user_identifier']
-            first_trade = row['first_trade_date']
-            
-            if first_trade:
-                account_age = (now_utc - first_trade).days
-            else:
-                account_age = 0
-                
-            result[user_id] = {
-                "first_trade_date": row['first_trade_date_str'],
-                "all_time_trades": int(row['all_time_trades']),
-                "all_time_volume": float(row['all_time_volume']),
-                "account_age_days": account_age
-            }
+        SELECT 
+            t.taker_account_id AS user_id,
+            p.pair_name,
+            SUM(-1 * t.taker_fee * t.collateral_price) AS fee_pnl
+        FROM 
+            public.trade_fill_fresh t
+        JOIN 
+            pair_mapping p ON t.pair_id = p.pair_id
+        WHERE 
+            t.created_at BETWEEN '{start_time}' AND '{end_time}'
+            AND t.taker_account_id IN ({user_ids_str})
+            AND t.taker_fee_mode = 1
+            AND t.taker_way IN (1, 3)
+        GROUP BY 
+            t.taker_account_id, p.pair_name
+        """
         
-        # Add default values for any missing users
-        for user_id in user_ids:
-            if user_id not in result:
-                result[user_id] = {
-                    "first_trade_date": "Unknown",
-                    "all_time_trades": 0,
-                    "all_time_volume": 0,
-                    "account_age_days": 0
-                }
+        fee_df = pd.read_sql(text(fee_query), engine)
+        
+        if not fee_df.empty:
+            for _, row in fee_df.iterrows():
+                user_id = row['user_id']
+                pair_name = row['pair_name']
+                if user_id in result and pair_name in result[user_id]:
+                    result[user_id][pair_name]["pnl"] += float(row['fee_pnl'])
+        
+        # Get funding data in a separate query
+        funding_query = f"""
+        WITH pair_mapping AS (
+            SELECT pair_id, pair_name
+            FROM public.trade_pool_pairs
+            WHERE pair_name IN ({pair_names_str})
+        )
+        
+        SELECT 
+            t.taker_account_id AS user_id,
+            p.pair_name,
+            SUM(t.funding_fee * t.collateral_price) AS funding_pnl
+        FROM 
+            public.trade_fill_fresh t
+        JOIN 
+            pair_mapping p ON t.pair_id = p.pair_id
+        WHERE 
+            t.created_at BETWEEN '{start_time}' AND '{end_time}'
+            AND t.taker_account_id IN ({user_ids_str})
+            AND t.taker_way = 0
+        GROUP BY 
+            t.taker_account_id, p.pair_name
+        """
+        
+        funding_df = pd.read_sql(text(funding_query), engine)
+        
+        if not funding_df.empty:
+            for _, row in funding_df.iterrows():
+                user_id = row['user_id']
+                pair_name = row['pair_name']
+                if user_id in result and pair_name in result[user_id]:
+                    result[user_id][pair_name]["pnl"] += float(row['funding_pnl'])
         
         return result
-            
     except Exception as e:
-        st.error(f"Error fetching metadata for users: {e}")
-        return {user_id: {
+        st.error(f"Error fetching PNL batch data for period {period}: {e}")
+        return result
+
+@st.cache_data(ttl=600)
+def fetch_user_metadata_batch(users):
+    """Fetch metadata for multiple users in one query"""
+    if not users:
+        return {}
+    
+    result = {}
+    for user in users:
+        result[user] = {
             "first_trade_date": "Unknown",
             "all_time_trades": 0,
             "all_time_volume": 0,
             "account_age_days": 0
-        } for user_id in user_ids}
-
-@st.cache_data(ttl=600)
-def fetch_all_user_pnl_data(user_ids, pair_names, time_boundaries):
-    """Fetch PNL data for all users and pairs in a single query per time period"""
-    if not user_ids or not pair_names:
-        return {}
+        }
     
-    # Properly format lists for SQL IN clause
-    user_placeholders = ', '.join([f"'{user_id}'" for user_id in user_ids])
-    pair_placeholders = ', '.join([f"'{pair_name}'" for pair_name in pair_names])
+    user_ids_str = "'" + "', '".join(users) + "'"
     
-    # Initialize results structure
-    results = {user_id: {"pairs": {pair: {} for pair in pair_names}} for user_id in user_ids}
+    query = f"""
+    SELECT 
+        taker_account_id as user_identifier,
+        MIN(created_at) as first_trade_date,
+        TO_CHAR(MIN(created_at), 'YYYY-MM-DD') as first_trade_date_str,
+        COUNT(*) as all_time_trades,
+        SUM(ABS(deal_size * deal_price)) as all_time_volume
+    FROM 
+        public.trade_fill_fresh
+    WHERE 
+        taker_account_id IN ({user_ids_str})
+        AND taker_way IN (1, 2, 3, 4)
+    GROUP BY 
+        taker_account_id
+    """
     
-    # Fetch data for each time period
-    for period_name, period_data in time_boundaries.items():
-        start_time = period_data["start"]
-        end_time = period_data["end"]
-        
-        query = f"""
-        WITH user_pair_pnl AS (
-            -- First subquery: Calculate order PNL and count trades for each user-pair combination
-            SELECT
-              "taker_account_id" AS "user_id",
-              "pair_id",
-              COALESCE(SUM("taker_pnl" * "collateral_price"), 0) AS "order_pnl",
-              COUNT(*) AS "trade_count"
-            FROM
-              "public"."trade_fill_fresh"
-            WHERE
-              "created_at" BETWEEN '{start_time}' AND '{end_time}'
-              AND "taker_account_id" IN ({user_placeholders})
-              AND "pair_id" IN (
-                SELECT "pair_id" FROM "public"."trade_pool_pairs" 
-                WHERE "pair_name" IN ({pair_placeholders})
-              )
-              AND "taker_way" IN (1, 2, 3, 4)
-            GROUP BY
-              "taker_account_id", "pair_id"
-        ),
-        
-        user_pair_fees AS (
-            -- Second subquery: Calculate fee payments for each user-pair combination
-            SELECT
-              "taker_account_id" AS "user_id",
-              "pair_id",
-              COALESCE(SUM(-1 * "taker_fee" * "collateral_price"), 0) AS "fee_payments"
-            FROM
-              "public"."trade_fill_fresh"
-            WHERE
-              "created_at" BETWEEN '{start_time}' AND '{end_time}'
-              AND "taker_account_id" IN ({user_placeholders})
-              AND "pair_id" IN (
-                SELECT "pair_id" FROM "public"."trade_pool_pairs" 
-                WHERE "pair_name" IN ({pair_placeholders})
-              )
-              AND "taker_fee_mode" = 1
-              AND "taker_way" IN (1, 3)
-            GROUP BY
-              "taker_account_id", "pair_id"
-        ),
-        
-        user_pair_funding AS (
-            -- Third subquery: Calculate funding fee payments for each user-pair combination
-            SELECT
-              "taker_account_id" AS "user_id",
-              "pair_id",
-              COALESCE(SUM("funding_fee" * "collateral_price"), 0) AS "funding_payments"
-            FROM
-              "public"."trade_fill_fresh"
-            WHERE
-              "created_at" BETWEEN '{start_time}' AND '{end_time}'
-              AND "taker_account_id" IN ({user_placeholders})
-              AND "pair_id" IN (
-                SELECT "pair_id" FROM "public"."trade_pool_pairs" 
-                WHERE "pair_name" IN ({pair_placeholders})
-              )
-              AND "taker_way" = 0
-            GROUP BY
-              "taker_account_id", "pair_id"
-        ),
-        
-        pair_mapping AS (
-            -- Get pair name mapping
-            SELECT "pair_id", "pair_name"
-            FROM "public"."trade_pool_pairs"
-            WHERE "pair_name" IN ('{pair_list}')
-        )
-        
-        -- Final query: Join all data together
-        SELECT
-          upp."user_id",
-          pm."pair_name",
-          COALESCE(upp."order_pnl", 0) + 
-          COALESCE(upf."fee_payments", 0) + 
-          COALESCE(upfund."funding_payments", 0) AS "total_pnl",
-          COALESCE(upp."trade_count", 0) AS "trade_count"
-        FROM
-          user_pair_pnl upp
-        LEFT JOIN
-          pair_mapping pm ON upp."pair_id" = pm."pair_id"
-        LEFT JOIN
-          user_pair_fees upf ON upp."user_id" = upf."user_id" AND upp."pair_id" = upf."pair_id"
-        LEFT JOIN
-          user_pair_funding upfund ON upp."user_id" = upfund."user_id" AND upp."pair_id" = upfund."pair_id"
-        """
-        
-        try:
-            engine = get_database_connection()
-            if not engine:
-                continue
-                
-            df = pd.read_sql(text(query), engine)
+    try:
+        engine = get_database_connection()
+        if not engine:
+            return result
             
-            if not df.empty:
-                # Process results
-                for _, row in df.iterrows():
-                    user_id = row['user_id']
-                    pair_name = row['pair_name']
+        df = pd.read_sql(text(query), engine)
+        
+        if not df.empty:
+            now_utc = datetime.now(pytz.utc)
+            for _, row in df.iterrows():
+                user_id = row['user_identifier']
+                first_trade = row['first_trade_date']
+                
+                if first_trade:
+                    account_age = (now_utc - first_trade).days
+                else:
+                    account_age = 0
                     
-                    if user_id in results and pair_name in results[user_id]["pairs"]:
-                        results[user_id]["pairs"][pair_name][period_name] = {
-                            "pnl": float(row['total_pnl']),
-                            "trades": int(row['trade_count'])
-                        }
-        except Exception as e:
-            st.error(f"Error fetching PNL data for period {period_name}: {e}")
-    
-    # Fill in missing data with zeros
-    for user_id in user_ids:
-        for pair_name in pair_names:
-            for period_name in time_boundaries.keys():
-                if period_name not in results[user_id]["pairs"][pair_name]:
-                    results[user_id]["pairs"][pair_name][period_name] = {
-                        "pnl": 0,
-                        "trades": 0
-                    }
-    
-    return results
+                result[user_id] = {
+                    "first_trade_date": row['first_trade_date_str'],
+                    "all_time_trades": int(row['all_time_trades']),
+                    "all_time_volume": float(row['all_time_volume']),
+                    "account_age_days": account_age
+                }
+        
+        return result
+    except Exception as e:
+        st.error(f"Error fetching user metadata: {e}")
+        return result
 
 # --- LOAD INITIAL DATA ---
 with st.spinner("Loading trading pairs and users..."):
@@ -439,62 +406,71 @@ if not top_selected_users:
     st.warning("No active users found for the selected period")
     st.stop()
 
-# --- OPTIMIZED DATA PROCESSING ---
-# Get time boundaries
-time_boundaries = get_time_boundaries()
-
+# --- DATA PROCESSING ---
 # Show progress
 progress_bar = st.progress(0)
 status_text = st.empty()
 
-with st.spinner("Fetching data..."):
-    # Use batch fetching for all data
-    status_text.text("Fetching user metadata...")
-    progress_bar.progress(0.1)
-    
-    # 1. Fetch all user metadata in a single query
-    user_metadata = fetch_all_user_metadata(top_selected_users)
-    progress_bar.progress(0.3)
-    
-    # 2. Fetch all PNL data in a single query per time period (much more efficient)
-    status_text.text("Fetching PNL data for all users and pairs...")
-    all_pnl_data = fetch_all_user_pnl_data(top_selected_users, selected_pairs, time_boundaries)
-    progress_bar.progress(0.9)
-    
-    # 3. Organize the results
-    results = {}
-    for user_id in top_selected_users:
-        results[user_id] = {
-            "user_id": user_id,
-            "metadata": user_metadata.get(user_id, {
-                "first_trade_date": "Unknown",
-                "all_time_trades": 0,
-                "all_time_volume": 0,
-                "account_age_days": 0
-            }),
-            "pairs": {}
-        }
-        
-        # Add pair data if it exists in the fetched results
-        if user_id in all_pnl_data:
-            results[user_id]["pairs"] = all_pnl_data[user_id]["pairs"]
-    
-    # Final progress update
-    progress_bar.progress(1.0)
-    status_text.text(f"Data processing complete for {len(results)} users across {len(selected_pairs)} pairs")
+# Get time boundaries
+time_boundaries = get_time_boundaries()
 
-# Calculate totals for each user and period
+# Initialize data structure
+results = {}
 periods = ["today", "yesterday", "day_before_yesterday", "this_week", "this_month", "all_time"]
 
+# Fetch user metadata (one batch query for all users)
+status_text.text("Fetching user metadata...")
+progress_bar.progress(0.1)
+user_metadata = fetch_user_metadata_batch(top_selected_users)
+progress_bar.progress(0.2)
+
+# Initialize the results structure with user metadata
+for user_id in top_selected_users:
+    results[user_id] = {
+        "user_id": user_id,
+        "metadata": user_metadata.get(user_id, {
+            "first_trade_date": "Unknown",
+            "all_time_trades": 0,
+            "all_time_volume": 0,
+            "account_age_days": 0
+        }),
+        "pairs": {}
+    }
+    
+    # Initialize pair data
+    for pair_name in selected_pairs:
+        results[user_id]["pairs"][pair_name] = {}
+
+# Fetch PNL data for each period (one batch query per period)
+period_count = len(periods)
+for i, period in enumerate(periods):
+    status_text.text(f"Fetching data for {period}...")
+    start_time = time_boundaries[period]["start"]
+    end_time = time_boundaries[period]["end"]
+    
+    # Fetch PNL data for this period
+    period_data = fetch_user_pnl_batch(top_selected_users, selected_pairs, period, start_time, end_time)
+    
+    # Update results structure
+    for user_id in top_selected_users:
+        for pair_name in selected_pairs:
+            # Store results
+            pair_data = period_data.get(user_id, {}).get(pair_name, {"pnl": 0, "trades": 0})
+            results[user_id]["pairs"][pair_name][period] = pair_data
+    
+    # Update progress
+    progress_bar.progress(0.2 + 0.7 * (i + 1) / period_count)
+
+# Calculate totals for each user and period
 for user_id in results:
     for period in periods:
         results[user_id][f"total_{period}_pnl"] = sum(
             results[user_id]["pairs"][pair][period]["pnl"] 
-            for pair in results[user_id]["pairs"] if pair in selected_pairs
+            for pair in results[user_id]["pairs"] if period in results[user_id]["pairs"][pair]
         )
         results[user_id][f"total_{period}_trades"] = sum(
             results[user_id]["pairs"][pair][period]["trades"] 
-            for pair in results[user_id]["pairs"] if pair in selected_pairs
+            for pair in results[user_id]["pairs"] if period in results[user_id]["pairs"][pair]
         )
 
 # Create DataFrames for display
@@ -528,25 +504,32 @@ for user_id, user_data in results.items():
     for pair_name in selected_pairs:
         if pair_name in user_data["pairs"]:
             pair_data = user_data["pairs"][pair_name]
-            row = {
-                'User ID': user_id,
-                'Trading Pair': pair_name,
-                'Today PNL': pair_data["today"]["pnl"],
-                'Today Trades': pair_data["today"]["trades"],
-                'Yesterday PNL': pair_data["yesterday"]["pnl"],
-                'Yesterday Trades': pair_data["yesterday"]["trades"],
-                'Day Before Yesterday PNL': pair_data["day_before_yesterday"]["pnl"],
-                'Day Before Yesterday Trades': pair_data["day_before_yesterday"]["trades"],
-                'Week PNL': pair_data["this_week"]["pnl"],
-                'Week Trades': pair_data["this_week"]["trades"],
-                'Month PNL': pair_data["this_month"]["pnl"],
-                'Month Trades': pair_data["this_month"]["trades"],
-                'All Time PNL': pair_data["all_time"]["pnl"],
-                'All Time Trades': pair_data["all_time"]["trades"]
-            }
-            pair_rows.append(row)
+            
+            # Only include if all period data exists
+            if all(period in pair_data for period in periods):
+                row = {
+                    'User ID': user_id,
+                    'Trading Pair': pair_name,
+                    'Today PNL': pair_data["today"]["pnl"],
+                    'Today Trades': pair_data["today"]["trades"],
+                    'Yesterday PNL': pair_data["yesterday"]["pnl"],
+                    'Yesterday Trades': pair_data["yesterday"]["trades"],
+                    'Day Before Yesterday PNL': pair_data["day_before_yesterday"]["pnl"],
+                    'Day Before Yesterday Trades': pair_data["day_before_yesterday"]["trades"],
+                    'Week PNL': pair_data["this_week"]["pnl"],
+                    'Week Trades': pair_data["this_week"]["trades"],
+                    'Month PNL': pair_data["this_month"]["pnl"],
+                    'Month Trades': pair_data["this_month"]["trades"],
+                    'All Time PNL': pair_data["all_time"]["pnl"],
+                    'All Time Trades': pair_data["all_time"]["trades"]
+                }
+                pair_rows.append(row)
 
 user_pair_df = pd.DataFrame(pair_rows)
+
+# Final progress update
+progress_bar.progress(1.0)
+status_text.text(f"Data processing complete for {len(results)} users across {len(selected_pairs)} pairs")
 
 # Calculate additional metrics for analysis
 if not user_matrix_df.empty:
