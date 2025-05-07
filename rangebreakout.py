@@ -469,30 +469,32 @@ if selected_tokens and refresh_pressed:
         
         # Show highest breakout periods overall
         highest_overall = all_blocks_avg.mean(axis=1).sort_values(ascending=False)
-        highest_block = highest_overall.index[0]
-        lowest_block = highest_overall.index[-1]
         
-        st.subheader("Range vs. Breakout Trading Patterns")
-        
-        st.markdown(f"""
-        ### Key Findings:
-        
-        - **Peak Breakout Period:** {block_labels[highest_block]} (Avg: {highest_overall[0]:.2f} breakouts)
-        - **Lowest Breakout Period:** {block_labels[lowest_block]} (Avg: {highest_overall[-1]:.2f} breakouts)
-        """)
-        
-        # Trader type analysis
-        st.markdown("""
-        ### Trader Types by Time Block:
-        """)
-        
-        blocks_sorted = highest_overall.sort_values(ascending=False)
-        
-        for block, value in blocks_sorted.items():
-            if value > highest_overall.mean():
-                st.markdown(f"- **{block_labels[block]}**: More breakout traders (higher than average breakouts)")
-            else:
-                st.markdown(f"- **{block_labels[block]}**: More range traders (lower than average breakouts)")
+        if not highest_overall.empty:
+            highest_block = highest_overall.index[0]
+            lowest_block = highest_overall.index[-1]
+            
+            st.subheader("Range vs. Breakout Trading Patterns")
+            
+            st.markdown(f"""
+            ### Key Findings:
+            
+            - **Peak Breakout Period:** {block_labels[highest_block]} (Avg: {highest_overall.iloc[0]:.2f} breakouts)
+            - **Lowest Breakout Period:** {block_labels[lowest_block]} (Avg: {highest_overall.iloc[-1]:.2f} breakouts)
+            """)
+            
+            # Trader type analysis
+            st.markdown("""
+            ### Trader Types by Time Block:
+            """)
+            
+            blocks_sorted = highest_overall.sort_values(ascending=False)
+            
+            for block, value in blocks_sorted.items():
+                if value > highest_overall.mean():
+                    st.markdown(f"- **{block_labels[block]}**: More breakout traders (higher than average breakouts)")
+                else:
+                    st.markdown(f"- **{block_labels[block]}**: More range traders (lower than average breakouts)")
         
         # Trading recommendation
         st.subheader("Exchange Strategy Recommendations")
