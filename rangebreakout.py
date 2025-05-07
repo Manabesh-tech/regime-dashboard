@@ -11,7 +11,6 @@ st.set_page_config(page_title="Crypto Breakout Analysis", page_icon="📈", layo
 
 # --- UI Setup ---
 st.title("Crypto Range Breakout Analysis")
-st.subheader("Range breakouts by 3-hour blocks, averaged over 7 days")
 
 # DB connection
 db_params = {
@@ -32,7 +31,7 @@ def connect_to_db():
         return None
 
 # Get available tokens
-@st.cache_data(ttl=600)  # 10-minute cache for token list
+@st.cache_data(ttl=1800)  # 30-minute cache for token list
 def fetch_trading_pairs():
     conn = connect_to_db()
     if not conn:
@@ -46,7 +45,6 @@ def fetch_trading_pairs():
         ORDER BY pair_name
         """
         
-        # Use cursor instead of pandas for compatibility
         cursor = conn.cursor()
         cursor.execute(query)
         pairs = [row[0] for row in cursor.fetchall()]
@@ -66,7 +64,6 @@ all_tokens = fetch_trading_pairs()
 col1, col2, col3 = st.columns([2, 1, 1])
 
 with col1:
-    # CHANGED: Use single token selection instead of multiple tokens
     default_tokens = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
     default_token = next((t for t in default_tokens if t in all_tokens), all_tokens[0] if all_tokens else None)
     
@@ -75,33 +72,26 @@ with col1:
         all_tokens,
         index=all_tokens.index(default_token) if default_token in all_tokens else 0
     )
-    
-    # Keep selected_tokens as a list for compatibility with existing code
-    selected_tokens = [selected_token]
 
 with col2:
-    # Breakout detection method - Default is Bollinger Bands (index=1)
+    # Breakout detection method - Default is Bollinger Bands
     breakout_method = st.selectbox(
         "Breakout Detection Method",
         ["ATR Multiple", "Bollinger Bands", "Adaptive Threshold"],
         index=1
     )
+    
+    # ADDED: Days selection to reduce data
+    analysis_days = st.slider("Days to Analyze", min_value=1, max_value=7, value=3)
 
 with col3:
     # Refresh button
     refresh_pressed = st.button("Refresh Data", type="primary", use_container_width=True)
     if refresh_pressed:
-        # Clear cache when refreshing data
         st.cache_data.clear()
 
-# Singapore time
-sg_tz = pytz.timezone('Asia/Singapore')
-now_utc = datetime.now(pytz.utc)
-now_sg = now_utc.astimezone(sg_tz)
-st.write(f"Current time (Singapore): {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
-
 # Get partition tables
-@st.cache_data(ttl=3600)  # Cache for 1 hour
+@st.cache_data(ttl=3600)  # 1-hour cache
 def get_partition_tables(start_date, end_date):
     if isinstance(start_date, str):
         start_date = pd.to_datetime(start_date)
@@ -173,9 +163,9 @@ def build_query(tables, token, start_time, end_time):
     
     return " UNION ".join(union_parts) + " ORDER BY timestamp"
 
-# Get price data for the last 7 days
+# Get price data 
 @st.cache_data(ttl=300)  # 5-minute cache
-def get_price_data(token, days=7, max_rows=10000):  # Added max_rows parameter
+def get_price_data(token, days=3, max_rows=7500):  # Reduced max_rows and default days
     # Time range
     now_sg = datetime.now(pytz.timezone('Asia/Singapore'))
     start_time_sg = now_sg - timedelta(days=days)
@@ -201,11 +191,9 @@ def get_price_data(token, days=7, max_rows=10000):  # Added max_rows parameter
         return None
     
     try:
-        # Execute query directly with psycopg2 instead of pandas
         cursor = conn.cursor()
         cursor.execute(query)
         
-        # Fetch all results
         rows = cursor.fetchall()
         cursor.close()
         
@@ -213,20 +201,19 @@ def get_price_data(token, days=7, max_rows=10000):  # Added max_rows parameter
             st.error(f"No data found for {token}")
             return None
         
-        # ADDED: Subsample data if too many rows for better performance
+        # Subsample data if too many rows for better performance
         if len(rows) > max_rows:
             step = len(rows) // max_rows + 1
             rows = rows[::step]
-            st.info(f"Sampled data for better performance (using 1 in {step} data points)")
         
-        # Manually create DataFrame (avoiding pandas read_sql_query)
+        # Manually create DataFrame
         df = pd.DataFrame(rows, columns=['pair_name', 'timestamp', 'final_price'])
         
         # Process timestamps
         df['timestamp'] = pd.to_datetime(df['timestamp'])
         df = df.set_index('timestamp').sort_index()
         
-        # Create 5-minute OHLC data using 'min' instead of deprecated 'T'
+        # Create 5-minute OHLC data
         ohlc = df['final_price'].resample('5min').agg({
             'open': 'first',
             'high': 'max',
@@ -244,7 +231,6 @@ def get_price_data(token, days=7, max_rows=10000):  # Added max_rows parameter
 # Define breakout detection functions
 def detect_breakouts_atr(df, window=14, multiplier=2.0):
     """Detect breakouts using ATR (Average True Range)"""
-    # Calculate ATR
     df = df.copy()
     
     # True Range
@@ -301,16 +287,10 @@ def detect_breakouts_adaptive(df, short_window=12, long_window=48):
     # Use recent data points to determine if we're in a range or trend
     df['vol_ratio_smooth'] = df['vol_ratio'].rolling(window=6).mean()
     
-    # Adaptive thresholds based on recent market conditions
-    # For ranging markets (low vol_ratio), use tighter bands
-    # For trending markets (high vol_ratio), use wider bands
-    
     # Base threshold is the 20-period standard deviation
     df['base_threshold'] = df['pct_change'].rolling(window=20).std()
     
     # Adjust threshold based on vol_ratio
-    # If vol_ratio < 0.8, we're likely in a range, use tight bands (1.5x std)
-    # If vol_ratio > 1.2, we're likely in a trend, use wider bands (2.5x std)
     df['threshold_multiplier'] = 1.5 + (df['vol_ratio_smooth'] - 0.8) * (2.5 - 1.5) / (1.2 - 0.8)
     df['threshold_multiplier'] = df['threshold_multiplier'].clip(1.5, 2.5)
     
@@ -327,7 +307,6 @@ def detect_breakouts_adaptive(df, short_window=12, long_window=48):
     df['breakout'] = df['breakout_up'] | df['breakout_down']
     
     # Try to identify if the breakout is significant by checking follow-through
-    # A real breakout should continue in the direction of the breakout
     df['significant_breakout'] = False
     
     # For each breakout, check if the next few candles continue in the same direction
@@ -360,10 +339,10 @@ def detect_breakouts_adaptive(df, short_window=12, long_window=48):
     return df
 
 # Process data and detect breakouts
-@st.cache_data(ttl=300)  # ADDED: Cache this function for 5 minutes
-def process_token_data(token):
+@st.cache_data(ttl=300)
+def process_token_data(token, days=3):
     # Get price data
-    ohlc_data = get_price_data(token)
+    ohlc_data = get_price_data(token, days=days)
     
     if ohlc_data is None or ohlc_data.empty:
         return None
@@ -390,7 +369,7 @@ def process_token_data(token):
     # Convert counts to a pivot table: days as rows, blocks as columns
     pivot_counts = breakout_counts.pivot(index='day', columns='block', values=breakout_col).fillna(0)
     
-    # Get the average by block over the last 7 days
+    # Get the average by block over the last N days
     avg_by_block = pivot_counts.mean()
     
     return {
@@ -400,11 +379,11 @@ def process_token_data(token):
         'breakout_col': breakout_col
     }
 
-# Only process data if tokens are selected AND refresh button was pressed
-if selected_tokens and refresh_pressed:
+# Only process data if refresh button was pressed
+if refresh_pressed:
     # Process data for the selected token
-    with st.spinner(f"Processing data for {selected_token}..."):
-        result = process_token_data(selected_token)
+    with st.spinner(f"Processing {selected_token} data..."):
+        result = process_token_data(selected_token, days=analysis_days)
         
     if result:
         # Create block labels
@@ -432,7 +411,7 @@ if selected_tokens and refresh_pressed:
         avg_by_block = avg_by_block.sort_index()
         
         # Display block averages
-        st.subheader(f"Average Number of Breakouts per 3-Hour Block (Past 7 Days)")
+        st.subheader(f"Average Number of Breakouts per 3-Hour Block (Past {analysis_days} Days)")
         
         # Display the averages as a bar chart
         fig = px.bar(
@@ -457,11 +436,9 @@ if selected_tokens and refresh_pressed:
             highest_block = highest_overall.index[0]
             lowest_block = highest_overall.index[-1]
             
-            # Fix for KeyError: Extract values before using them in the f-string
-            high_val = highest_overall.iloc[0]  # Use position-based indexing
-            low_val = highest_overall.iloc[-1]  # Use position-based indexing
-            
-            st.subheader("Range vs. Breakout Trading Patterns")
+            # Extract values for formatting
+            high_val = highest_overall.iloc[0]
+            low_val = highest_overall.iloc[-1]
             
             st.markdown(f"""
             ### Key Findings:
@@ -469,54 +446,10 @@ if selected_tokens and refresh_pressed:
             - **Peak Breakout Period:** {block_labels[highest_block]} (Avg: {high_val:.2f} breakouts)
             - **Lowest Breakout Period:** {block_labels[lowest_block]} (Avg: {low_val:.2f} breakouts)
             """)
-            
-            # Trader type analysis
-            st.markdown("""
-            ### Trader Types by Time Block:
-            """)
-            
-            blocks_sorted = highest_overall.sort_values(ascending=False)
-            avg_all_blocks = highest_overall.mean()
-            
-            for block, value in blocks_sorted.items():
-                if value > avg_all_blocks:
-                    st.markdown(f"- **{block_labels[block]}**: More breakout traders (higher than average breakouts)")
-                else:
-                    st.markdown(f"- **{block_labels[block]}**: More range traders (lower than average breakouts)")
         
-        # Trading recommendation
-        st.subheader("Exchange Strategy Recommendations")
-        
-        st.markdown(f"""
-        Based on the analysis of {selected_token} breakout patterns across different time blocks, here are some strategic recommendations:
-        
-        1. **Liquidity Management:**
-           - Increase liquidity during peak breakout times to handle higher volumes
-           - Optimize spread during range-bound periods
-           
-        2. **Risk Management:**
-           - Adjust risk parameters by time of day
-           - Monitor liquidation risks more closely during breakout periods
-           
-        3. **User Experience:**
-           - Provide different trading tools based on time of day
-           - Show relevant indicators (breakout vs. range) based on current market phase
-        """)
-        
-        # Show detailed token analysis
-        st.subheader(f"Detailed Analysis for {selected_token}")
-        
-        # Show recent breakouts
-        recent_breakouts = breakout_df[breakout_df[breakout_col]].tail(10)
-        if not recent_breakouts.empty:
-            st.markdown("#### Recent Breakouts")
-            recent_display = recent_breakouts[['open', 'high', 'low', 'close']].copy()
-            recent_display.index = recent_display.index.strftime('%Y-%m-%d %H:%M')
-            st.dataframe(recent_display)
-        
-        # Create a candlestick chart with breakouts highlighted
-        # UPDATED: Show fewer candles for better performance
-        candle_count = 144  # Show 12 hours of 5-min candles (reduced from 24 hours)
+        # Show candlestick chart with breakouts
+        # Reduced to 72 candles (6 hours) for faster rendering
+        candle_count = 72  
         recent_data = breakout_df.tail(candle_count)
         
         fig = go.Figure()
@@ -590,7 +523,7 @@ if selected_tokens and refresh_pressed:
         
         st.plotly_chart(fig, use_container_width=True)
     else:
-        st.error(f"No valid data available for {selected_token}. Please try a different token or adjust the date range.")
+        st.error(f"No valid data available for {selected_token}. Please try a different token.")
 else:
-    # Initial state, show instructions to select tokens and click refresh
+    # Initial state
     st.info("👆 Click the 'Refresh Data' button to analyze the selected token")
