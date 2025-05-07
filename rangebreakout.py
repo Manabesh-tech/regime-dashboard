@@ -427,8 +427,8 @@ if results and not all_blocks_avg.empty:
     st.markdown(f"""
     ### Key Findings:
     
-    - **Peak Breakout Period:** {block_labels[highest_block]} (Avg: {highest_overall[0]:.2f} breakouts)
-    - **Lowest Breakout Period:** {block_labels[lowest_block]} (Avg: {highest_overall[-1]:.2f} breakouts)
+    - **Peak Breakout Period:** {block_labels[highest_block]} (Avg: {highest_overall.iloc[0]:.2f} breakouts)
+    - **Lowest Breakout Period:** {block_labels[lowest_block]} (Avg: {highest_overall.iloc[-1]:.2f} breakouts)
     """)
     
     # Trader type analysis
