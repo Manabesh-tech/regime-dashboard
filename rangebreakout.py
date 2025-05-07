@@ -70,7 +70,7 @@ with col3:
     # Refresh button
     if st.button("Refresh Data", type="primary", use_container_width=True):
         st.cache_data.clear()
-        st.experimental_rerun()
+        st.rerun()
 
 # Singapore time
 sg_tz = pytz.timezone('Asia/Singapore')
@@ -172,8 +172,8 @@ def get_price_data(token, days=7):
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df = df.set_index('timestamp').sort_index()
     
-    # Create 5-minute OHLC data
-    ohlc = df['final_price'].resample('5T').agg({
+    # Create 5-minute OHLC data - replace deprecated 'T' with 'min'
+    ohlc = df['final_price'].resample('5min').agg({
         'open': 'first',
         'high': 'max',
         'low': 'min',
@@ -554,54 +554,64 @@ if results and not all_blocks_avg.empty:
         cluster_data = all_blocks_avg.T
         
         if len(cluster_data) >= 3:  # Need at least 3 tokens for meaningful clustering
-            # Normalize data for clustering
-            normalized_data = (cluster_data - cluster_data.mean()) / cluster_data.std()
-            
-            # K-means clustering to find similar time blocks
-            kmeans = KMeans(n_clusters=2, random_state=42)
-            cluster_data['cluster'] = kmeans.fit_predict(normalized_data)
-            
-            # Display clusters
-            st.markdown("### Time Block Clusters")
-            st.markdown("Grouping time blocks into clusters based on breakout patterns:")
-            
-            # Get cluster centers and interpret
-            centers = kmeans.cluster_centers_
-            
-            # Determine which cluster has higher average breakouts
-            cluster_0_avg = centers[0].mean()
-            cluster_1_avg = centers[1].mean()
-            
-            if cluster_0_avg > cluster_1_avg:
-                breakout_cluster = 0
-                range_cluster = 1
-            else:
-                breakout_cluster = 1
-                range_cluster = 0
-            
-            # Display results
-            breakout_times = [block_labels[block] for block, cluster in 
-                             zip(all_blocks_avg.index, kmeans.labels_) if cluster == breakout_cluster]
-            
-            range_times = [block_labels[block] for block, cluster in 
-                          zip(all_blocks_avg.index, kmeans.labels_) if cluster == range_cluster]
-            
-            st.markdown(f"""
-            #### Breakout Trading Times:
-            Times with significantly more breakouts, suggesting more breakout traders active:
-            {", ".join(breakout_times)}
-            
-            #### Range Trading Times:
-            Times with fewer breakouts, suggesting more range traders active:
-            {", ".join(range_times)}
-            """)
-            
-            # Visualize the clusters
-            cluster_viz = pd.DataFrame({
-                'Time Block': [block_labels[i] for i in all_blocks_avg.index],
-                'Cluster': kmeans.labels_,
-                'Average Breakouts': all_blocks_avg.mean(axis=1).values
-            })
+            try:
+                # Normalize data for clustering
+                normalized_data = (cluster_data - cluster_data.mean()) / cluster_data.std()
+                
+                # K-means clustering to find similar time blocks
+                kmeans = KMeans(n_clusters=2, random_state=42)
+                cluster_labels = kmeans.fit_predict(normalized_data)
+                cluster_data['cluster'] = cluster_labels
+                
+                # Display clusters
+                st.markdown("### Time Block Clusters")
+                st.markdown("Grouping time blocks into clusters based on breakout patterns:")
+                
+                # Get cluster centers and interpret
+                centers = kmeans.cluster_centers_
+                
+                # Determine which cluster has higher average breakouts
+                cluster_0_avg = centers[0].mean()
+                cluster_1_avg = centers[1].mean()
+                
+                if cluster_0_avg > cluster_1_avg:
+                    breakout_cluster = 0
+                    range_cluster = 1
+                else:
+                    breakout_cluster = 1
+                    range_cluster = 0
+                
+                # Display results
+                breakout_times = [block_labels[block] for block, cluster in 
+                                zip(all_blocks_avg.index, kmeans.labels_) if cluster == breakout_cluster]
+                
+                range_times = [block_labels[block] for block, cluster in 
+                            zip(all_blocks_avg.index, kmeans.labels_) if cluster == range_cluster]
+                
+                st.markdown(f"""
+                #### Breakout Trading Times:
+                Times with significantly more breakouts, suggesting more breakout traders active:
+                {", ".join(breakout_times)}
+                
+                #### Range Trading Times:
+                Times with fewer breakouts, suggesting more range traders active:
+                {", ".join(range_times)}
+                """)
+                
+                # Create arrays of equal length for DataFrame
+                time_blocks = [block_labels[i] for i in all_blocks_avg.index]
+                avg_breakouts = all_blocks_avg.mean(axis=1).values
+                labels_list = kmeans.labels_.tolist()
+                
+                # Make sure all arrays are the same length
+                min_length = min(len(time_blocks), len(avg_breakouts), len(labels_list))
+                
+                # Visualize the clusters with equal length arrays
+                cluster_viz = pd.DataFrame({
+                    'Time Block': time_blocks[:min_length],
+                    'Cluster': labels_list[:min_length],
+                    'Average Breakouts': avg_breakouts[:min_length]
+                })
             
             cluster_viz['Trading Style'] = cluster_viz['Cluster'].apply(
                 lambda x: 'Breakout Trading' if x == breakout_cluster else 'Range Trading'
