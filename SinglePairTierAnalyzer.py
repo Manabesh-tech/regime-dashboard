@@ -822,7 +822,7 @@ def main():
     current_time_sg = now_sg.strftime("%Y-%m-%d %H:%M:%S")
 
     # Main layout - super streamlined
-    st.markdown("<h1 style='text-align: center; font-size:28px; margin-bottom: 10px;'>Aggregated Liquidity Depth Tier Analyzer</h1>", unsafe_allow_html=True)
+    st.markdown("<h1 style='text-align: center; font-size:28px; margin-bottom: 10px;'>Aggregated Depth Tier Analyzer</h1>", unsafe_allow_html=True)
 
     # Display current Singapore time to confirm updates
     st.markdown(f"<p style='text-align: center; font-size:14px; color:gray;'>Last updated: {current_time_sg} (SGT)</p>", unsafe_allow_html=True)
