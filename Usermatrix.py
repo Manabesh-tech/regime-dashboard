@@ -7,10 +7,12 @@ from sqlalchemy import create_engine, text
 from datetime import datetime, timedelta
 import pytz
 import time
+import altair as alt
+from collections import defaultdict
 
 # --- PAGE CONFIG ---
 st.set_page_config(
-    page_title="User PNL Matrix Dashboard",
+    page_title="User Trading Style Analysis Dashboard",
     page_icon="📊",
     layout="wide"
 )
@@ -35,892 +37,1307 @@ singapore_timezone = pytz.timezone('Asia/Singapore')
 now_utc = datetime.now(pytz.utc)
 now_sg = now_utc.astimezone(singapore_timezone)
 
-# --- TIME BOUNDARIES ---
-def get_time_boundaries():
-    """Calculate time boundaries for different periods"""
-    # Current time in Singapore
-    now_sg = datetime.now(pytz.utc).astimezone(singapore_timezone)
-    
-    # Today's midnight in Singapore
-    today_midnight_sg = now_sg.replace(hour=0, minute=0, second=0, microsecond=0)
-    
-    # Yesterday's midnight in Singapore
-    yesterday_midnight_sg = today_midnight_sg - timedelta(days=1)
-    
-    # Day before yesterday
-    day_before_yesterday_sg = yesterday_midnight_sg - timedelta(days=1)
-    
-    # 7 days ago midnight in Singapore
-    week_ago_midnight_sg = today_midnight_sg - timedelta(days=7)
-    
-    # 30 days ago midnight in Singapore
-    month_ago_midnight_sg = today_midnight_sg - timedelta(days=30)
-    
-    # All time (use a far past date, e.g., 5 years ago)
-    all_time_start_sg = today_midnight_sg.replace(year=today_midnight_sg.year-5)
-    
-    # Convert all times back to UTC for database queries
-    today_midnight_utc = today_midnight_sg.astimezone(pytz.utc)
-    yesterday_midnight_utc = yesterday_midnight_sg.astimezone(pytz.utc)
-    day_before_yesterday_utc = day_before_yesterday_sg.astimezone(pytz.utc)
-    week_ago_midnight_utc = week_ago_midnight_sg.astimezone(pytz.utc)
-    month_ago_midnight_utc = month_ago_midnight_sg.astimezone(pytz.utc)
-    all_time_start_utc = all_time_start_sg.astimezone(pytz.utc)
-    now_utc = now_sg.astimezone(pytz.utc)
-    
-    return {
-        "today": {
-            "start": today_midnight_utc,
-            "end": now_utc,
-            "label": f"Today ({today_midnight_sg.strftime('%Y-%m-%d')})"
-        },
-        "yesterday": {
-            "start": yesterday_midnight_utc,
-            "end": today_midnight_utc,
-            "label": f"Yesterday ({yesterday_midnight_sg.strftime('%Y-%m-%d')})"
-        },
-        "day_before_yesterday": {
-            "start": day_before_yesterday_utc,
-            "end": yesterday_midnight_utc,
-            "label": f"Day Before Yesterday ({day_before_yesterday_sg.strftime('%Y-%m-%d')})"
-        },
-        "this_week": {
-            "start": week_ago_midnight_utc,
-            "end": now_utc,
-            "label": f"This Week (Last 7 Days)"
-        },
-        "this_month": {
-            "start": month_ago_midnight_utc,
-            "end": now_utc,
-            "label": f"This Month (Last 30 Days)"
-        },
-        "all_time": {
-            "start": all_time_start_utc,
-            "end": now_utc,
-            "label": "All Time"
-        }
-    }
-
 # --- UI SETUP ---
-st.title("📊 User PNL Matrix Dashboard")
-st.subheader("Performance Analysis by User (Singapore Time)")
+st.title("📊 User Trading Style Analysis Dashboard")
+st.subheader("Comprehensive Analysis of Trading Behavior")
 st.write(f"Current Singapore Time: {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
 
-# --- CACHING DATA FETCH FUNCTIONS ---
+# --- DATA FETCH FUNCTIONS ---
 @st.cache_data(ttl=600)
-def fetch_all_pairs():
-    """Fetch all trading pairs"""
-    query = "SELECT DISTINCT pair_name FROM public.trade_pool_pairs ORDER BY pair_name"
-    
-    try:
-        engine = get_database_connection()
-        if not engine:
-            return ["BTC/USDT", "ETH/USDT", "SOL/USDT", "DOGE/USDT", "PEPE/USDT"]
-            
-        df = pd.read_sql(text(query), engine)
-        
-        if df.empty:
-            return ["BTC/USDT", "ETH/USDT", "SOL/USDT", "DOGE/USDT", "PEPE/USDT"]
-        
-        return df['pair_name'].tolist()
-    except Exception as e:
-        st.error(f"Error fetching pairs: {e}")
-        return ["BTC/USDT", "ETH/USDT", "SOL/USDT", "DOGE/USDT", "PEPE/USDT"]
-
-@st.cache_data(ttl=600)
-def fetch_top_users(limit=100):
-    """Fetch top users by trading volume"""
+def fetch_trading_data(date_range=30, limit=10000):
+    """Fetch comprehensive trading data for analysis"""
     # Calculate the date range
     now_utc = datetime.now(pytz.utc)
-    month_ago_utc = now_utc - timedelta(days=30)
+    start_date = now_utc - timedelta(days=date_range)
     
-    query = f"""
+    query = """
     SELECT 
-        "taker_account_id" as user_identifier,
-        COUNT(*) as trade_count,
-        SUM(ABS("deal_size" * "deal_price")) as total_volume
+        t.taker_account_id AS user_id,
+        ul.address AS wallet_address,
+        t.pair_name,
+        t.taker_way,
+        t.taker_mode,
+        t.taker_fee_mode,
+        t.dual_side,
+        t.leverage,
+        t.deal_price,
+        t.deal_vol,
+        t.deal_size,
+        t.coin_name,
+        t.taker_pnl * t.collateral_price AS pnl_usd,
+        t.taker_fee * t.collateral_price AS fee_usd,
+        t.taker_share_pnl * t.collateral_price AS share_pnl_usd,
+        t.deal_vol * t.collateral_price AS margin_usd,
+        CASE
+            WHEN t.taker_way = 1 THEN 'Open Long'
+            WHEN t.taker_way = 2 THEN 'Close Short'
+            WHEN t.taker_way = 3 THEN 'Open Short'
+            WHEN t.taker_way = 4 THEN 'Close Long'
+        END AS trade_type,
+        CASE
+            WHEN t.taker_mode = 1 THEN 'Active'
+            WHEN t.taker_mode = 2 THEN 'Take Profit'
+            WHEN t.taker_mode = 3 THEN 'Stop Loss'
+            WHEN t.taker_mode = 4 THEN 'Liquidation'
+        END AS order_type,
+        CASE
+            WHEN p.margin_type = 1 THEN 'Isolated'
+            WHEN p.margin_type = 2 THEN 'Cross'
+        END AS margin_type,
+        t.created_at
     FROM 
-        "public"."trade_fill_fresh"
+        public.surfv2_trade t
+    LEFT JOIN 
+        public.surfv2_user_login_log ul ON t.taker_account_id = ul.account_id
+    LEFT JOIN 
+        public.surfv2_position p ON t.taker_position = p.id
     WHERE 
-        "created_at" >= '{month_ago_utc.strftime("%Y-%m-%d %H:%M:%S")}'
-        AND "taker_way" IN (1, 2, 3, 4)
-    GROUP BY 
-        "taker_account_id"
+        t.created_at >= %s
+        AND (t.taker_way IN (1, 2, 3, 4))
+        AND (t.taker_mode IN (1, 2, 3, 4))
     ORDER BY 
-        total_volume DESC
-    LIMIT {limit}
+        t.created_at DESC
+    LIMIT %s
     """
     
     try:
         engine = get_database_connection()
         if not engine:
-            return [f"user_{i}" for i in range(1, 11)]
+            return pd.DataFrame()
             
-        df = pd.read_sql(text(query), engine)
+        df = pd.read_sql_query(text(query), engine, params=[start_date, limit])
         
         if df.empty:
-            return [f"user_{i}" for i in range(1, 11)]
+            return pd.DataFrame()
         
-        return df['user_identifier'].tolist()
+        # Convert timestamp to SG time
+        df['created_at'] = pd.to_datetime(df['created_at']).dt.tz_localize('UTC').dt.tz_convert('Asia/Singapore')
+        df['trade_date'] = df['created_at'].dt.date
+        df['trade_hour'] = df['created_at'].dt.hour
+        df['trade_day'] = df['created_at'].dt.day_name()
+        
+        # Add indicators for win/loss
+        df['is_win'] = df['pnl_usd'] > 0
+        df['is_loss'] = df['pnl_usd'] < 0
+        
+        # Categorize trade direction
+        df['direction'] = 'Unknown'
+        df.loc[df['taker_way'].isin([1, 4]), 'direction'] = 'Long'  # Open Long or Close Long
+        df.loc[df['taker_way'].isin([2, 3]), 'direction'] = 'Short'  # Close Short or Open Short
+        
+        # Categorize trade action
+        df['action'] = 'Unknown'
+        df.loc[df['taker_way'].isin([1, 3]), 'action'] = 'Open'  # Open Long or Open Short
+        df.loc[df['taker_way'].isin([2, 4]), 'action'] = 'Close'  # Close Short or Close Long
+        
+        return df
     except Exception as e:
-        st.error(f"Error fetching users: {e}")
-        return [f"user_{i}" for i in range(1, 11)]
+        st.error(f"Error fetching trading data: {e}")
+        return pd.DataFrame()
 
 @st.cache_data(ttl=600)
-def fetch_user_pnl_for_period(user_id, pair_name, start_time, end_time):
-    """Fetch PNL data for a specific user, pair and time period"""
-    query = f"""
-    WITH 
-    user_order_pnl AS (
-      -- Calculate user order PNL
-      SELECT
-        COALESCE(SUM("taker_pnl" * "collateral_price"), 0) AS "user_order_pnl"
-      FROM
-        "public"."trade_fill_fresh"
-      WHERE
-        "created_at" BETWEEN '{start_time}' AND '{end_time}'
-        AND "pair_id" IN (SELECT "pair_id" FROM "public"."trade_pool_pairs" WHERE "pair_name" = '{pair_name}')
-        AND "taker_account_id" = '{user_id}'
-        AND "taker_way" IN (1, 2, 3, 4)
-    ),
+def calculate_user_metrics(df):
+    """Calculate trading metrics for each user"""
+    if df.empty:
+        return pd.DataFrame()
     
-    user_fee_payments AS (
-      -- Calculate user fee payments
-      SELECT
-        COALESCE(SUM(-1 * "taker_fee" * "collateral_price"), 0) AS "user_fee_payments"
-      FROM
-        "public"."trade_fill_fresh"
-      WHERE
-        "created_at" BETWEEN '{start_time}' AND '{end_time}'
-        AND "pair_id" IN (SELECT "pair_id" FROM "public"."trade_pool_pairs" WHERE "pair_name" = '{pair_name}')
-        AND "taker_account_id" = '{user_id}'
-        AND "taker_fee_mode" = 1
-        AND "taker_way" IN (1, 3)
-    ),
+    user_metrics = []
     
-    user_funding_payments AS (
-      -- Calculate user funding fee payments
-      SELECT
-        COALESCE(SUM("funding_fee" * "collateral_price"), 0) AS "user_funding_payments"
-      FROM
-        "public"."trade_fill_fresh"
-      WHERE
-        "created_at" BETWEEN '{start_time}' AND '{end_time}'
-        AND "pair_id" IN (SELECT "pair_id" FROM "public"."trade_pool_pairs" WHERE "pair_name" = '{pair_name}')
-        AND "taker_account_id" = '{user_id}'
-        AND "taker_way" = 0
-    ),
-    
-    user_trade_count AS (
-      -- Calculate total number of trades
-      SELECT
-        COUNT(*) AS "trade_count"
-      FROM
-        "public"."trade_fill_fresh"
-      WHERE
-        "created_at" BETWEEN '{start_time}' AND '{end_time}'
-        AND "pair_id" IN (SELECT "pair_id" FROM "public"."trade_pool_pairs" WHERE "pair_name" = '{pair_name}')
-        AND "taker_account_id" = '{user_id}'
-        AND "taker_way" IN (1, 2, 3, 4)
-    )
-    
-    -- Final query: combine all data sources
-    SELECT
-      (SELECT "user_order_pnl" FROM user_order_pnl) +
-      (SELECT "user_fee_payments" FROM user_fee_payments) +
-      (SELECT "user_funding_payments" FROM user_funding_payments) AS "user_total_pnl",
-      (SELECT "trade_count" FROM user_trade_count) AS "trade_count"
-    """
-    
-    try:
-        engine = get_database_connection()
-        if not engine:
-            return {"pnl": 0, "trades": 0}
-            
-        df = pd.read_sql(text(query), engine)
+    # Group by user
+    for user_id, user_data in df.groupby('user_id'):
+        # Basic metrics
+        wallet_address = user_data['wallet_address'].iloc[0] if not user_data['wallet_address'].isna().all() else "Unknown"
+        total_trades = len(user_data)
+        first_trade = user_data['created_at'].min()
+        last_trade = user_data['created_at'].max()
         
-        if df.empty:
-            return {"pnl": 0, "trades": 0}
+        # PNL metrics
+        total_pnl = user_data['pnl_usd'].sum()
+        total_fee = user_data['fee_usd'].sum()
+        net_pnl = total_pnl - total_fee
         
-        return {
-            "pnl": float(df.iloc[0]['user_total_pnl']),
-            "trades": int(df.iloc[0]['trade_count'])
+        # Trading behavior
+        win_trades = user_data[user_data['is_win']].shape[0]
+        loss_trades = user_data[user_data['is_loss']].shape[0]
+        win_rate = win_trades / total_trades if total_trades > 0 else 0
+        
+        # Direction preference
+        long_trades = user_data[user_data['direction'] == 'Long'].shape[0]
+        short_trades = user_data[user_data['direction'] == 'Short'].shape[0]
+        long_pct = long_trades / total_trades if total_trades > 0 else 0
+        
+        # Order type breakdown
+        active_orders = user_data[user_data['order_type'] == 'Active'].shape[0]
+        tp_orders = user_data[user_data['order_type'] == 'Take Profit'].shape[0]
+        sl_orders = user_data[user_data['order_type'] == 'Stop Loss'].shape[0]
+        liq_orders = user_data[user_data['order_type'] == 'Liquidation'].shape[0]
+        
+        # Timing patterns
+        avg_trades_per_day = total_trades / max((last_trade - first_trade).days, 1)
+        
+        # Risk metrics
+        avg_leverage = user_data['leverage'].mean()
+        max_leverage = user_data['leverage'].max()
+        
+        # Pair diversity
+        unique_pairs = user_data['pair_name'].nunique()
+        most_traded_pair = user_data['pair_name'].value_counts().index[0] if not user_data['pair_name'].empty else "None"
+        
+        # Average position sizes
+        avg_position_size = user_data['margin_usd'].mean()
+        max_position_size = user_data['margin_usd'].max()
+        
+        # Margin preferences
+        isolated_margin_pct = user_data[user_data['margin_type'] == 'Isolated'].shape[0] / total_trades if total_trades > 0 else 0
+        
+        # Calculate trading style indicators
+        # Scalper: Many trades, small position sizes, short timeframes
+        # Swing trader: Fewer trades, larger position sizes
+        # Day trader: Moderate number of trades, closes positions daily
+        scalper_score = 0
+        swing_trader_score = 0
+        day_trader_score = 0
+        
+        if avg_trades_per_day > 5:
+            scalper_score += 1
+        if avg_position_size < 100:
+            scalper_score += 1
+        
+        if avg_trades_per_day < 2:
+            swing_trader_score += 1
+        if avg_position_size > 500:
+            swing_trader_score += 1
+        
+        if 2 <= avg_trades_per_day <= 5:
+            day_trader_score += 1
+        
+        # Analyze order type usage
+        uses_tp_sl = (tp_orders + sl_orders) / total_trades if total_trades > 0 else 0
+        
+        # Account for position open duration
+        # Compute average time positions are held (for positions that are opened and closed)
+        open_longs = user_data[user_data['trade_type'] == 'Open Long']
+        close_longs = user_data[user_data['trade_type'] == 'Close Long']
+        open_shorts = user_data[user_data['trade_type'] == 'Open Short']
+        close_shorts = user_data[user_data['trade_type'] == 'Close Short']
+        
+        # Determine primary trading style
+        trading_styles = {
+            "Scalper": scalper_score,
+            "Swing Trader": swing_trader_score,
+            "Day Trader": day_trader_score
         }
-    except Exception as e:
-        # Log the error but return gracefully
-        print(f"Error processing PNL for user {user_id} on {pair_name}: {e}")
-        return {"pnl": 0, "trades": 0}
+        primary_style = max(trading_styles, key=trading_styles.get)
+        
+        # Create user metrics dictionary
+        user_metric = {
+            'user_id': user_id,
+            'wallet_address': wallet_address,
+            'total_trades': total_trades,
+            'first_trade': first_trade,
+            'last_trade': last_trade,
+            'days_trading': (last_trade - first_trade).days,
+            'total_pnl': total_pnl,
+            'total_fee': total_fee,
+            'net_pnl': net_pnl,
+            'win_trades': win_trades,
+            'loss_trades': loss_trades,
+            'win_rate': win_rate,
+            'long_trades': long_trades,
+            'short_trades': short_trades,
+            'long_pct': long_pct,
+            'active_orders': active_orders,
+            'tp_orders': tp_orders,
+            'sl_orders': sl_orders,
+            'liq_orders': liq_orders,
+            'avg_trades_per_day': avg_trades_per_day,
+            'avg_leverage': avg_leverage,
+            'max_leverage': max_leverage,
+            'unique_pairs': unique_pairs,
+            'most_traded_pair': most_traded_pair,
+            'avg_position_size': avg_position_size,
+            'max_position_size': max_position_size,
+            'isolated_margin_pct': isolated_margin_pct,
+            'uses_tp_sl': uses_tp_sl,
+            'primary_style': primary_style,
+            'scalper_score': scalper_score,
+            'swing_trader_score': swing_trader_score,
+            'day_trader_score': day_trader_score
+        }
+        
+        user_metrics.append(user_metric)
+    
+    return pd.DataFrame(user_metrics)
 
 @st.cache_data(ttl=600)
-def fetch_user_metadata(user_id):
-    """Fetch metadata about a user"""
-    query = f"""
-    SELECT 
-        MIN(created_at) as first_trade_date,
-        TO_CHAR(MIN(created_at), 'YYYY-MM-DD') as first_trade_date_str,
-        COUNT(*) as all_time_trades,
-        SUM(ABS("deal_size" * "deal_price")) as all_time_volume
-    FROM 
-        "public"."trade_fill_fresh"
-    WHERE 
-        "taker_account_id" = '{user_id}'
-        AND "taker_way" IN (1, 2, 3, 4)
-    """
+def analyze_user_trading_patterns(df, user_id):
+    """Analyze detailed trading patterns for a specific user"""
+    if df.empty:
+        return {}
     
-    try:
-        engine = get_database_connection()
-        if not engine:
-            return {
-                "first_trade_date": "Unknown",
-                "all_time_trades": 0,
-                "all_time_volume": 0,
-                "account_age_days": 0
-            }
-            
-        df = pd.read_sql(text(query), engine)
-        
-        if df.empty:
-            return {
-                "first_trade_date": "Unknown",
-                "all_time_trades": 0,
-                "all_time_volume": 0,
-                "account_age_days": 0
-            }
-        
-        first_trade = df.iloc[0]['first_trade_date']
-        if first_trade:
-            account_age = (now_utc - first_trade).days
+    user_data = df[df['user_id'] == user_id]
+    if user_data.empty:
+        return {}
+    
+    # Trading time patterns
+    hour_distribution = user_data['trade_hour'].value_counts().sort_index()
+    day_distribution = user_data['trade_day'].value_counts()
+    
+    # Pair preferences over time
+    pair_over_time = user_data.groupby(['trade_date', 'pair_name']).size().unstack(fill_value=0)
+    
+    # PNL analysis
+    pnl_over_time = user_data.groupby('trade_date')['pnl_usd'].sum()
+    cumulative_pnl = pnl_over_time.cumsum()
+    
+    # Win/loss streaks
+    is_win = user_data['is_win'].astype(int).values
+    is_loss = user_data['is_loss'].astype(int).values
+    
+    win_streaks = []
+    loss_streaks = []
+    
+    current_win_streak = 0
+    current_loss_streak = 0
+    
+    for win, loss in zip(is_win, is_loss):
+        if win:
+            current_win_streak += 1
+            if current_loss_streak > 0:
+                loss_streaks.append(current_loss_streak)
+                current_loss_streak = 0
+        elif loss:
+            current_loss_streak += 1
+            if current_win_streak > 0:
+                win_streaks.append(current_win_streak)
+                current_win_streak = 0
         else:
-            account_age = 0
-            
-        return {
-            "first_trade_date": df.iloc[0]['first_trade_date_str'],
-            "all_time_trades": int(df.iloc[0]['all_time_trades']),
-            "all_time_volume": float(df.iloc[0]['all_time_volume']),
-            "account_age_days": account_age
-        }
-    except Exception as e:
-        print(f"Error fetching metadata for user {user_id}: {e}")
-        return {
-            "first_trade_date": "Unknown",
-            "all_time_trades": 0,
-            "all_time_volume": 0,
-            "account_age_days": 0
-        }
-
-# --- LOAD INITIAL DATA ---
-with st.spinner("Loading trading pairs and users..."):
-    all_pairs = fetch_all_pairs()
-    top_users = fetch_top_users(limit=100)
+            # Neither win nor loss (e.g., breakeven)
+            if current_win_streak > 0:
+                win_streaks.append(current_win_streak)
+                current_win_streak = 0
+            if current_loss_streak > 0:
+                loss_streaks.append(current_loss_streak)
+                current_loss_streak = 0
+    
+    # Add the last streaks if they exist
+    if current_win_streak > 0:
+        win_streaks.append(current_win_streak)
+    if current_loss_streak > 0:
+        loss_streaks.append(current_loss_streak)
+    
+    max_win_streak = max(win_streaks) if win_streaks else 0
+    max_loss_streak = max(loss_streaks) if loss_streaks else 0
+    avg_win_streak = sum(win_streaks) / len(win_streaks) if win_streaks else 0
+    avg_loss_streak = sum(loss_streaks) / len(loss_streaks) if loss_streaks else 0
+    
+    # Leverage patterns
+    leverage_over_time = user_data.groupby('trade_date')['leverage'].mean()
+    
+    # Position size patterns
+    position_size_over_time = user_data.groupby('trade_date')['margin_usd'].mean()
+    
+    # Order type usage over time
+    order_types_over_time = user_data.groupby(['trade_date', 'order_type']).size().unstack(fill_value=0)
+    
+    # Risk management patterns
+    # Analyze how user manages risk - TP/SL usage vs manual closing
+    tp_sl_usage = user_data.groupby('trade_date')['order_type'].apply(
+        lambda x: (x == 'Take Profit').sum() + (x == 'Stop Loss').sum()
+    ) / user_data.groupby('trade_date')['order_type'].count()
+    
+    # Compute average time positions are held (if possible)
+    # This is complex and would require matching open and close orders
+    
+    # Pair rotation - how often user changes trading pairs
+    daily_unique_pairs = user_data.groupby('trade_date')['pair_name'].nunique()
+    
+    # Liquidity analysis - when does user get liquidated
+    liquidations = user_data[user_data['order_type'] == 'Liquidation']
+    liq_by_pair = liquidations['pair_name'].value_counts()
+    
+    # Return analysis results
+    return {
+        'hour_distribution': hour_distribution,
+        'day_distribution': day_distribution,
+        'pair_over_time': pair_over_time,
+        'pnl_over_time': pnl_over_time,
+        'cumulative_pnl': cumulative_pnl,
+        'win_streaks': win_streaks,
+        'loss_streaks': loss_streaks,
+        'max_win_streak': max_win_streak,
+        'max_loss_streak': max_loss_streak,
+        'avg_win_streak': avg_win_streak,
+        'avg_loss_streak': avg_loss_streak,
+        'leverage_over_time': leverage_over_time,
+        'position_size_over_time': position_size_over_time,
+        'order_types_over_time': order_types_over_time,
+        'tp_sl_usage': tp_sl_usage,
+        'daily_unique_pairs': daily_unique_pairs,
+        'liq_by_pair': liq_by_pair
+    }
 
 # --- CONTROL PANEL ---
 st.sidebar.title("Dashboard Controls")
 
-# Trading pair selector
-st.sidebar.subheader("Trading Pairs")
-select_all_pairs = st.sidebar.checkbox("Select All Pairs", value=False)
-
-if select_all_pairs:
-    selected_pairs = all_pairs
-else:
-    selected_pairs = st.sidebar.multiselect(
-        "Select Trading Pairs", 
-        all_pairs,
-        default=all_pairs[:5] if len(all_pairs) > 5 else all_pairs
-    )
-
-# User selector
-st.sidebar.subheader("Users")
-st.sidebar.warning("⚠️ Performance Warning: Selecting more than 10 users may cause slow loading.")
-user_limit = st.sidebar.slider(
-    "Number of Top Users to Show", 
-    min_value=5, 
-    max_value=min(100, len(top_users)), 
-    value=10,  # Reduced default from 25 to 10
-    step=5
+# Date range selector
+st.sidebar.subheader("Time Period")
+date_range = st.sidebar.slider(
+    "Number of days to analyze", 
+    min_value=7, 
+    max_value=365, 
+    value=30,
+    step=1
 )
 
-top_selected_users = top_users[:user_limit]
+# Limit number of trades to fetch
+row_limit = st.sidebar.slider(
+    "Maximum trades to process",
+    min_value=1000,
+    max_value=100000,
+    value=50000,
+    step=1000
+)
 
 # Add a refresh button
 if st.sidebar.button("🔄 Refresh Data"):
     st.cache_data.clear()
     st.experimental_rerun()
 
-# Basic validation
-if not selected_pairs:
-    st.warning("Please select at least one trading pair")
-    st.stop()
-
-if not top_selected_users:
-    st.warning("No active users found for the selected period")
-    st.stop()
-
-# Performance limitation
-max_pairs = 5  # Limit to 5 pairs maximum for performance
-if len(selected_pairs) > max_pairs:
-    st.warning(f"⚠️ For better performance, only the first {max_pairs} pairs will be processed.")
-    limited_pairs = selected_pairs[:max_pairs]
-else:
-    limited_pairs = selected_pairs
-
-# --- DATA PROCESSING ---
-# Show progress
-progress_bar = st.progress(0)
-status_text = st.empty()
-
-# Get time boundaries
-time_boundaries = get_time_boundaries()
-
-# Initialize data structure
-results = {}
-periods = ["today", "yesterday", "day_before_yesterday", "this_week", "this_month", "all_time"]
-
-# Process data - simpler sequential approach for reliability
-total_combinations = len(top_selected_users) * len(limited_pairs) * len(periods) + len(top_selected_users)
-processed_combinations = 0
-
-# First fetch user metadata since it doesn't depend on pairs
-for i, user_id in enumerate(top_selected_users):
-    status_text.text(f"Fetching metadata for user {user_id}...")
+# Fetch the data
+with st.spinner("Loading trading data..."):
+    df = fetch_trading_data(date_range, row_limit)
+    if df.empty:
+        st.warning("No trading data found for the selected period.")
+        st.stop()
     
-    if user_id not in results:
-        results[user_id] = {
-            "user_id": user_id,
-            "metadata": fetch_user_metadata(user_id),
-            "pairs": {}
-        }
+    user_metrics_df = calculate_user_metrics(df)
+    if user_metrics_df.empty:
+        st.warning("No user metrics could be calculated.")
+        st.stop()
     
-    processed_combinations += 1
-    # Use float to avoid integer division issues
-    progress = float(processed_combinations) / float(total_combinations)
-    progress_bar.progress(progress)
-
-# Then process each user-pair combination
-for user_id in top_selected_users:
-    for pair_name in limited_pairs:
-        status_text.text(f"Processing {user_id} - {pair_name}")
-        
-        if pair_name not in results[user_id]["pairs"]:
-            results[user_id]["pairs"][pair_name] = {}
-        
-        # Process each time period for this user-pair combination
-        for period in periods:
-            start_time = time_boundaries[period]["start"]
-            end_time = time_boundaries[period]["end"]
-            
-            # Fetch PNL data with properly memoized function
-            period_data = fetch_user_pnl_for_period(user_id, pair_name, start_time, end_time)
-            
-            # Store results
-            results[user_id]["pairs"][pair_name][period] = period_data
-            
-            # Update progress (carefully with float division)
-            processed_combinations += 1
-            progress = float(processed_combinations) / float(total_combinations)
-            progress_bar.progress(progress)
-
-# Final progress update
-progress_bar.progress(1.0)
-status_text.text(f"Processed {len(results)} users across {len(limited_pairs)} pairs")
-
-# Calculate totals for each user and period
-for user_id in results:
-    for period in periods:
-        results[user_id][f"total_{period}_pnl"] = sum(
-            results[user_id]["pairs"][pair][period]["pnl"] 
-            for pair in results[user_id]["pairs"]
-        )
-        results[user_id][f"total_{period}_trades"] = sum(
-            results[user_id]["pairs"][pair][period]["trades"] 
-            for pair in results[user_id]["pairs"]
-        )
-
-# Create DataFrames for display
-matrix_rows = []
-for user_id, user_data in results.items():
-    row = {
-        'User ID': user_id,
-        'Account Age (days)': user_data["metadata"]["account_age_days"],
-        'First Trade': user_data["metadata"]["first_trade_date"],
-        'All Time Volume': user_data["metadata"]["all_time_volume"],
-        'Today PNL': user_data["total_today_pnl"],
-        'Today Trades': user_data["total_today_trades"],
-        'Yesterday PNL': user_data["total_yesterday_pnl"],
-        'Yesterday Trades': user_data["total_yesterday_trades"],
-        'Day Before Yesterday PNL': user_data["total_day_before_yesterday_pnl"],
-        'Day Before Yesterday Trades': user_data["total_day_before_yesterday_trades"],
-        'Week PNL': user_data["total_this_week_pnl"],
-        'Week Trades': user_data["total_this_week_trades"],
-        'Month PNL': user_data["total_this_month_pnl"],
-        'Month Trades': user_data["total_this_month_trades"],
-        'All Time PNL': user_data["total_all_time_pnl"],
-        'All Time Trades': user_data["total_all_time_trades"]
-    }
-    matrix_rows.append(row)
-
-user_matrix_df = pd.DataFrame(matrix_rows)
-
-# Create a DataFrame for per-pair analysis
-pair_rows = []
-for user_id, user_data in results.items():
-    for pair_name, pair_data in user_data["pairs"].items():
-        row = {
-            'User ID': user_id,
-            'Trading Pair': pair_name,
-            'Today PNL': pair_data["today"]["pnl"],
-            'Today Trades': pair_data["today"]["trades"],
-            'Yesterday PNL': pair_data["yesterday"]["pnl"],
-            'Yesterday Trades': pair_data["yesterday"]["trades"],
-            'Day Before Yesterday PNL': pair_data["day_before_yesterday"]["pnl"],
-            'Day Before Yesterday Trades': pair_data["day_before_yesterday"]["trades"],
-            'Week PNL': pair_data["this_week"]["pnl"],
-            'Week Trades': pair_data["this_week"]["trades"],
-            'Month PNL': pair_data["this_month"]["pnl"],
-            'Month Trades': pair_data["this_month"]["trades"],
-            'All Time PNL': pair_data["all_time"]["pnl"],
-            'All Time Trades': pair_data["all_time"]["trades"]
-        }
-        pair_rows.append(row)
-
-user_pair_df = pd.DataFrame(pair_rows)
-
-# Calculate additional metrics for analysis
-if not user_matrix_df.empty:
-    user_matrix_df['Avg PNL/Trade (All Time)'] = (
-        user_matrix_df['All Time PNL'] / user_matrix_df['All Time Trades']
-    ).replace([np.inf, -np.inf, np.nan], 0)
-    
-    user_matrix_df['Week PNL/Trade'] = (
-        user_matrix_df['Week PNL'] / user_matrix_df['Week Trades']
-    ).replace([np.inf, -np.inf, np.nan], 0)
-    
-    user_matrix_df['Daily Avg PNL (Week)'] = user_matrix_df['Week PNL'] / 7
-    user_matrix_df['Avg Daily Trades (Week)'] = user_matrix_df['Week Trades'] / 7
-    
-    # Sort by Today's PNL (descending)
-    user_matrix_df = user_matrix_df.sort_values(by='Today PNL', ascending=False)
-
-# Function to color cells based on PNL value
-def color_pnl_cells(val):
-    """Color cells based on PNL value"""
-    if pd.isna(val) or val == 0:
-        return 'background-color: #f5f5f5; color: #666666;'  # Grey for missing/zero
-    elif val < -1000:  # Large negative PNL (loss) - red
-        return 'background-color: rgba(255, 0, 0, 0.9); color: white'
-    elif val < 0:  # Small negative PNL (loss) - light red
-        intensity = max(0, min(255, int(255 * abs(val) / 1000)))
-        return f'background-color: rgba(255, {180-intensity}, {180-intensity}, 0.7); color: black'
-    elif val < 1000:  # Small positive PNL (profit) - light green
-        intensity = max(0, min(255, int(255 * val / 1000)))
-        return f'background-color: rgba({180-intensity}, 255, {180-intensity}, 0.7); color: black'
-    else:  # Large positive PNL (profit) - green
-        return 'background-color: rgba(0, 200, 0, 0.8); color: black'
+    # Sort users by trading volume
+    user_metrics_df = user_metrics_df.sort_values(by='total_trades', ascending=False)
 
 # --- CREATE DASHBOARD TABS ---
-tab1, tab2, tab3 = st.tabs([
-    "User PNL Matrix",
-    "User Details",
-    "Pair Analysis"
+tab1, tab2, tab3, tab4 = st.tabs([
+    "Trading Style Overview",
+    "User Comparison",
+    "User Detail Analysis",
+    "Trading Pairs Analysis"
 ])
 
-# Tab 1: User PNL Matrix
+# Tab 1: Trading Style Overview
 with tab1:
-    st.header("User PNL Overview Matrix")
+    st.header("Trading Style Overview")
     
-    # Add notice about limited data
-    if len(selected_pairs) > len(limited_pairs):
-        st.info(f"Showing data for {len(limited_pairs)} out of {len(selected_pairs)} selected pairs. For full analysis, select fewer pairs.")
+    # Display basic statistics
+    col1, col2, col3, col4 = st.columns(4)
     
-    if user_matrix_df.empty:
-        st.warning("No data available for selected users and pairs")
+    with col1:
+        st.metric("Total Users", f"{len(user_metrics_df)}")
+    
+    with col2:
+        st.metric("Total Trades", f"{df.shape[0]:,}")
+    
+    with col3:
+        avg_win_rate = user_metrics_df['win_rate'].mean()
+        st.metric("Avg Win Rate", f"{avg_win_rate:.2%}")
+    
+    with col4:
+        total_net_pnl = user_metrics_df['net_pnl'].sum()
+        st.metric("Total Net PNL", f"${total_net_pnl:,.2f}")
+    
+    # Trading style distribution
+    st.subheader("Trading Style Distribution")
+    
+    style_counts = user_metrics_df['primary_style'].value_counts()
+    
+    fig = px.pie(
+        values=style_counts.values,
+        names=style_counts.index,
+        title="Distribution of Trading Styles",
+        color_discrete_sequence=px.colors.qualitative.Pastel
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Win rate distribution
+    st.subheader("Win Rate Distribution")
+    
+    fig = px.histogram(
+        user_metrics_df,
+        x='win_rate',
+        nbins=20,
+        labels={'win_rate': 'Win Rate', 'count': 'Number of Users'},
+        title="Distribution of User Win Rates",
+        color_discrete_sequence=['#3498db']
+    )
+    
+    fig.update_layout(xaxis=dict(tickformat=".0%"))
+    
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Long vs Short preference
+    st.subheader("Long vs Short Trading Preference")
+    
+    fig = px.histogram(
+        user_metrics_df,
+        x='long_pct',
+        nbins=20,
+        labels={'long_pct': 'Long Position Percentage', 'count': 'Number of Users'},
+        title="Distribution of Long vs Short Preference",
+        color_discrete_sequence=['#2ecc71']
+    )
+    
+    fig.update_layout(xaxis=dict(tickformat=".0%"))
+    
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # TP/SL usage distribution
+    st.subheader("Take Profit / Stop Loss Usage")
+    
+    fig = px.histogram(
+        user_metrics_df,
+        x='uses_tp_sl',
+        nbins=20,
+        labels={'uses_tp_sl': 'TP/SL Usage Rate', 'count': 'Number of Users'},
+        title="Distribution of TP/SL Usage",
+        color_discrete_sequence=['#e74c3c']
+    )
+    
+    fig.update_layout(xaxis=dict(tickformat=".0%"))
+    
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Leverage distribution
+    st.subheader("Leverage Usage")
+    
+    fig = px.histogram(
+        user_metrics_df,
+        x='avg_leverage',
+        nbins=20,
+        labels={'avg_leverage': 'Average Leverage', 'count': 'Number of Users'},
+        title="Distribution of Average Leverage Usage",
+        color_discrete_sequence=['#9b59b6']
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Position size distribution
+    st.subheader("Position Size Distribution")
+    
+    fig = px.histogram(
+        user_metrics_df,
+        x='avg_position_size',
+        nbins=20,
+        labels={'avg_position_size': 'Average Position Size (USD)', 'count': 'Number of Users'},
+        title="Distribution of Average Position Sizes",
+        color_discrete_sequence=['#f39c12']
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Most popular trading pairs
+    st.subheader("Most Popular Trading Pairs")
+    
+    pair_counts = df['pair_name'].value_counts().reset_index()
+    pair_counts.columns = ['Pair', 'Trade Count']
+    
+    fig = px.bar(
+        pair_counts.head(10),
+        x='Pair',
+        y='Trade Count',
+        title="Top 10 Most Traded Pairs",
+        color='Trade Count',
+        color_continuous_scale='Viridis'
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+
+# Tab 2: User Comparison
+with tab2:
+    st.header("User Comparison")
+    
+    # Filter metrics
+    min_trades = st.slider(
+        "Minimum number of trades", 
+        min_value=1, 
+        max_value=100, 
+        value=10,
+        step=1
+    )
+    
+    filtered_users = user_metrics_df[user_metrics_df['total_trades'] >= min_trades].copy()
+    
+    if filtered_users.empty:
+        st.warning(f"No users with at least {min_trades} trades.")
     else:
-        # Filter options
-        col1, col2, col3 = st.columns(3)
+        # Top users by various metrics
+        st.subheader("Top Performers by PNL")
         
-        with col1:
-            min_trades = st.number_input("Min Trades", value=0, min_value=0)
+        # Calculate PNL per trade for fair comparison
+        filtered_users['pnl_per_trade'] = filtered_users['net_pnl'] / filtered_users['total_trades']
         
-        with col2:
-            show_only = st.selectbox(
-                "Show Users", 
-                ["All", "Profitable Today", "Unprofitable Today"]
-            )
+        # Sort by net PNL
+        top_pnl_users = filtered_users.sort_values(by='net_pnl', ascending=False).head(10)
         
-        with col3:
-            sort_by = st.selectbox(
-                "Sort By", 
-                ["Today PNL", "Week PNL", "All Time PNL", "All Time Volume"]
-            )
+        fig = px.bar(
+            top_pnl_users,
+            x='user_id',
+            y='net_pnl',
+            title="Top 10 Users by Net PNL",
+            labels={'user_id': 'User ID', 'net_pnl': 'Net PNL (USD)'},
+            color='win_rate',
+            color_continuous_scale='RdYlGn',
+            hover_data=['total_trades', 'win_rate', 'avg_leverage', 'primary_style']
+        )
         
-        # Apply filters
-        filtered_df = user_matrix_df.copy()
+        st.plotly_chart(fig, use_container_width=True)
         
-        if min_trades > 0:
-            filtered_df = filtered_df[filtered_df['All Time Trades'] >= min_trades]
+        # Top users by win rate
+        st.subheader("Top Users by Win Rate")
         
-        if show_only == "Profitable Today":
-            filtered_df = filtered_df[filtered_df['Today PNL'] > 0]
-        elif show_only == "Unprofitable Today":
-            filtered_df = filtered_df[filtered_df['Today PNL'] < 0]
+        top_winrate_users = filtered_users.sort_values(by='win_rate', ascending=False).head(10)
         
-        # Sort the DataFrame
-        filtered_df = filtered_df.sort_values(by=sort_by, ascending=False)
+        fig = px.bar(
+            top_winrate_users,
+            x='user_id',
+            y='win_rate',
+            title="Top 10 Users by Win Rate",
+            labels={'user_id': 'User ID', 'win_rate': 'Win Rate'},
+            color='net_pnl',
+            color_continuous_scale='RdYlGn',
+            hover_data=['total_trades', 'net_pnl', 'avg_leverage', 'primary_style']
+        )
         
-        # Display columns
-        display_cols = [
-            'User ID', 'Today PNL', 'Yesterday PNL', 'Week PNL', 
-            'Month PNL', 'All Time PNL', 'Week PNL/Trade', 'All Time Trades'
+        fig.update_layout(yaxis=dict(tickformat=".0%"))
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Trading style comparison
+        st.subheader("Trading Style Performance Comparison")
+        
+        style_performance = filtered_users.groupby('primary_style').agg({
+            'user_id': 'count',
+            'win_rate': 'mean',
+            'pnl_per_trade': 'mean',
+            'avg_leverage': 'mean',
+            'avg_position_size': 'mean',
+            'uses_tp_sl': 'mean'
+        }).reset_index()
+        
+        style_performance.columns = [
+            'Trading Style', 'User Count', 'Avg Win Rate', 
+            'Avg PNL per Trade', 'Avg Leverage', 'Avg Position Size', 'TP/SL Usage'
         ]
         
-        display_df = filtered_df[display_cols].copy()
+        # Display as a table
+        st.dataframe(
+            style_performance.style.format({
+                'Avg Win Rate': '{:.2%}',
+                'Avg PNL per Trade': '${:.2f}',
+                'Avg Leverage': '{:.2f}x',
+                'Avg Position Size': '${:.2f}',
+                'TP/SL Usage': '{:.2%}'
+            }),
+            use_container_width=True
+        )
         
-        # Apply styling
-        styled_df = display_df.style.applymap(
-            color_pnl_cells, 
-            subset=['Today PNL', 'Yesterday PNL', 'Week PNL', 'Month PNL', 'All Time PNL', 'Week PNL/Trade']
-        ).format({
-            'Today PNL': '${:,.2f}',
-            'Yesterday PNL': '${:,.2f}',
-            'Week PNL': '${:,.2f}',
-            'Month PNL': '${:,.2f}',
-            'All Time PNL': '${:,.2f}',
-            'Week PNL/Trade': '${:,.2f}',
-            'All Time Trades': '{:,}'
-        })
+        # Scatter plot of win rate vs PNL
+        st.subheader("Win Rate vs. PNL per Trade")
         
-        # Display the styled DataFrame
-        st.dataframe(styled_df, height=600, use_container_width=True)
+        fig = px.scatter(
+            filtered_users,
+            x='win_rate',
+            y='pnl_per_trade',
+            color='primary_style',
+            size='total_trades',
+            hover_data=['user_id', 'total_trades', 'avg_leverage'],
+            labels={
+                'win_rate': 'Win Rate',
+                'pnl_per_trade': 'PNL per Trade (USD)',
+                'primary_style': 'Trading Style'
+            },
+            title="Relationship Between Win Rate and PNL per Trade"
+        )
         
-        # Summary stats
-        st.subheader("Summary Statistics")
-        col1, col2, col3, col4 = st.columns(4)
+        fig.update_layout(xaxis=dict(tickformat=".0%"))
         
-        with col1:
-            total_today_pnl = filtered_df['Today PNL'].sum()
-            profitable_users_today = len(filtered_df[filtered_df['Today PNL'] > 0])
-            st.metric(
-                "Total PNL Today", 
-                f"${total_today_pnl:,.2f}",
-                f"{profitable_users_today}/{len(filtered_df)} profitable"
-            )
+        st.plotly_chart(fig, use_container_width=True)
         
-        with col2:
-            total_yesterday_pnl = filtered_df['Yesterday PNL'].sum()
-            st.metric(
-                "Total PNL Yesterday", 
-                f"${total_yesterday_pnl:,.2f}"
-            )
+        # Leverage vs PNL
+        st.subheader("Leverage vs. PNL per Trade")
         
-        with col3:
-            total_week_pnl = filtered_df['Week PNL'].sum()
-            st.metric(
-                "Total Week PNL", 
-                f"${total_week_pnl:,.2f}"
-            )
+        fig = px.scatter(
+            filtered_users,
+            x='avg_leverage',
+            y='pnl_per_trade',
+            color='primary_style',
+            size='total_trades',
+            hover_data=['user_id', 'win_rate', 'total_trades'],
+            labels={
+                'avg_leverage': 'Average Leverage',
+                'pnl_per_trade': 'PNL per Trade (USD)',
+                'primary_style': 'Trading Style'
+            },
+            title="Relationship Between Leverage and PNL per Trade"
+        )
         
-        with col4:
-            total_all_time_pnl = filtered_df['All Time PNL'].sum()
-            st.metric(
-                "All Time Total PNL", 
-                f"${total_all_time_pnl:,.2f}"
-            )
+        st.plotly_chart(fig, use_container_width=True)
         
-        # Visualization of top performers
-        st.subheader("Top and Bottom Users by PNL Today")
+        # Long vs Short preference and performance
+        st.subheader("Long vs Short Trading Performance")
         
-        # Get top 5 and bottom 5 performers
-        top_5 = filtered_df.nlargest(5, 'Today PNL')
-        bottom_5 = filtered_df.nsmallest(5, 'Today PNL')
+        # Create bins for long percentage
+        filtered_users['long_pct_bin'] = pd.cut(
+            filtered_users['long_pct'],
+            bins=[0, 0.2, 0.4, 0.6, 0.8, 1.0],
+            labels=['0-20%', '20-40%', '40-60%', '60-80%', '80-100%']
+        )
         
-        # Create visualization
-        fig = go.Figure()
+        long_short_perf = filtered_users.groupby('long_pct_bin').agg({
+            'user_id': 'count',
+            'win_rate': 'mean',
+            'pnl_per_trade': 'mean'
+        }).reset_index()
         
-        # Top performers
-        fig.add_trace(go.Bar(
-            x=top_5['User ID'],
-            y=top_5['Today PNL'],
-            name='Top Performers',
-            marker_color='green'
-        ))
+        long_short_perf.columns = ['Long Trade %', 'User Count', 'Avg Win Rate', 'Avg PNL per Trade']
         
-        # Bottom performers
-        fig.add_trace(go.Bar(
-            x=bottom_5['User ID'],
-            y=bottom_5['Today PNL'],
-            name='Bottom Performers',
-            marker_color='red'
-        ))
-        
-        fig.update_layout(
-            title="Top and Bottom Users by PNL Today",
-            xaxis_title="User ID",
-            yaxis_title="PNL (USD)",
-            barmode='group',
-            height=500
+        fig = px.bar(
+            long_short_perf,
+            x='Long Trade %',
+            y='Avg PNL per Trade',
+            title="PNL Performance by Long/Short Preference",
+            color='Avg Win Rate',
+            color_continuous_scale='RdYlGn',
+            text='User Count'
         )
         
         st.plotly_chart(fig, use_container_width=True)
 
-# Tab 2: User Details
-with tab2:
-    st.header("User Performance Details")
+# Tab 3: User Detail Analysis
+with tab3:
+    st.header("User Detail Analysis")
     
-    # User selector
-    if not user_matrix_df.empty:
-        selected_user_id = st.selectbox(
-            "Select User to Analyze", 
-            user_matrix_df['User ID'].tolist()
+    # User selection
+    selected_user = st.selectbox(
+        "Select User to Analyze",
+        options=user_metrics_df['user_id'].tolist(),
+        format_func=lambda x: f"{x} ({user_metrics_df[user_metrics_df['user_id'] == x]['total_trades'].values[0]} trades)"
+    )
+    
+    # Analyze user patterns
+    user_patterns = analyze_user_trading_patterns(df, selected_user)
+    
+    if not user_patterns:
+        st.warning(f"No detailed data available for user {selected_user}")
+    else:
+        # Get user metrics
+        user_metric = user_metrics_df[user_metrics_df['user_id'] == selected_user].iloc[0]
+        
+        # User overview
+        st.subheader("User Overview")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("Total Trades", f"{user_metric['total_trades']:,}")
+        
+        with col2:
+            st.metric("Net PNL", f"${user_metric['net_pnl']:,.2f}")
+        
+        with col3:
+            st.metric("Win Rate", f"{user_metric['win_rate']:.2%}")
+        
+        with col4:
+            st.metric("Avg Leverage", f"{user_metric['avg_leverage']:.2f}x")
+        
+        # Second row of metrics
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("Trading Style", f"{user_metric['primary_style']}")
+        
+        with col2:
+            st.metric("Long/Short", f"{user_metric['long_pct']:.0%} Long")
+        
+        with col3:
+            st.metric("TP/SL Usage", f"{user_metric['uses_tp_sl']:.2%}")
+        
+        with col4:
+            st.metric("Avg Position Size", f"${user_metric['avg_position_size']:,.2f}")
+        
+        # PNL over time
+        st.subheader("PNL Performance Over Time")
+        
+        fig = go.Figure()
+        
+        fig.add_trace(go.Scatter(
+            x=user_patterns['cumulative_pnl'].index,
+            y=user_patterns['cumulative_pnl'].values,
+            mode='lines',
+            name='Cumulative PNL',
+            line=dict(color='green' if user_patterns['cumulative_pnl'].iloc[-1] > 0 else 'red')
+        ))
+        
+        fig.add_trace(go.Bar(
+            x=user_patterns['pnl_over_time'].index,
+            y=user_patterns['pnl_over_time'].values,
+            name='Daily PNL',
+            marker_color=['green' if x > 0 else 'red' for x in user_patterns['pnl_over_time'].values]
+        ))
+        
+        fig.update_layout(
+            title=f"PNL Performance for User {selected_user}",
+            xaxis_title="Date",
+            yaxis_title="PNL (USD)"
         )
         
-        # Filter for selected user
-        user_pairs_df = user_pair_df[user_pair_df['User ID'] == selected_user_id].copy()
+        st.plotly_chart(fig, use_container_width=True)
         
-        if user_pairs_df.empty:
-            st.warning(f"No data available for user {selected_user_id}")
+        # Trading activity patterns
+        st.subheader("Trading Activity Patterns")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Hour distribution
+            fig = px.bar(
+                x=user_patterns['hour_distribution'].index,
+                y=user_patterns['hour_distribution'].values,
+                labels={'x': 'Hour of Day (SG Time)', 'y': 'Number of Trades'},
+                title="Trading Activity by Hour",
+                color=user_patterns['hour_distribution'].values,
+                color_continuous_scale='Viridis'
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            # Day distribution
+            days_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+            day_counts = pd.Series(0, index=days_order)
+            for day in user_patterns['day_distribution'].index:
+                if day in day_counts.index:
+                    day_counts[day] = user_patterns['day_distribution'][day]
+            
+            fig = px.bar(
+                x=day_counts.index,
+                y=day_counts.values,
+                labels={'x': 'Day of Week', 'y': 'Number of Trades'},
+                title="Trading Activity by Day of Week",
+                color=day_counts.values,
+                color_continuous_scale='Viridis'
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+        
+        # Order type usage
+        st.subheader("Order Type Usage")
+        
+        if 'order_types_over_time' in user_patterns and not user_patterns['order_types_over_time'].empty:
+            # Sum up order types
+            order_type_sums = user_patterns['order_types_over_time'].sum()
+            
+            fig = px.pie(
+                values=order_type_sums.values,
+                names=order_type_sums.index,
+                title="Order Type Distribution",
+                color_discrete_sequence=px.colors.qualitative.Pastel
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Order types over time
+            fig = px.bar(
+                user_patterns['order_types_over_time'],
+                labels={'value': 'Number of Orders', 'variable': 'Order Type'},
+                title="Order Types Over Time",
+                barmode='stack'
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
         else:
-            # User metadata
-            user_metadata = results[selected_user_id]["metadata"]
+            st.info("No order type data available for this user.")
+        
+        # Trading pairs analysis
+        st.subheader("Trading Pairs Analysis")
+        
+        # Extract user's trading data
+        user_trades = df[df['user_id'] == selected_user]
+        
+        # Get pair counts
+        pair_counts = user_trades['pair_name'].value_counts().reset_index()
+        pair_counts.columns = ['Pair', 'Trade Count']
+        
+        fig = px.bar(
+            pair_counts.head(10),
+            x='Pair',
+            y='Trade Count',
+            title="Most Traded Pairs",
+            color='Trade Count',
+            color_continuous_scale='Viridis'
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # PNL by pair
+        pair_pnl = user_trades.groupby('pair_name')['pnl_usd'].sum().reset_index()
+        pair_pnl.columns = ['Pair', 'Total PNL']
+        pair_pnl = pair_pnl.sort_values(by='Total PNL', ascending=False)
+        
+        fig = px.bar(
+            pair_pnl.head(10),
+            x='Pair',
+            y='Total PNL',
+            title="PNL by Trading Pair",
+            color='Total PNL',
+            color_continuous_scale='RdBu',
+            color_continuous_midpoint=0
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Win rate by pair
+        pair_wins = user_trades.groupby('pair_name')['is_win'].sum().reset_index()
+        pair_trades = user_trades.groupby('pair_name').size().reset_index(name='Total Trades')
+        
+        pair_winrate = pd.merge(pair_wins, pair_trades, on='pair_name')
+        pair_winrate['Win Rate'] = pair_winrate['is_win'] / pair_winrate['Total Trades']
+        pair_winrate = pair_winrate.sort_values(by='Total Trades', ascending=False)
+        
+        # Filter pairs with at least 5 trades
+        pair_winrate = pair_winrate[pair_winrate['Total Trades'] >= 5]
+        
+        if not pair_winrate.empty:
+            fig = px.bar(
+                pair_winrate.head(10),
+                x='pair_name',
+                y='Win Rate',
+                title="Win Rate by Trading Pair (Min. 5 Trades)",
+                color='Win Rate',
+                color_continuous_scale='RdYlGn',
+                text='Total Trades'
+            )
             
-            # Display user info
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("Account Age", f"{user_metadata['account_age_days']} days")
-            with col2:
-                st.metric("First Trade Date", user_metadata['first_trade_date'])
-            with col3:
-                st.metric("Total Trades", f"{user_metadata['all_time_trades']:,}")
-            with col4:
-                st.metric("Trading Volume", f"${user_metadata['all_time_volume']:,.2f}")
+            fig.update_layout(yaxis=dict(tickformat=".0%"))
             
-            # Display pair performance
-            st.subheader(f"Trading Pairs Performance for User {selected_user_id}")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Not enough data to analyze win rates by pair.")
+        
+        # Risk management analysis
+        st.subheader("Risk Management Analysis")
+        
+        # Leverage usage over time
+        if 'leverage_over_time' in user_patterns and not user_patterns['leverage_over_time'].empty:
+            fig = px.line(
+                x=user_patterns['leverage_over_time'].index,
+                y=user_patterns['leverage_over_time'].values,
+                labels={'x': 'Date', 'y': 'Average Leverage'},
+                title="Leverage Usage Over Time"
+            )
             
-            # Sort by All Time PNL
-            user_pairs_df = user_pairs_df.sort_values(by='All Time PNL', ascending=False)
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No leverage data available for this user.")
+        
+        # Position size over time
+        if 'position_size_over_time' in user_patterns and not user_patterns['position_size_over_time'].empty:
+            fig = px.line(
+                x=user_patterns['position_size_over_time'].index,
+                y=user_patterns['position_size_over_time'].values,
+                labels={'x': 'Date', 'y': 'Average Position Size (USD)'},
+                title="Position Size Over Time"
+            )
             
-            # Calculate additional metrics
-            user_pairs_df['All Time PNL/Trade'] = (
-                user_pairs_df['All Time PNL'] / user_pairs_df['All Time Trades']
-            ).replace([np.inf, -np.inf, np.nan], 0)
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No position size data available for this user.")
+        
+        # Streak analysis
+        st.subheader("Win/Loss Streak Analysis")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.metric("Max Win Streak", f"{user_patterns['max_win_streak']}")
+        
+        with col2:
+            st.metric("Max Loss Streak", f"{user_patterns['max_loss_streak']}")
+        
+        # Streak distribution
+        if user_patterns['win_streaks'] or user_patterns['loss_streaks']:
+            win_streak_count = pd.Series(user_patterns['win_streaks']).value_counts().sort_index()
+            loss_streak_count = pd.Series(user_patterns['loss_streaks']).value_counts().sort_index()
             
-            # Display columns
-            display_cols = [
-                'Trading Pair', 'Today PNL', 'Yesterday PNL', 'Week PNL', 
-                'Month PNL', 'All Time PNL', 'All Time Trades', 'All Time PNL/Trade'
-            ]
+            # Combine into a dataframe
+            streak_df = pd.DataFrame({
+                'Win Streak': win_streak_count,
+                'Loss Streak': loss_streak_count
+            }).fillna(0)
             
-            # Apply styling
-            styled_pairs_df = user_pairs_df[display_cols].style.applymap(
-                color_pnl_cells, 
-                subset=['Today PNL', 'Yesterday PNL', 'Week PNL', 'Month PNL', 'All Time PNL', 'All Time PNL/Trade']
-            ).format({
-                'Today PNL': '${:,.2f}',
-                'Yesterday PNL': '${:,.2f}',
-                'Week PNL': '${:,.2f}',
-                'Month PNL': '${:,.2f}',
-                'All Time PNL': '${:,.2f}',
-                'All Time PNL/Trade': '${:,.2f}',
-                'All Time Trades': '{:,}'
-            })
+            fig = px.bar(
+                streak_df,
+                barmode='group',
+                labels={'value': 'Frequency', 'variable': 'Streak Type', 'index': 'Streak Length'},
+                title="Win/Loss Streak Distribution"
+            )
             
-            # Display the styled DataFrame
-            st.dataframe(styled_pairs_df, height=400, use_container_width=True)
-            
-            # Create a visualization of PNL by trading pair
-            st.subheader("PNL by Trading Pair")
-            
-            # Filter out pairs with zero PNL
-            non_zero_pairs = user_pairs_df[user_pairs_df['All Time PNL'] != 0].copy()
-            
-            if not non_zero_pairs.empty:
-                # Select top pairs by absolute PNL
-                top_pairs = non_zero_pairs.reindex(
-                    non_zero_pairs['All Time PNL'].abs().sort_values(ascending=False).index
-                ).head(10)
-                
-                # Create a bar chart
-                fig = px.bar(
-                    top_pairs,
-                    x='Trading Pair',
-                    y=['Today PNL', 'Week PNL', 'All Time PNL'],
-                    title=f"PNL Comparison by Trading Pair for User {selected_user_id}",
-                    barmode='group',
-                    color_discrete_sequence=['#1f77b4', '#2ca02c', '#d62728']
-                )
-                
-                fig.update_layout(
-                    xaxis_title="Trading Pair",
-                    yaxis_title="PNL (USD)",
-                    height=500
-                )
-                
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.info("No non-zero PNL data available for this user.")
-    else:
-        st.warning("No user data available")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No streak data available for this user.")
+        
+        # Trading behavior summary
+        st.subheader("Trading Behavior Summary")
+        
+        # Calculate metrics for trading behavior
+        trading_metrics = {
+            "Trading Style": user_metric['primary_style'],
+            "Win Rate": f"{user_metric['win_rate']:.2%}",
+            "Avg Trades Per Day": f"{user_metric['avg_trades_per_day']:.2f}",
+            "Typical Position Size": f"${user_metric['avg_position_size']:.2f}",
+            "Leverage Usage": f"{user_metric['avg_leverage']:.2f}x",
+            "Long/Short Preference": f"{user_metric['long_pct']:.0%} Long / {1-user_metric['long_pct']:.0%} Short",
+            "TP/SL Usage": f"{user_metric['uses_tp_sl']:.2%}",
+            "Pair Diversity": f"{user_metric['unique_pairs']} different pairs",
+            "Most Traded Pair": user_metric['most_traded_pair'],
+            "Risk Management": "Good" if user_metric['uses_tp_sl'] > 0.5 else "Moderate" if user_metric['uses_tp_sl'] > 0.2 else "Poor",
+            "Liquidations": f"{user_metric['liq_orders']} times"
+        }
+        
+        # Convert to dataframe
+        trading_metrics_df = pd.DataFrame({
+            'Metric': list(trading_metrics.keys()),
+            'Value': list(trading_metrics.values())
+        })
+        
+        st.table(trading_metrics_df)
+        
+        # Trading style recommendations
+        st.subheader("Recommendations")
+        
+        # Generate recommendations based on metrics
+        recommendations = []
+        
+        if user_metric['win_rate'] < 0.4:
+            recommendations.append("Consider improving trade entry criteria to increase win rate.")
+        
+        if user_metric['uses_tp_sl'] < 0.3:
+            recommendations.append("Increase usage of Take Profit and Stop Loss orders for better risk management.")
+        
+        if user_metric['liq_orders'] > 0:
+            recommendations.append(f"Reduce leverage or use wider stop losses to avoid liquidations ({user_metric['liq_orders']} liquidations detected).")
+        
+        if user_metric['avg_leverage'] > 10:
+            recommendations.append("High leverage detected. Consider reducing leverage to manage risk better.")
+        
+        if user_metric['unique_pairs'] < 3:
+            recommendations.append("Consider diversifying to trade more pairs for better opportunities.")
+        
+        if user_metric['long_pct'] > 0.9 or user_metric['long_pct'] < 0.1:
+            recommendations.append("Consider trading both long and short directions for more opportunities.")
+        
+        if not recommendations:
+            recommendations.append("Trading patterns appear solid. Continue with current strategy while managing risk appropriately.")
+        
+        for i, rec in enumerate(recommendations, 1):
+            st.write(f"{i}. {rec}")
 
-# Tab 3: Pair Analysis
-with tab3:
-    st.header("Trading Pair Performance Analysis")
+# Tab 4: Trading Pairs Analysis
+with tab4:
+    st.header("Trading Pairs Analysis")
     
-    # Time period selector for analysis
-    period = st.selectbox(
-        "Time Period for Analysis",
-        ["Today", "Yesterday", "Week", "Month", "All Time"],
-        index=0
-    )
-    
-    # Map selection to data column
-    period_map = {
-        "Today": "Today PNL",
-        "Yesterday": "Yesterday PNL",
-        "Week": "Week PNL",
-        "Month": "Month PNL",
-        "All Time": "All Time PNL"
-    }
-    
-    selected_period = period_map[period]
-    
-    # Create a summary by trading pair
-    pair_summary = user_pair_df.groupby('Trading Pair').agg({
-        'Today PNL': 'sum',
-        'Yesterday PNL': 'sum',
-        'Week PNL': 'sum',
-        'Month PNL': 'sum',
-        'All Time PNL': 'sum',
-        'Today Trades': 'sum',
-        'Yesterday Trades': 'sum',
-        'Week Trades': 'sum',
-        'Month Trades': 'sum',
-        'All Time Trades': 'sum'
-    }).reset_index()
-    
-    # Calculate efficiency metrics
-    pair_summary['PNL/Trade (Today)'] = (
-        pair_summary['Today PNL'] / pair_summary['Today Trades']
-    ).replace([np.inf, -np.inf, np.nan], 0)
-    
-    pair_summary['PNL/Trade (Week)'] = (
-        pair_summary['Week PNL'] / pair_summary['Week Trades']
-    ).replace([np.inf, -np.inf, np.nan], 0)
-    
-    pair_summary['PNL/Trade (All Time)'] = (
-        pair_summary['All Time PNL'] / pair_summary['All Time Trades']
-    ).replace([np.inf, -np.inf, np.nan], 0)
-    
-    # Sort by selected period
-    pair_summary = pair_summary.sort_values(by=selected_period, ascending=False)
-    
-    # Display the pair summary
-    st.subheader(f"Trading Pair Summary ({period})")
-    
-    # Display columns based on period
-    if period == "Today":
-        display_cols = [
-            'Trading Pair', 'Today PNL', 'Today Trades', 'PNL/Trade (Today)', 
-            'Yesterday PNL', 'Week PNL', 'All Time PNL'
-        ]
-    elif period == "Yesterday":
-        display_cols = [
-            'Trading Pair', 'Yesterday PNL', 'Yesterday Trades', 'Today PNL', 
-            'Week PNL', 'All Time PNL'
-        ]
-    elif period == "Week":
-        display_cols = [
-            'Trading Pair', 'Week PNL', 'Week Trades', 'PNL/Trade (Week)', 
-            'Today PNL', 'All Time PNL'
-        ]
-    else:
-        display_cols = [
-            'Trading Pair', selected_period, 'All Time Trades', 'PNL/Trade (All Time)', 
-            'Today PNL', 'Week PNL'
-        ]
-    
-    # Apply styling
-    styled_summary = pair_summary[display_cols].style.applymap(
-        color_pnl_cells, 
-        subset=[col for col in display_cols if 'PNL' in col]
-    ).format({
-        'Today PNL': '${:,.2f}',
-        'Yesterday PNL': '${:,.2f}',
-        'Week PNL': '${:,.2f}',
-        'Month PNL': '${:,.2f}',
-        'All Time PNL': '${:,.2f}',
-        'PNL/Trade (Today)': '${:,.2f}',
-        'PNL/Trade (Week)': '${:,.2f}',
-        'PNL/Trade (All Time)': '${:,.2f}',
-        'Today Trades': '{:,}',
-        'Week Trades': '{:,}',
-        'All Time Trades': '{:,}'
+    # Pair metrics
+    pair_metrics = df.groupby('pair_name').agg({
+        'user_id': pd.Series.nunique,
+        'pnl_usd': ['sum', 'mean'],
+        'leverage': 'mean',
+        'margin_usd': 'mean',
+        'is_win': 'mean'
     })
     
-    st.dataframe(styled_summary, height=400, use_container_width=True)
+    pair_metrics.columns = [
+        'Unique Users', 'Total PNL', 'Avg PNL per Trade',
+        'Avg Leverage', 'Avg Position Size', 'Win Rate'
+    ]
     
-    # Visualization of top pairs
-    st.subheader(f"Top Trading Pairs by PNL ({period})")
+    pair_metrics = pair_metrics.reset_index()
     
-    # Get top and bottom pairs
-    top_pairs = pair_summary.nlargest(5, selected_period)
-    bottom_pairs = pair_summary.nsmallest(5, selected_period)
+    # Sort by trading volume (unique users)
+    pair_metrics = pair_metrics.sort_values(by='Unique Users', ascending=False)
     
-    # Create visualization
-    fig = go.Figure()
-    
-    # Top pairs
-    fig.add_trace(go.Bar(
-        x=top_pairs['Trading Pair'],
-        y=top_pairs[selected_period],
-        name='Top Pairs',
-        marker_color='green'
-    ))
-    
-    # Bottom pairs
-    fig.add_trace(go.Bar(
-        x=bottom_pairs['Trading Pair'],
-        y=bottom_pairs[selected_period],
-        name='Bottom Pairs',
-        marker_color='red'
-    ))
-    
-    fig.update_layout(
-        title=f"Top and Bottom Trading Pairs by PNL ({period})",
-        xaxis_title="Trading Pair",
-        yaxis_title="PNL (USD)",
-        barmode='group',
-        height=500
+    # Pair selection
+    selected_pair = st.selectbox(
+        "Select Trading Pair to Analyze",
+        options=pair_metrics['pair_name'].tolist(),
+        format_func=lambda x: f"{x} ({pair_metrics[pair_metrics['pair_name'] == x]['Unique Users'].values[0]} users)"
     )
     
-    st.plotly_chart(fig, use_container_width=True)
+    # Filter data for selected pair
+    pair_data = df[df['pair_name'] == selected_pair]
     
-    # Create a heatmap showing pair popularity
-    st.subheader("User-Pair Activity Heatmap")
-    
-    # Count number of users per pair
-    pair_user_counts = user_pair_df.groupby('Trading Pair')['User ID'].nunique().reset_index()
-    pair_user_counts.columns = ['Trading Pair', 'User Count']
-    
-    # Sort by count
-    pair_user_counts = pair_user_counts.sort_values(by='User Count', ascending=False)
-    
-    # Create a bar chart
-    fig = px.bar(
-        pair_user_counts,
-        x='Trading Pair',
-        y='User Count',
-        title="Number of Users per Trading Pair",
-        color='User Count',
-        color_continuous_scale='Viridis'
-    )
-    
-    fig.update_layout(
-        xaxis_title="Trading Pair",
-        yaxis_title="Number of Users",
-        height=500
-    )
-    
-    st.plotly_chart(fig, use_container_width=True)
+    if pair_data.empty:
+        st.warning(f"No data available for pair {selected_pair}")
+    else:
+        # Pair overview
+        st.subheader("Pair Overview")
+        
+        pair_metric = pair_metrics[pair_metrics['pair_name'] == selected_pair].iloc[0]
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("Total Trades", f"{len(pair_data):,}")
+        
+        with col2:
+            st.metric("Unique Users", f"{pair_metric['Unique Users']:,}")
+        
+        with col3:
+            st.metric("Win Rate", f"{pair_metric['Win Rate']:.2%}")
+        
+        with col4:
+            st.metric("Total PNL", f"${pair_metric['Total PNL']:,.2f}")
+        
+        # Second row of metrics
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("Avg PNL per Trade", f"${pair_metric['Avg PNL per Trade']:,.2f}")
+        
+        with col2:
+            st.metric("Avg Leverage", f"{pair_metric['Avg Leverage']:.2f}x")
+        
+        with col3:
+            st.metric("Avg Position Size", f"${pair_metric['Avg Position Size']:,.2f}")
+        
+        with col4:
+            # Calculate long percentage
+            long_trades = pair_data[pair_data['direction'] == 'Long'].shape[0]
+            total_trades = len(pair_data)
+            long_pct = long_trades / total_trades if total_trades > 0 else 0
+            st.metric("Long/Short Split", f"{long_pct:.0%} Long")
+        
+        # Trading volume over time
+        st.subheader("Trading Volume Over Time")
+        
+        # Group by date and count trades
+        volume_over_time = pair_data.groupby('trade_date').size()
+        
+        fig = px.bar(
+            x=volume_over_time.index,
+            y=volume_over_time.values,
+            labels={'x': 'Date', 'y': 'Number of Trades'},
+            title=f"Trading Volume for {selected_pair}",
+            color=volume_over_time.values,
+            color_continuous_scale='Viridis'
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # PNL over time
+        st.subheader("PNL Performance Over Time")
+        
+        pnl_over_time = pair_data.groupby('trade_date')['pnl_usd'].sum()
+        
+        fig = px.bar(
+            x=pnl_over_time.index,
+            y=pnl_over_time.values,
+            labels={'x': 'Date', 'y': 'PNL (USD)'},
+            title=f"PNL Performance for {selected_pair}",
+            color=pnl_over_time.values,
+            color_continuous_scale='RdBu',
+            color_continuous_midpoint=0
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Trading direction analysis
+        st.subheader("Trading Direction Analysis")
+        
+        # Calculate metrics by direction
+        direction_metrics = pair_data.groupby('direction').agg({
+            'pnl_usd': ['sum', 'mean'],
+            'is_win': 'mean',
+            'user_id': 'count'
+        })
+        
+        direction_metrics.columns = [
+            'Total PNL', 'Avg PNL per Trade', 'Win Rate', 'Trade Count'
+        ]
+        
+        direction_metrics = direction_metrics.reset_index()
+        
+        # Create a bar chart
+        fig = px.bar(
+            direction_metrics,
+            x='direction',
+            y='Total PNL',
+            color='Win Rate',
+            text='Trade Count',
+            labels={'direction': 'Direction', 'Total PNL': 'Total PNL (USD)'},
+            title=f"PNL by Trading Direction for {selected_pair}",
+            color_continuous_scale='RdYlGn'
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Order type analysis
+        st.subheader("Order Type Analysis")
+        
+        # Calculate metrics by order type
+        order_metrics = pair_data.groupby('order_type').agg({
+            'pnl_usd': ['sum', 'mean'],
+            'is_win': 'mean',
+            'user_id': 'count'
+        })
+        
+        order_metrics.columns = [
+            'Total PNL', 'Avg PNL per Trade', 'Win Rate', 'Trade Count'
+        ]
+        
+        order_metrics = order_metrics.reset_index()
+        
+        # Create a bar chart
+        fig = px.bar(
+            order_metrics,
+            x='order_type',
+            y='Trade Count',
+            color='Avg PNL per Trade',
+            text='Win Rate',
+            labels={'order_type': 'Order Type', 'Trade Count': 'Number of Trades'},
+            title=f"Order Type Usage for {selected_pair}",
+            color_continuous_scale='RdBu',
+            color_continuous_midpoint=0
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # User performance on this pair
+        st.subheader("Top Users on This Pair")
+        
+        # Group by user
+        user_pair_metrics = pair_data.groupby('user_id').agg({
+            'pnl_usd': 'sum',
+            'is_win': 'mean',
+            'margin_usd': 'mean',
+            'leverage': 'mean',
+            'user_id': 'count'
+        })
+        
+        user_pair_metrics.columns = [
+            'Total PNL', 'Win Rate', 'Avg Position Size',
+            'Avg Leverage', 'Trade Count'
+        ]
+        
+        user_pair_metrics = user_pair_metrics.reset_index()
+        
+        # Filter users with at least 5 trades
+        user_pair_metrics = user_pair_metrics[user_pair_metrics['Trade Count'] >= 5]
+        
+        # Sort by PNL
+        user_pair_metrics = user_pair_metrics.sort_values(by='Total PNL', ascending=False)
+        
+        if not user_pair_metrics.empty:
+            # Create a table
+            st.dataframe(
+                user_pair_metrics.head(10).style.format({
+                    'Total PNL': '${:.2f}',
+                    'Win Rate': '{:.2%}',
+                    'Avg Position Size': '${:.2f}',
+                    'Avg Leverage': '{:.2f}x'
+                }),
+                use_container_width=True
+            )
+            
+            # Create a scatter plot of win rate vs PNL
+            fig = px.scatter(
+                user_pair_metrics,
+                x='Win Rate',
+                y='Total PNL',
+                size='Trade Count',
+                color='Avg Leverage',
+                hover_data=['user_id', 'Trade Count', 'Avg Position Size'],
+                labels={
+                    'Win Rate': 'Win Rate',
+                    'Total PNL': 'Total PNL (USD)',
+                    'Avg Leverage': 'Avg Leverage'
+                },
+                title=f"User Performance on {selected_pair}"
+            )
+            
+            fig.update_layout(xaxis=dict(tickformat=".0%"))
+            
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Not enough user data to analyze performance on this pair.")
+        
+        # Leverage analysis
+        st.subheader("Leverage Analysis")
+        
+        # Create leverage bins
+        pair_data['leverage_bin'] = pd.cut(
+            pair_data['leverage'],
+            bins=[0, 2, 5, 10, 20, 50, 100, 1000],
+            labels=['1-2x', '2-5x', '5-10x', '10-20x', '20-50x', '50-100x', '100x+']
+        )
+        
+        # Calculate metrics by leverage bin
+        leverage_metrics = pair_data.groupby('leverage_bin').agg({
+            'pnl_usd': ['sum', 'mean'],
+            'is_win': 'mean',
+            'user_id': 'count'
+        })
+        
+        leverage_metrics.columns = [
+            'Total PNL', 'Avg PNL per Trade', 'Win Rate', 'Trade Count'
+        ]
+        
+        leverage_metrics = leverage_metrics.reset_index()
+        
+        # Create a bar chart
+        fig = px.bar(
+            leverage_metrics,
+            x='leverage_bin',
+            y='Trade Count',
+            color='Win Rate',
+            labels={'leverage_bin': 'Leverage Range', 'Trade Count': 'Number of Trades'},
+            title=f"Trade Distribution by Leverage for {selected_pair}",
+            color_continuous_scale='RdYlGn',
+            text='Avg PNL per Trade'
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Hour analysis
+        st.subheader("Trading Hour Analysis")
+        
+        # Calculate metrics by hour
+        hour_metrics = pair_data.groupby('trade_hour').agg({
+            'pnl_usd': ['sum', 'mean'],
+            'is_win': 'mean',
+            'user_id': 'count'
+        })
+        
+        hour_metrics.columns = [
+            'Total PNL', 'Avg PNL per Trade', 'Win Rate', 'Trade Count'
+        ]
+        
+        hour_metrics = hour_metrics.reset_index()
+        
+        # Create a bar chart
+        fig = px.bar(
+            hour_metrics,
+            x='trade_hour',
+            y='Trade Count',
+            color='Win Rate',
+            labels={'trade_hour': 'Hour of Day (SG Time)', 'Trade Count': 'Number of Trades'},
+            title=f"Trade Distribution by Hour for {selected_pair}",
+            color_continuous_scale='RdYlGn'
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
 
 # Add footer with last update time
 st.markdown("---")
