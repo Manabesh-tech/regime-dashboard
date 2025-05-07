@@ -710,9 +710,8 @@ if results and not all_blocks_avg.empty:
                - Target different trader types in campaigns based on their active hours
                - Create educational content specific to both trading styles
             """)
-    elif selected_tokens:
+    elif len(selected_tokens) > 0 and len(selected_tokens) < 3:
         st.info("Clustering analysis requires at least 3 tokens to be selected. Please select more tokens to see clustering results.")
 else:
-    # If no tokens selected, show no data
-    if selected_tokens:
-        st.warning("No valid data available for the selected tokens. Please try different tokens.")
+    # If no valid data available for the selected tokens
+    st.warning("No valid data available for the selected tokens. Please try different tokens.")
