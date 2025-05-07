@@ -591,7 +591,7 @@ def render_rollbit_comparison(comparison_df):
     buffer_df = pd.DataFrame({
         'Pair': rollbit_df['pair_name'],
         'Type': rollbit_df['pair_name'].apply(lambda x: 'Major' if is_major(x) else 'Altcoin'),
-        'SURF Buffer': rollbit_df['current_buffer_rate'].apply(
+        'SURF Buffer': rollbit_df['buffer_rate'].apply(
             lambda x: f"{x*100:.3f}%" if not pd.isna(x) else "N/A"
         ),
         'Rollbit Buffer': rollbit_df['rollbit_buffer_rate'].apply(
@@ -602,9 +602,9 @@ def render_rollbit_comparison(comparison_df):
     # Add buffer ratio column - use safer calculation
     buffer_ratio = []
     for _, row in rollbit_df.iterrows():
-        if (not check_null_or_zero(row.get('current_buffer_rate')) and 
+        if (not check_null_or_zero(row.get('buffer_rate')) and 
             not check_null_or_zero(row.get('rollbit_buffer_rate'))):
-            ratio = safe_division(row['current_buffer_rate'], row['rollbit_buffer_rate'], None)
+            ratio = safe_division(row['buffer_rate'], row['rollbit_buffer_rate'], None)
             buffer_ratio.append(f"{ratio:.2f}x" if ratio is not None else "N/A")
         else:
             buffer_ratio.append("N/A")
@@ -621,7 +621,7 @@ def render_rollbit_comparison(comparison_df):
     position_df = pd.DataFrame({
         'Pair': rollbit_df['pair_name'],
         'Type': rollbit_df['pair_name'].apply(lambda x: 'Major' if is_major(x) else 'Altcoin'),
-        'SURF Position Mult.': rollbit_df['current_position_multiplier'].apply(
+        'SURF Position Mult.': rollbit_df['position_multiplier'].apply(
             lambda x: f"{x:,.0f}" if not pd.isna(x) else "N/A"
         ),
         'Rollbit Position Mult.': rollbit_df['rollbit_position_multiplier'].apply(
@@ -632,9 +632,9 @@ def render_rollbit_comparison(comparison_df):
     # Add position ratio column
     position_ratio = []
     for _, row in rollbit_df.iterrows():
-        if (not check_null_or_zero(row.get('current_position_multiplier')) and 
+        if (not check_null_or_zero(row.get('position_multiplier')) and 
             not check_null_or_zero(row.get('rollbit_position_multiplier'))):
-            ratio = safe_division(row['current_position_multiplier'], row['rollbit_position_multiplier'], None)
+            ratio = safe_division(row['position_multiplier'], row['rollbit_position_multiplier'], None)
             position_ratio.append(f"{ratio:.2f}x" if ratio is not None else "N/A")
         else:
             position_ratio.append("N/A")
@@ -715,11 +715,6 @@ def main():
 
     # Process the data and render tabs
     if current_params_df is not None:
-        # Add Rollbit comparison data if available
-        params_with_rollbit = current_params_df.copy()
-        if rollbit_df is not None:
-            params_with_rollbit = add_rollbit_comparison(params_with_rollbit, rollbit_df)
-        
         # Render the appropriate tab content
         with tabs[0]:  # Parameter Table
             # Add sort options
@@ -734,7 +729,25 @@ def main():
             render_parameter_table(current_params_df, market_data_df, baselines_df, sort_by)
             
         with tabs[1]:  # Rollbit Comparison
-            render_rollbit_comparison(params_with_rollbit)
+            if rollbit_df is not None:
+                # For the Rollbit comparison, we need to directly compare the columns
+                st.markdown("### Rollbit Comparison")
+                
+                # Merge the dataframes on pair_name
+                merged_df = pd.merge(
+                    current_params_df[['pair_name', 'buffer_rate', 'position_multiplier']], 
+                    rollbit_df[['pair_name', 'buffer_rate', 'position_multiplier']], 
+                    on='pair_name', 
+                    how='inner',
+                    suffixes=('', '_rollbit')
+                )
+                
+                if not merged_df.empty:
+                    render_rollbit_comparison(merged_df)
+                else:
+                    st.info("No matching pairs found between our parameters and Rollbit's.")
+            else:
+                st.info("No Rollbit data available for comparison.")
             
     else:
         st.error("Failed to load required data. Please check database connection and try refreshing.")
