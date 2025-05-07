@@ -67,18 +67,18 @@ with col1:
         selected_tokens = [default_token]
 
 with col2:
-    # Breakout detection method - BOLLINGER BANDS DEFAULT
+    # Breakout detection method
     breakout_method = st.selectbox(
         "Breakout Detection Method",
-        ["Bollinger Bands", "ATR Multiple", "Adaptive Threshold"],
-        index=0
+        ["ATR Multiple", "Bollinger Bands", "Adaptive Threshold"],
+        index=2
     )
 
 with col3:
     # Refresh button
     if st.button("Refresh Data", type="primary", use_container_width=True):
         st.cache_data.clear()
-        st.rerun()
+        st.experimental_rerun()
 
 # Singapore time
 sg_tz = pytz.timezone('Asia/Singapore')
@@ -180,8 +180,8 @@ def get_price_data(token, days=7):
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df = df.set_index('timestamp').sort_index()
     
-    # Create 5-minute OHLC data - use 'min' instead of deprecated 'T'
-    ohlc = df['final_price'].resample('5min').agg({
+    # Create 5-minute OHLC data
+    ohlc = df['final_price'].resample('5T').agg({
         'open': 'first',
         'high': 'max',
         'low': 'min',
@@ -384,8 +384,8 @@ if results and not all_blocks_avg.empty:
         21: "21:00-00:00"
     }
     
-    # Display block averages - UPDATED TITLE
-    st.subheader(f"All Pairs: Average Number of Breakouts per 3-Hour Block (Past 7 Days)")
+    # Display block averages
+    st.subheader(f"Average Number of Breakouts per 3-Hour Block (Past 7 Days)")
     
     # Create a transposed view with better labels
     display_df = all_blocks_avg.copy()
@@ -398,12 +398,12 @@ if results and not all_blocks_avg.empty:
     # Display the table
     st.dataframe(display_df)
     
-    # Create visualization - UPDATED TITLE
+    # Create visualization
     fig = px.bar(
         all_blocks_avg, 
         x=all_blocks_avg.index.map(lambda x: block_labels[x]),
         y=all_blocks_avg.columns,
-        title="All Pairs: Average Breakouts by 3-Hour Block (Past 7 Days)",
+        title="Average Breakouts by 3-Hour Block (Past 7 Days)",
         labels={'index': 'Time Block (Singapore)', 'value': 'Avg. Number of Breakouts'}
     )
     
@@ -417,7 +417,7 @@ if results and not all_blocks_avg.empty:
     
     st.plotly_chart(fig, use_container_width=True)
     
-    # Show highest breakout periods overall - FIX FOR ILOC
+    # Show highest breakout periods overall
     highest_overall = all_blocks_avg.mean(axis=1).sort_values(ascending=False)
     highest_block = highest_overall.index[0]
     lowest_block = highest_overall.index[-1]
@@ -427,8 +427,8 @@ if results and not all_blocks_avg.empty:
     st.markdown(f"""
     ### Key Findings:
     
-    - **Peak Breakout Period:** {block_labels[highest_block]} (Avg: {highest_overall.iloc[0]:.2f} breakouts)
-    - **Lowest Breakout Period:** {block_labels[lowest_block]} (Avg: {highest_overall.iloc[-1]:.2f} breakouts)
+    - **Peak Breakout Period:** {block_labels[highest_block]} (Avg: {highest_overall[0]:.2f} breakouts)
+    - **Lowest Breakout Period:** {block_labels[lowest_block]} (Avg: {highest_overall[-1]:.2f} breakouts)
     """)
     
     # Trader type analysis
@@ -553,102 +553,100 @@ if results and not all_blocks_avg.empty:
             
             st.markdown("---")
     
-    # Additional analysis - clustering time blocks - FIX CLUSTERING LOGIC
-    if len(selected_tokens) >= 3:  # Only do clustering if we have enough data
-        st.subheader("Time Block Clustering Analysis")
+    # Additional analysis - clustering time blocks
+    st.subheader("Time Block Clustering Analysis")
+    
+    # Prepare data for clustering
+    cluster_data = all_blocks_avg.T
+    
+    if len(cluster_data) >= 3:  # Need at least 3 tokens for meaningful clustering
+        # Normalize data for clustering
+        normalized_data = (cluster_data - cluster_data.mean()) / cluster_data.std()
         
-        # Prepare data for clustering
-        cluster_data = all_blocks_avg.T
+        # K-means clustering to find similar time blocks
+        kmeans = KMeans(n_clusters=2, random_state=42)
+        cluster_data['cluster'] = kmeans.fit_predict(normalized_data)
         
-        if len(cluster_data) >= 3:  # Need at least 3 tokens for meaningful clustering
-            try:
-                # Normalize data for clustering
-                normalized_data = (cluster_data - cluster_data.mean()) / cluster_data.std()
-                
-                # K-means clustering to find similar time blocks
-                kmeans = KMeans(n_clusters=2, random_state=42)
-                kmeans.fit(normalized_data)
-                cluster_labels = kmeans.labels_
-                
-                # Display clusters
-                st.markdown("### Time Block Clusters")
-                st.markdown("Grouping time blocks into clusters based on breakout patterns:")
-                
-                # Get cluster centers and interpret
-                centers = kmeans.cluster_centers_
-                
-                # Determine which cluster has higher average breakouts
-                cluster_0_avg = centers[0].mean()
-                cluster_1_avg = centers[1].mean()
-                
-                if cluster_0_avg > cluster_1_avg:
-                    breakout_cluster = 0
-                    range_cluster = 1
-                else:
-                    breakout_cluster = 1
-                    range_cluster = 0
-                
-                # Display results
-                breakout_times = [block_labels[block] for block, cluster in 
-                                zip(all_blocks_avg.index, cluster_labels) if cluster == breakout_cluster]
-                
-                range_times = [block_labels[block] for block, cluster in 
-                            zip(all_blocks_avg.index, cluster_labels) if cluster == range_cluster]
-                
-                st.markdown(f"""
-                #### Breakout Trading Times:
-                Times with significantly more breakouts, suggesting more breakout traders active:
-                {", ".join(breakout_times)}
-                
-                #### Range Trading Times:
-                Times with fewer breakouts, suggesting more range traders active:
-                {", ".join(range_times)}
-                """)
-                
-                # Skip creating DataFrame for plotly - use simple bar chart instead
-                st.markdown("### Trading Style by Time Block:")
-                
-                # Create a simpler plot using two separate bar charts to avoid DataFrame issue
-                trading_style_data = {
-                    'breakout': [],
-                    'range': []
-                }
-                
-                for i, block in enumerate(all_blocks_avg.index):
-                    if cluster_labels[i] == breakout_cluster:
-                        st.markdown(f"- **{block_labels[block]}**: Breakout Trading (avg: {all_blocks_avg.mean(axis=1).iloc[i]:.2f})")
-                    else:
-                        st.markdown(f"- **{block_labels[block]}**: Range Trading (avg: {all_blocks_avg.mean(axis=1).iloc[i]:.2f})")
-                
-                # Trading recommendation
-                st.subheader("Exchange Strategy Recommendations")
-                
-                st.markdown("""
-                Based on the analysis of breakout patterns across different time blocks, here are some strategic recommendations:
-                
-                1. **Liquidity Management:**
-                - Increase liquidity during peak breakout times to handle higher volumes
-                - Optimize spread during range-bound periods
-                
-                2. **Risk Management:**
-                - Adjust risk parameters by time of day
-                - Monitor liquidation risks more closely during breakout periods
-                
-                3. **User Experience:**
-                - Provide different trading tools based on time of day
-                - Show relevant indicators (breakout vs. range) based on current market phase
-                
-                4. **Marketing and User Acquisition:**
-                - Target different trader types in campaigns based on their active hours
-                - Create educational content specific to both trading styles
-                """)
-            except Exception as e:
-                st.error(f"Error in clustering analysis: {str(e)}")
-                st.info("Please try selecting different tokens or using a different breakout detection method.")
+        # Display clusters
+        st.markdown("### Time Block Clusters")
+        st.markdown("Grouping time blocks into clusters based on breakout patterns:")
+        
+        # Get cluster centers and interpret
+        centers = kmeans.cluster_centers_
+        
+        # Determine which cluster has higher average breakouts
+        cluster_0_avg = centers[0].mean()
+        cluster_1_avg = centers[1].mean()
+        
+        if cluster_0_avg > cluster_1_avg:
+            breakout_cluster = 0
+            range_cluster = 1
         else:
-            st.info("Clustering analysis requires at least 3 tokens. Please select more tokens to see clustering results.")
-    elif len(selected_tokens) > 0 and len(selected_tokens) < 3:
-        st.info("Clustering analysis requires at least 3 tokens to be selected. Please select more tokens to see clustering results.")
+            breakout_cluster = 1
+            range_cluster = 0
+        
+        # Display results
+        breakout_times = [block_labels[block] for block, cluster in 
+                         zip(all_blocks_avg.index, kmeans.labels_) if cluster == breakout_cluster]
+        
+        range_times = [block_labels[block] for block, cluster in 
+                      zip(all_blocks_avg.index, kmeans.labels_) if cluster == range_cluster]
+        
+        st.markdown(f"""
+        #### Breakout Trading Times:
+        Times with significantly more breakouts, suggesting more breakout traders active:
+        {", ".join(breakout_times)}
+        
+        #### Range Trading Times:
+        Times with fewer breakouts, suggesting more range traders active:
+        {", ".join(range_times)}
+        """)
+        
+        # Visualize the clusters
+        cluster_viz = pd.DataFrame({
+            'Time Block': [block_labels[i] for i in all_blocks_avg.index],
+            'Cluster': kmeans.labels_,
+            'Average Breakouts': all_blocks_avg.mean(axis=1).values
+        })
+        
+        cluster_viz['Trading Style'] = cluster_viz['Cluster'].apply(
+            lambda x: 'Breakout Trading' if x == breakout_cluster else 'Range Trading'
+        )
+        
+        cluster_fig = px.scatter(
+            cluster_viz,
+            x='Time Block',
+            y='Average Breakouts',
+            color='Trading Style',
+            size='Average Breakouts',
+            title="Time Blocks Clustered by Trading Style",
+            labels={'Average Breakouts': 'Avg. Number of Breakouts'}
+        )
+        
+        cluster_fig.update_layout(height=500)
+        st.plotly_chart(cluster_fig, use_container_width=True)
+        
+        # Trading recommendation
+        st.subheader("Exchange Strategy Recommendations")
+        
+        st.markdown("""
+        Based on the analysis of breakout patterns across different time blocks, here are some strategic recommendations:
+        
+        1. **Liquidity Management:**
+           - Increase liquidity during peak breakout times to handle higher volumes
+           - Optimize spread during range-bound periods
+           
+        2. **Risk Management:**
+           - Adjust risk parameters by time of day
+           - Monitor liquidation risks more closely during breakout periods
+           
+        3. **User Experience:**
+           - Provide different trading tools based on time of day
+           - Show relevant indicators (breakout vs. range) based on current market phase
+           
+        4. **Marketing and User Acquisition:**
+           - Target different trader types in campaigns based on their active hours
+           - Create educational content specific to both trading styles
+        """)
 else:
-    # If no valid data available for the selected tokens
-    st.warning("No valid data available for the selected tokens. Please try different tokens.")
+    st.error("No valid data available for the selected tokens. Please try different tokens or adjust the date range.")
