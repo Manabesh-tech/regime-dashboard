@@ -6,11 +6,10 @@ from datetime import datetime, timedelta
 import pytz
 import traceback
 import json
-import math
 
 # Page configuration
 st.set_page_config(
-    page_title="Exchange Parameter Optimization Dashboard",
+    page_title="Exchange Parameter Dashboard",
     page_icon="📊",
     layout="wide"
 )
@@ -85,10 +84,6 @@ def init_session_state():
     """Initialize session state variables"""
     if 'backup_params' not in st.session_state:
         st.session_state.backup_params = None
-    if 'has_applied_recommendations' not in st.session_state:
-        st.session_state.has_applied_recommendations = False
-    if 'show_confirm_dialog' not in st.session_state:
-        st.session_state.show_confirm_dialog = False
     if 'table_created' not in st.session_state:
         st.session_state.table_created = False
 
@@ -410,162 +405,17 @@ def save_spread_baseline(pair_name, baseline_spread):
         st.error(f"Error saving baseline spread for {pair_name}: {e}\n\nDetails: {error_details}")
         return False
 
-def apply_parameter_recommendations(recommendations_df):
-    """Apply recommended parameters to the database"""
-    if recommendations_df is None or recommendations_df.empty:
-        return False, "No recommendations to apply"
+def calculate_current_spreads(market_data):
+    """Calculate current average non-SurfFuture spread for each token"""
+    if market_data is None or market_data.empty:
+        return {}
     
-    try:
-        engine = init_connection()
-        if not engine:
-            return False, "Database connection error"
-        
-        # Create a backup of current parameters before applying changes
-        backup_params = {}
-        
-        # Apply buffer rate and position multiplier recommendations
-        success_count = 0
-        error_count = 0
-        errors = []
-        
-        for _, row in recommendations_df.iterrows():
-            pair_name = row['pair_name']
-            current_buffer = row['current_buffer_rate']
-            current_position = row['current_position_multiplier']
-            buffer_change = row['buffer_change']
-            position_change = row['position_change']
-            
-            # Store current values for backup
-            backup_params[pair_name] = {
-                'buffer_rate': current_buffer,
-                'position_multiplier': current_position
-            }
-            
-            # Get recommended values
-            buffer_rate = row['recommended_buffer_rate']
-            position_multiplier = row['recommended_position_multiplier']
-            
-            # Skip rows with null values or where recommended is same as current
-            if check_null_or_zero(buffer_rate) or pd.isna(current_buffer):
-                continue
-                
-            try:
-                # Update query with parameter binding for security
-                query = text("""
-                UPDATE public.trade_pool_pairs
-                SET 
-                    buffer_rate = :buffer_rate,
-                    position_multiplier = :position_multiplier,
-                    updated_at = :updated_at
-                WHERE 
-                    pair_name = :pair_name
-                """)
-                
-                # Execute with parameters
-                with engine.connect() as conn:
-                    conn.execute(
-                        query, 
-                        {
-                            "buffer_rate": buffer_rate,
-                            "position_multiplier": position_multiplier,
-                            "updated_at": datetime.now(),
-                            "pair_name": pair_name
-                        }
-                    )
-                    conn.commit()
-                    
-                success_count += 1
-            except Exception as e:
-                error_count += 1
-                errors.append(f"Error updating {pair_name}: {str(e)}")
-        
-        # Save backup to session state
-        st.session_state.backup_params = backup_params
-        st.session_state.has_applied_recommendations = True
-        
-        # Clear cache to refresh data
-        st.cache_data.clear()
-        
-        if error_count > 0:
-            error_message = "\n".join(errors[:5])
-            if len(errors) > 5:
-                error_message += f"\n...and {len(errors) - 5} more errors"
-            return success_count > 0, f"Applied {success_count} recommendations with {error_count} errors.\n{error_message}"
-        else:
-            return True, f"Successfully applied {success_count} recommendations"
-            
-    except Exception as e:
-        return False, f"Error applying recommendations: {str(e)}"
-
-def undo_parameter_changes():
-    """Undo the most recent parameter changes"""
-    if not st.session_state.backup_params:
-        return False, "No backup parameters available to restore"
+    # Group by pair_name and calculate average spread across all exchanges
+    current_spreads = {}
+    for pair, group in market_data.groupby('pair_name'):
+        current_spreads[pair] = group['avg_fee1'].mean()
     
-    try:
-        engine = init_connection()
-        if not engine:
-            return False, "Database connection error"
-        
-        success_count = 0
-        error_count = 0
-        errors = []
-        
-        for pair_name, params in st.session_state.backup_params.items():
-            buffer_rate = params['buffer_rate']
-            position_multiplier = params['position_multiplier']
-            
-            # Skip rows with null values
-            if check_null_or_zero(buffer_rate) and check_null_or_zero(position_multiplier):
-                continue
-                
-            try:
-                # Update query with parameter binding for security
-                query = text("""
-                UPDATE public.trade_pool_pairs
-                SET 
-                    buffer_rate = :buffer_rate,
-                    position_multiplier = :position_multiplier,
-                    updated_at = :updated_at
-                WHERE 
-                    pair_name = :pair_name
-                """)
-                
-                # Execute with parameters
-                with engine.connect() as conn:
-                    conn.execute(
-                        query, 
-                        {
-                            "buffer_rate": buffer_rate if not pd.isna(buffer_rate) else None,
-                            "position_multiplier": position_multiplier if not pd.isna(position_multiplier) else None,
-                            "updated_at": datetime.now(),
-                            "pair_name": pair_name
-                        }
-                    )
-                    conn.commit()
-                    
-                success_count += 1
-            except Exception as e:
-                error_count += 1
-                errors.append(f"Error restoring {pair_name}: {str(e)}")
-        
-        # Reset flags 
-        st.session_state.has_applied_recommendations = False
-        st.session_state.backup_params = None
-        
-        # Clear cache to refresh data
-        st.cache_data.clear()
-        
-        if error_count > 0:
-            error_message = "\n".join(errors[:5])
-            if len(errors) > 5:
-                error_message += f"\n...and {len(errors) - 5} more errors"
-            return success_count > 0, f"Restored {success_count} parameters with {error_count} errors.\n{error_message}"
-        else:
-            return True, f"Successfully restored {success_count} parameters to their previous values"
-            
-    except Exception as e:
-        return False, f"Error restoring parameters: {str(e)}"
+    return current_spreads
 
 def reset_all_baselines(market_data_df):
     """Reset all baselines to current market spreads"""
@@ -587,201 +437,10 @@ def reset_all_baselines(market_data_df):
     
     return success_count > 0, success_count, error_count
 
-def calculate_current_spreads(market_data):
-    """Calculate current average non-SurfFuture spread for each token"""
-    if market_data is None or market_data.empty:
-        return {}
-    
-    # Group by pair_name and calculate average spread across all exchanges
-    current_spreads = {}
-    for pair, group in market_data.groupby('pair_name'):
-        current_spreads[pair] = group['avg_fee1'].mean()
-    
-    return current_spreads
-
-def calculate_recommended_params(current_params, current_spread, baseline_spread, 
-                              weekly_stats, sensitivities, 
-                              significant_change_threshold=1.5):  # Z-score threshold
-    """Calculate recommended parameter values using z-score approach"""
-    
-    # Handle cases with missing data
-    if current_spread is None or baseline_spread is None or baseline_spread <= 0:
-        return {
-            'buffer_rate': current_params.get('buffer_rate'),
-            'position_multiplier': current_params.get('position_multiplier')
-        }
-    
-    # Get current parameter values
-    current_buffer_rate = current_params.get('buffer_rate')
-    current_position_multiplier = current_params.get('position_multiplier')
-    max_leverage = current_params.get('max_leverage', 100)
-    
-    # If current buffer rate is N/A or zero, return N/A for recommended buffer rate
-    if check_null_or_zero(current_buffer_rate) or pd.isna(current_buffer_rate):
-        return {
-            'buffer_rate': None,
-            'position_multiplier': current_position_multiplier
-        }
-    
-    # If current position multiplier is N/A or zero, use a default but don't recommend changes
-    if check_null_or_zero(current_position_multiplier) or pd.isna(current_position_multiplier):
-        return {
-            'buffer_rate': current_buffer_rate,
-            'position_multiplier': None
-        }
-    
-    # Get weekly statistics with fallbacks
-    weekly_min = weekly_stats.get('min_spread', baseline_spread * 0.8)
-    weekly_max = weekly_stats.get('max_spread', baseline_spread * 1.2)
-    weekly_std_dev = weekly_stats.get('std_dev')
-    
-    # If std_dev is missing, estimate it as 1/4 of the range (normal distribution approximation)
-    if weekly_std_dev is None or pd.isna(weekly_std_dev) or weekly_std_dev == 0:
-        weekly_std_dev = (weekly_max - weekly_min) / 4.0
-        if weekly_std_dev <= 0:
-            weekly_std_dev = baseline_spread * 0.05  # Fallback: 5% of baseline
-    
-    # Calculate z-score: how many std devs away from baseline is current spread
-    z_score = (current_spread - baseline_spread) / weekly_std_dev if weekly_std_dev > 0 else 0
-    
-    # Check if change is significant based on z-score magnitude
-    # Avoid using abs() directly on z_score
-    if -significant_change_threshold < z_score < significant_change_threshold:
-        return {
-            'buffer_rate': current_buffer_rate,
-            'position_multiplier': current_position_multiplier
-        }
-    
-    # Get sensitivity parameters
-    buffer_sensitivity = sensitivities.get('buffer_sensitivity', 0.5)
-    position_sensitivity = sensitivities.get('position_sensitivity', 0.5)
-    
-    # Calculate change factor based on z-score
-    # Use math.fabs() instead of abs() on the z_score value
-    change_direction = 1 if z_score > 0 else -1
-    z_factor = 1.0 + (change_direction * min(abs(float(z_score)) / 5.0, 0.5))
-    
-    # Calculate new parameters
-    recommended_buffer_rate = current_buffer_rate * (z_factor ** buffer_sensitivity)
-    recommended_position_multiplier = current_position_multiplier / (z_factor ** position_sensitivity)
-    
-    # Apply bounds based on the provided constraints
-    buffer_upper_bound = 0.7 / max_leverage if max_leverage > 0 else 0.007
-    recommended_buffer_rate = max(0.0, min(buffer_upper_bound, recommended_buffer_rate))
-    recommended_position_multiplier = max(1, min(15000, recommended_position_multiplier))
-    
-    return {
-        'buffer_rate': recommended_buffer_rate,
-        'position_multiplier': recommended_position_multiplier
-    }
-
-def generate_recommendations(current_params_df, market_data_df, baselines_df, weekly_stats_df, sensitivities):
-    """Generate parameter recommendations based on market data and weekly statistics"""
-    if current_params_df is None or market_data_df is None or baselines_df is None:
-        return None
-    
-    # Convert DataFrames to more convenient formats
-    current_params = {}
-    for _, row in current_params_df.iterrows():
-        pair_name = row['pair_name']
-        current_params[pair_name] = {
-            'buffer_rate': row['buffer_rate'],
-            'position_multiplier': row['position_multiplier'],
-            'max_leverage': row.get('max_leverage', 100)
-        }
-    
-    # Calculate current spreads
-    current_spreads = calculate_current_spreads(market_data_df)
-    
-    # Create baselines dictionary
-    baselines = {}
-    for _, row in baselines_df.iterrows():
-        baselines[row['pair_name']] = row['baseline_spread']
-    
-    # Create weekly stats dictionary
-    weekly_stats = {}
-    if weekly_stats_df is not None and not weekly_stats_df.empty:
-        for _, row in weekly_stats_df.iterrows():
-            weekly_stats[row['pair_name']] = {
-                'min_spread': row['min_spread'],
-                'max_spread': row['max_spread'],
-                'std_dev': row['std_dev']
-            }
-    
-    # Create recommendations DataFrame
-    recommendations = []
-    
-    for pair, params in current_params.items():
-        if pair in current_spreads and pair in baselines:
-            current_spread = current_spreads[pair]
-            baseline_spread = baselines[pair]
-            
-            # Get weekly stats for this pair or empty dict
-            pair_weekly_stats = weekly_stats.get(pair, {})
-            
-            recommended = calculate_recommended_params(
-                params, 
-                current_spread, 
-                baseline_spread,
-                pair_weekly_stats,
-                sensitivities,
-                significant_change_threshold=1.5  # Z-score threshold
-            )
-            
-            # Calculate changes with safety checks
-            buffer_change = 0
-            if (not check_null_or_zero(params['buffer_rate']) and 
-                not check_null_or_zero(recommended['buffer_rate']) and
-                not pd.isna(params['buffer_rate']) and 
-                not pd.isna(recommended['buffer_rate'])):
-                buffer_change = ((recommended['buffer_rate'] - params['buffer_rate']) / params['buffer_rate']) * 100
-            
-            position_change = 0
-            if (not check_null_or_zero(params['position_multiplier']) and 
-                not check_null_or_zero(recommended['position_multiplier']) and
-                not pd.isna(params['position_multiplier']) and 
-                not pd.isna(recommended['position_multiplier'])
-               ):
-                # Only show position change if the rounded values are different
-                if round(recommended['position_multiplier']) != round(params['position_multiplier']):
-                    position_change = ((recommended['position_multiplier'] - params['position_multiplier']) / params['position_multiplier']) * 100
-            
-            # Calculate spread stats
-            spread_change_pct = 0
-            if current_spread > 0 and baseline_spread > 0:
-                spread_change_pct = ((current_spread / baseline_spread) - 1) * 100
-            
-            # Calculate z-score if possible, using standard formula not .abs()
-            z_score = None
-            if pair in weekly_stats and 'std_dev' in weekly_stats[pair] and weekly_stats[pair]['std_dev'] > 0:
-                z_score = (current_spread - baseline_spread) / weekly_stats[pair]['std_dev']
-            
-            recommendations.append({
-                'pair_name': pair,
-                'token_type': 'Major' if is_major(pair) else 'Altcoin',
-                'current_buffer_rate': params['buffer_rate'],
-                'recommended_buffer_rate': recommended['buffer_rate'],
-                'buffer_change': buffer_change,
-                'current_position_multiplier': params['position_multiplier'],
-                'recommended_position_multiplier': recommended['position_multiplier'],
-                'position_change': position_change,
-                'current_spread': current_spread,
-                'baseline_spread': baseline_spread,
-                'spread_change_ratio': safe_division(current_spread, baseline_spread, 1.0),
-                'spread_change_pct': spread_change_pct,
-                'max_leverage': params['max_leverage'],
-                'z_score': z_score,
-                'weekly_min': pair_weekly_stats.get('min_spread'),
-                'weekly_max': pair_weekly_stats.get('max_spread'),
-                'weekly_std_dev': pair_weekly_stats.get('std_dev')
-            })
-    
-    return pd.DataFrame(recommendations)
-
-def add_rollbit_comparison(rec_df, rollbit_df):
-    """Add Rollbit parameter data to recommendations DataFrame for comparison"""
-    if rec_df is None or rollbit_df is None or rec_df.empty or rollbit_df.empty:
-        return rec_df
+def add_rollbit_comparison(params_df, rollbit_df):
+    """Add Rollbit parameter data to parameters DataFrame for comparison"""
+    if params_df is None or rollbit_df is None or params_df.empty or rollbit_df.empty:
+        return params_df
     
     # Create mapping of Rollbit parameters
     rollbit_params = {}
@@ -797,49 +456,71 @@ def add_rollbit_comparison(rec_df, rollbit_df):
             'position_multiplier': position_multiplier
         }
     
-    # Add Rollbit parameters to recommendations DataFrame
-    for i, row in rec_df.iterrows():
+    # Add Rollbit parameters to parameters DataFrame
+    for i, row in params_df.iterrows():
         pair_name = row['pair_name']
         
         if pair_name in rollbit_params:
             # Safely add Rollbit parameters (handling NULL/zero values)
-            rec_df.at[i, 'rollbit_buffer_rate'] = rollbit_params[pair_name]['buffer_rate']
-            rec_df.at[i, 'rollbit_position_multiplier'] = rollbit_params[pair_name]['position_multiplier']
+            params_df.at[i, 'rollbit_buffer_rate'] = rollbit_params[pair_name]['buffer_rate']
+            params_df.at[i, 'rollbit_position_multiplier'] = rollbit_params[pair_name]['position_multiplier']
     
-    return rec_df
+    return params_df
 
-def render_complete_parameter_table(rec_df, sort_by="Pair Name"):
-    """Render the complete parameter table with all pairs including z-score"""
+def render_parameter_table(params_df, market_data_df, baselines_df, sort_by="Pair Name"):
+    """Render the parameter table with all pairs"""
     
-    if rec_df is None or rec_df.empty:
+    if params_df is None or params_df.empty:
         st.warning("No parameter data available.")
         return
+    
+    # Calculate current spreads
+    current_spreads = calculate_current_spreads(market_data_df) if market_data_df is not None else {}
+    
+    # Create baselines dictionary
+    baselines = {}
+    if baselines_df is not None and not baselines_df.empty:
+        for _, row in baselines_df.iterrows():
+            baselines[row['pair_name']] = row['baseline_spread']
+    
+    # Add current spread and baseline data to params_df
+    data = []
+    for _, row in params_df.iterrows():
+        pair_name = row['pair_name']
+        current_spread = current_spreads.get(pair_name, None)
+        baseline_spread = baselines.get(pair_name, None)
+        
+        # Calculate spread change percentage
+        spread_change_pct = None
+        if current_spread is not None and baseline_spread is not None and baseline_spread > 0:
+            spread_change_pct = ((current_spread / baseline_spread) - 1) * 100
+        
+        data.append({
+            'pair_name': pair_name,
+            'token_type': 'Major' if is_major(pair_name) else 'Altcoin',
+            'current_buffer_rate': row['buffer_rate'],
+            'current_position_multiplier': row['position_multiplier'],
+            'current_spread': current_spread,
+            'baseline_spread': baseline_spread,
+            'spread_change_pct': spread_change_pct,
+            'max_leverage': row['max_leverage']
+        })
+    
+    params_with_data_df = pd.DataFrame(data)
     
     # Map sort option to column name
     sort_map = {
         "Pair Name": "pair_name",
-        "Buffer Change": "buffer_change",
-        "Position Change": "position_change",
-        "Spread Change Ratio": "spread_change_pct",
-        "Z-Score": "z_score"
+        "Spread Change": "spread_change_pct"
     }
     
     # Sort the DataFrame based on sort option
     sort_column = sort_map.get(sort_by, "pair_name")
     
-    if sort_column == "z_score":
-        # Handle NaN values in z_score without using .abs() directly
-        sorted_df = rec_df.copy()
-        # Create custom sort column that handles NaN values properly
-        sorted_df['z_score_sort'] = sorted_df['z_score'].apply(
-            lambda x: abs(float(x)) if pd.notna(x) else 0
-        )
-        sorted_df = sorted_df.sort_values('z_score_sort', ascending=False)
-        sorted_df = sorted_df.drop('z_score_sort', axis=1)
-    elif sort_column in ["buffer_change", "position_change", "spread_change_pct"]:
-        sorted_df = rec_df.sort_values(sort_column, ascending=False)
+    if sort_column == "spread_change_pct":
+        sorted_df = params_with_data_df.sort_values(sort_column, ascending=False)
     else:
-        sorted_df = rec_df.sort_values(sort_column)
+        sorted_df = params_with_data_df.sort_values(sort_column)
     
     # Highlight significant changes
     def highlight_changes(val):
@@ -855,54 +536,20 @@ def render_complete_parameter_table(rec_df, sort_by="Pair Name"):
                 pass
         return ''
     
-    def highlight_zscore(val):
-        """Highlight significant z-scores"""
-        if isinstance(val, str) and not val == "N/A":
-            try:
-                num_val = abs(float(val))
-                if num_val > 2.0:
-                    return 'background-color: #ffcccc'  # Red for significant z-score
-                elif num_val > 1.5:
-                    return 'background-color: #ffffcc'  # Yellow for moderate z-score
-            except:
-                pass
-        return ''
-    
     # Create a formatted DataFrame for display
     display_df = pd.DataFrame({
         'Pair': sorted_df['pair_name'],
         'Type': sorted_df['token_type'],
         'Current Spread': sorted_df['current_spread'].apply(lambda x: f"{x*10000:.2f}" if not pd.isna(x) else "N/A"),
         'Baseline Spread': sorted_df['baseline_spread'].apply(lambda x: f"{x*10000:.2f}" if not pd.isna(x) else "N/A"),
-        'Z-Score': sorted_df['z_score'].apply(
-            lambda x: f"{x:.2f}" if not pd.isna(x) else "N/A"
-        ),
         'Spread Change': sorted_df['spread_change_pct'].apply(
             lambda x: f"{x:+.2f}%" if not pd.isna(x) else "N/A"
         ),
         'Current Buffer': sorted_df['current_buffer_rate'].apply(
             lambda x: f"{x*100:.3f}%" if not pd.isna(x) else "N/A"
         ),
-        'Recommended Buffer': sorted_df.apply(
-            lambda row: f"{row['recommended_buffer_rate']*100:.3f}%" 
-            if not pd.isna(row['recommended_buffer_rate']) and not pd.isna(row['current_buffer_rate']) 
-            else "N/A", 
-            axis=1
-        ),
-        'Buffer Change': sorted_df['buffer_change'].apply(
-            lambda x: f"{x:+.3f}%" if not pd.isna(x) and abs(x) > 0.01 else "±0.00%"
-        ),
         'Current Position': sorted_df['current_position_multiplier'].apply(
             lambda x: f"{x:,.0f}" if not pd.isna(x) else "N/A"
-        ),
-        'Recommended Position': sorted_df.apply(
-            lambda row: f"{row['recommended_position_multiplier']:,.0f}" 
-            if not pd.isna(row['recommended_position_multiplier']) and not pd.isna(row['current_position_multiplier']) 
-            else "N/A", 
-            axis=1
-        ),
-        'Position Change': sorted_df['position_change'].apply(
-            lambda x: f"{x:+.2f}%" if not pd.isna(x) and abs(x) > 0.01 else "±0.00%"
         ),
         'Max Leverage': sorted_df['max_leverage'].apply(
             lambda x: f"{x:.0f}x" if not pd.isna(x) else "N/A"
@@ -910,9 +557,7 @@ def render_complete_parameter_table(rec_df, sort_by="Pair Name"):
     })
     
     # Style the dataframe with highlighting
-    styled_df = display_df.style\
-        .applymap(highlight_changes, subset=['Buffer Change', 'Position Change', 'Spread Change'])\
-        .applymap(highlight_zscore, subset=['Z-Score'])
+    styled_df = display_df.style.applymap(highlight_changes, subset=['Spread Change'])
     
     # Display with highlighting
     st.dataframe(styled_df, use_container_width=True)
@@ -920,105 +565,10 @@ def render_complete_parameter_table(rec_df, sort_by="Pair Name"):
     # Add a color legend below the table
     st.markdown("""
     <div style="margin-top: 10px; font-size: 0.8em;">
-        <span style="background-color: #ffcccc; padding: 3px 8px;">Red</span>: Major adjustment needed (Z-Score > 2.0 or change > 5%)
-        <span style="margin-left: 15px; background-color: #ffffcc; padding: 3px 8px;">Yellow</span>: Moderate adjustment needed (Z-Score > 1.5 or change > 2%)
+        <span style="background-color: #ffcccc; padding: 3px 8px;">Red</span>: Major spread change (> 5%)
+        <span style="margin-left: 15px; background-color: #ffffcc; padding: 3px 8px;">Yellow</span>: Moderate spread change (> 2%)
     </div>
     """, unsafe_allow_html=True)
-
-def render_significant_changes_summary(rec_df):
-    """Render a summary of pairs with significant parameter changes"""
-    
-    if rec_df is None or rec_df.empty:
-        return
-    
-    # Filter pairs with significant changes (either buffer or position)
-    # Avoid using abs() operation directly on dataframe columns
-    significant_df = rec_df[
-        (rec_df['buffer_change'] > 2.0) | 
-        (rec_df['buffer_change'] < -2.0) | 
-        (rec_df['position_change'] > 2.0) |
-        (rec_df['position_change'] < -2.0) |
-        ((rec_df['z_score'] > 1.5) | (rec_df['z_score'] < -1.5)) & rec_df['z_score'].notna()
-    ].copy()
-    
-    if significant_df.empty:
-        st.info("No pairs have significant parameter changes at this time.")
-        return
-    
-    # Sort by absolute z-score value as primary sort
-    # Custom function to avoid direct .abs() on dataframe column
-    significant_df['z_score_sort'] = significant_df['z_score'].apply(
-        lambda x: abs(float(x)) if pd.notna(x) else 0
-    )
-    significant_df = significant_df.sort_values('z_score_sort', ascending=False)
-    
-    # Display summary table
-    st.markdown("### Pairs Requiring Adjustment")
-    
-    # Create a formatted DataFrame for display
-    display_df = pd.DataFrame({
-        'Pair': significant_df['pair_name'],
-        'Current Spread': significant_df['current_spread'].apply(lambda x: f"{x*10000:.2f}" if not pd.isna(x) else "N/A"),
-        'Z-Score': significant_df['z_score'].apply(
-            lambda x: f"{x:.2f}" if not pd.isna(x) else "N/A"
-        ),
-        'Spread Change': significant_df['spread_change_pct'].apply(
-            lambda x: f"{x:+.2f}%" if not pd.isna(x) else "N/A"
-        ),
-        'Current Buffer': significant_df['current_buffer_rate'].apply(
-            lambda x: f"{x*100:.3f}%" if not pd.isna(x) else "N/A"
-        ),
-        'Recommended Buffer': significant_df.apply(
-            lambda row: f"{row['recommended_buffer_rate']*100:.3f}%" 
-            if not pd.isna(row['recommended_buffer_rate']) and not pd.isna(row['current_buffer_rate']) 
-            else "N/A", 
-            axis=1
-        ),
-        'Buffer Change': significant_df['buffer_change'].apply(
-            lambda x: f"{x:+.3f}%" if not pd.isna(x) and abs(x) > 0.01 else "±0.00%"
-        ),
-        'Current Position': significant_df['current_position_multiplier'].apply(
-            lambda x: f"{x:,.0f}" if not pd.isna(x) else "N/A"
-        ),
-        'Recommended Position': significant_df.apply(
-            lambda row: f"{row['recommended_position_multiplier']:,.0f}" 
-            if not pd.isna(row['recommended_position_multiplier']) and not pd.isna(row['current_position_multiplier']) 
-            else "N/A", 
-            axis=1
-        ),
-        'Position Change': significant_df['position_change'].apply(
-            lambda x: f"{x:+.2f}%" if not pd.isna(x) and abs(x) > 0.01 else "±0.00%"
-        ),
-        'Max Leverage': significant_df['max_leverage'].apply(
-            lambda x: f"{x:.0f}x" if not pd.isna(x) else "N/A"
-        )
-    })
-    
-    # Drop the temporary sorting column
-    significant_df = significant_df.drop('z_score_sort', axis=1)
-    
-    st.dataframe(display_df, use_container_width=True)
-    
-    # Display summary metrics
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        total_significant = len(significant_df)
-        st.metric("Pairs Needing Adjustment", total_significant)
-    
-    with col2:
-        buffer_increases = len(significant_df[significant_df['buffer_change'] > 2.0])
-        st.metric("Buffer Increases", buffer_increases)
-    
-    with col3:
-        buffer_decreases = len(significant_df[significant_df['buffer_change'] < -2.0])
-        st.metric("Buffer Decreases", buffer_decreases)
-    
-    with col4:
-        # Count position changes without using abs()
-        position_changes = len(significant_df[(significant_df['position_change'] > 2.0) | 
-                                            (significant_df['position_change'] < -2.0)])
-        st.metric("Position Changes", position_changes)
 
 def render_rollbit_comparison(comparison_df):
     """Render the Rollbit comparison tab"""
@@ -1106,53 +656,6 @@ def render_rollbit_comparison(comparison_df):
     *Note: "N/A" is displayed when either SURF or Rollbit has null, zero, or missing values for comparison.*
     """)
 
-def render_overview():
-    """Render the overview tab with explanations"""
-    
-    st.markdown("### Dashboard Overview")
-    
-    st.markdown("""
-    This dashboard helps optimize trading parameters based on market conditions:
-    
-    ### Key Parameters
-    
-    - **Buffer Rate**: Percentage of the position that must be maintained as margin for safety.
-      - When spreads increase, buffer rate should increase to account for higher volatility risk.
-      - When spreads decrease, buffer rate should decrease accordingly.
-      - Parameter bounds: 0 to 70% of 1/max_leverage
-      
-    - **Position Multiplier**: Factor that determines the maximum position size per unit of margin.
-      - When spreads increase, position multiplier should decrease to limit exposure.
-      - When spreads decrease, position multiplier should increase accordingly.
-      - Parameter bounds: 1 to 15,000
-    
-    ### Z-Score Based Parameter Adjustment
-    
-    - Z-Score = (Current Spread - Baseline Spread) / Weekly Standard Deviation
-    - Changes are only applied when Z-Score exceeds threshold (1.5)
-    - This approach accounts for the typical volatility range of each token
-    - Tokens with naturally high spread volatility require larger absolute changes to trigger adjustments
-    
-    ### Dashboard Controls
-    
-    - **Refresh Data**: Updates current spreads and parameters from the database
-    - **Reset Baselines**: Sets current market spreads as new baselines
-    - **Update Weekly Stats**: Updates the weekly spread range statistics used for Z-score calculation
-    - **Apply Recommendations**: Updates database with recommended parameters
-    - **Undo Latest Changes**: Reverts parameters to values before last applied changes
-    
-    ### Market Impact Formula
-    
-    ```
-    P_close(T) = P(t) + ((1 - base_rate) / (1 + 1/abs((P(T)/P(t) - 1)*rate_multiplier)^rate_exponent + bet_amount*bet_multiplier/(10^6*abs(P(T)/P(t) - 1)*position_multiplier)))*(P(T) - P(t))
-    ```
-    
-    Where:
-    - P(t) is the opening price
-    - P(T) is the market price at close time
-    - position_multiplier is the parameter we optimize
-    """)
-
 # --- Main Application ---
 def main():
     # Initialize session state
@@ -1163,7 +666,7 @@ def main():
         if create_weekly_stats_table():
             st.session_state.table_created = True
     
-    st.markdown('<div class="header-style">Exchange Parameter Optimization Dashboard</div>', unsafe_allow_html=True)
+    st.markdown('<div class="header-style">Exchange Parameter Dashboard</div>', unsafe_allow_html=True)
 
     # Sidebar controls
     st.sidebar.header("Controls")
@@ -1201,115 +704,37 @@ def main():
         else:
             st.sidebar.error("No market data available to update weekly stats")
 
-    # Add adjustment sensitivity controls
-    st.sidebar.header("Adjustment Sensitivity")
-    buffer_sensitivity = st.sidebar.slider("Buffer Rate Sensitivity", 0.1, 1.0, 0.5, 0.1)
-    position_sensitivity = st.sidebar.slider("Position Multiplier Sensitivity", 0.1, 1.0, 0.5, 0.1)
-
-    # Set sensitivities
-    sensitivities = {
-        'buffer_sensitivity': buffer_sensitivity,
-        'position_sensitivity': position_sensitivity
-    }
-
     # Create simplified tab navigation
-    tabs = st.tabs(["Complete Parameter Table", "Rollbit Comparison", "Overview"])
+    tabs = st.tabs(["Parameter Table", "Rollbit Comparison"])
     
     # Fetch data
     current_params_df = fetch_current_parameters()
     market_data_df = fetch_market_spread_data()
     baselines_df = fetch_spread_baselines()
     rollbit_df = fetch_rollbit_parameters()
-    weekly_stats_df = fetch_spread_weekly_stats()  # New: fetch weekly stats
 
-    # Generate recommendations
-    if current_params_df is not None and market_data_df is not None and baselines_df is not None:
-        # Generate recommendations with the selected sensitivities
-        rec_df = generate_recommendations(current_params_df, market_data_df, baselines_df, weekly_stats_df, sensitivities)
-        
+    # Process the data and render tabs
+    if current_params_df is not None:
         # Add Rollbit comparison data if available
+        params_with_rollbit = current_params_df.copy()
         if rollbit_df is not None:
-            rec_df = add_rollbit_comparison(rec_df, rollbit_df)
+            params_with_rollbit = add_rollbit_comparison(params_with_rollbit, rollbit_df)
         
         # Render the appropriate tab content
-        with tabs[0]:  # Complete Parameter Table
+        with tabs[0]:  # Parameter Table
             # Add sort options
             sort_by = st.selectbox(
                 "Sort by:",
-                options=[
-                    "Pair Name", 
-                    "Buffer Change", 
-                    "Position Change", 
-                    "Spread Change Ratio", 
-                    "Z-Score"  # New: add Z-Score as sort option
-                ],
+                options=["Pair Name", "Spread Change"],
                 index=0
             )
             
-            # Add recommendation application and undo buttons
-            col1, col2 = st.columns([1, 1])
-            
-            with col1:
-                apply_button = st.button("Apply Recommendations", key="apply_button", use_container_width=True)
-                
-                if apply_button:
-                    st.session_state.show_confirm_dialog = True
-            
-            with col2:
-                # Always show the Undo button if we have backup params, regardless of has_applied_recommendations flag
-                if st.session_state.backup_params:
-                    if st.button("Undo Latest Changes", key="undo_button", use_container_width=True):
-                        success, message = undo_parameter_changes()
-                        if success:
-                            st.success(message)
-                            # Refresh data
-                            st.cache_data.clear()
-                            st.experimental_rerun()
-                        else:
-                            st.error(message)
-            
-            # Show confirmation dialog if needed
-            if st.session_state.show_confirm_dialog:
-                st.warning("Are you sure you want to apply all recommendations to the database?")
-                confirm_col1, confirm_col2 = st.columns([1, 1])
-                
-                with confirm_col1:
-                    if st.button("Yes, Apply Changes", key="confirm_yes"):
-                        success, message = apply_parameter_recommendations(rec_df)
-                        if success:
-                            st.success(message)
-                            # Reset confirmation flag
-                            st.session_state.show_confirm_dialog = False
-                            # Refresh data
-                            st.cache_data.clear()
-                            st.experimental_rerun()
-                        else:
-                            st.error(message)
-                
-                with confirm_col2:
-                    if st.button("No, Cancel", key="confirm_no"):
-                        st.session_state.show_confirm_dialog = False
-                        st.experimental_rerun()
-            
-            # Show pairs requiring adjustment first
-            render_significant_changes_summary(rec_df)
-            
-            # Show complete parameter comparison table
-            st.markdown("### Complete Parameter Comparison Table")
-            render_complete_parameter_table(rec_df, sort_by)
-            
-            # Add info about parameter constraints
-            st.markdown("""
-            ### Parameter Constraints
-            - **Buffer Rate**: Values are constrained between 0 and 70% of 1/max_leverage
-            - **Position Multiplier**: Values are constrained between 1 and 15,000
-            """)
+            # Show parameter table
+            st.markdown("### Parameter Table")
+            render_parameter_table(current_params_df, market_data_df, baselines_df, sort_by)
             
         with tabs[1]:  # Rollbit Comparison
-            render_rollbit_comparison(rec_df)
-            
-        with tabs[2]:  # Overview
-            render_overview()
+            render_rollbit_comparison(params_with_rollbit)
             
     else:
         st.error("Failed to load required data. Please check database connection and try refreshing.")
