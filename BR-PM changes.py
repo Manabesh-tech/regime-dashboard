@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import pytz
 import traceback
 import json
+import math
 
 # Page configuration
 st.set_page_config(
@@ -84,6 +85,10 @@ def init_session_state():
     """Initialize session state variables"""
     if 'backup_params' not in st.session_state:
         st.session_state.backup_params = None
+    if 'has_applied_recommendations' not in st.session_state:
+        st.session_state.has_applied_recommendations = False
+    if 'show_confirm_dialog' not in st.session_state:
+        st.session_state.show_confirm_dialog = False
     if 'table_created' not in st.session_state:
         st.session_state.table_created = False
 
@@ -437,54 +442,27 @@ def reset_all_baselines(market_data_df):
     
     return success_count > 0, success_count, error_count
 
-def add_rollbit_comparison(params_df, rollbit_df):
-    """Add Rollbit parameter data to parameters DataFrame for comparison"""
-    if params_df is None or rollbit_df is None or params_df.empty or rollbit_df.empty:
-        return params_df
-    
-    # Create mapping of Rollbit parameters
-    rollbit_params = {}
-    for _, row in rollbit_df.iterrows():
-        pair_name = row['pair_name']
-        
-        # Extract the parameters, handling potential column name differences
-        buffer_rate = row.get('buffer_rate', row.get('bust_buffer', np.nan))
-        position_multiplier = row.get('position_multiplier', np.nan)
-        
-        rollbit_params[pair_name] = {
-            'buffer_rate': buffer_rate,
-            'position_multiplier': position_multiplier
-        }
-    
-    # Add Rollbit parameters to parameters DataFrame
-    for i, row in params_df.iterrows():
-        pair_name = row['pair_name']
-        
-        if pair_name in rollbit_params:
-            # Safely add Rollbit parameters (handling NULL/zero values)
-            params_df.at[i, 'rollbit_buffer_rate'] = rollbit_params[pair_name]['buffer_rate']
-            params_df.at[i, 'rollbit_position_multiplier'] = rollbit_params[pair_name]['position_multiplier']
-    
-    return params_df
-
-def render_parameter_table(params_df, market_data_df, baselines_df, sort_by="Pair Name"):
-    """Render the parameter table with all pairs"""
+def render_complete_parameter_table(params_df, market_data_df, baselines_df, sort_by="Pair Name"):
+    """Render the complete parameter table with all pairs"""
     
     if params_df is None or params_df.empty:
         st.warning("No parameter data available.")
         return
     
-    # Calculate current spreads
-    current_spreads = calculate_current_spreads(market_data_df) if market_data_df is not None else {}
+    # Map sort option to column name
+    sort_map = {
+        "Pair Name": "pair_name",
+        "Spread Change": "spread_change_pct"
+    }
     
-    # Create baselines dictionary
+    # Add spread data to params_df
+    data = []
+    current_spreads = calculate_current_spreads(market_data_df) if market_data_df is not None else {}
     baselines = {}
     if baselines_df is not None and not baselines_df.empty:
         for _, row in baselines_df.iterrows():
             baselines[row['pair_name']] = row['baseline_spread']
     
-    # Add current spread and baseline data to params_df
-    data = []
     for _, row in params_df.iterrows():
         pair_name = row['pair_name']
         current_spread = current_spreads.get(pair_name, None)
@@ -494,33 +472,26 @@ def render_parameter_table(params_df, market_data_df, baselines_df, sort_by="Pai
         spread_change_pct = None
         if current_spread is not None and baseline_spread is not None and baseline_spread > 0:
             spread_change_pct = ((current_spread / baseline_spread) - 1) * 100
-        
+            
         data.append({
             'pair_name': pair_name,
             'token_type': 'Major' if is_major(pair_name) else 'Altcoin',
-            'current_buffer_rate': row['buffer_rate'],
-            'current_position_multiplier': row['position_multiplier'],
+            'buffer_rate': row['buffer_rate'],
+            'position_multiplier': row['position_multiplier'],
             'current_spread': current_spread,
             'baseline_spread': baseline_spread,
             'spread_change_pct': spread_change_pct,
             'max_leverage': row['max_leverage']
         })
     
-    params_with_data_df = pd.DataFrame(data)
-    
-    # Map sort option to column name
-    sort_map = {
-        "Pair Name": "pair_name",
-        "Spread Change": "spread_change_pct"
-    }
+    df = pd.DataFrame(data)
     
     # Sort the DataFrame based on sort option
     sort_column = sort_map.get(sort_by, "pair_name")
-    
     if sort_column == "spread_change_pct":
-        sorted_df = params_with_data_df.sort_values(sort_column, ascending=False)
+        sorted_df = df.sort_values(sort_column, ascending=False)
     else:
-        sorted_df = params_with_data_df.sort_values(sort_column)
+        sorted_df = df.sort_values(sort_column)
     
     # Highlight significant changes
     def highlight_changes(val):
@@ -545,10 +516,10 @@ def render_parameter_table(params_df, market_data_df, baselines_df, sort_by="Pai
         'Spread Change': sorted_df['spread_change_pct'].apply(
             lambda x: f"{x:+.2f}%" if not pd.isna(x) else "N/A"
         ),
-        'Current Buffer': sorted_df['current_buffer_rate'].apply(
+        'Buffer Rate': sorted_df['buffer_rate'].apply(
             lambda x: f"{x*100:.3f}%" if not pd.isna(x) else "N/A"
         ),
-        'Current Position': sorted_df['current_position_multiplier'].apply(
+        'Position Multiplier': sorted_df['position_multiplier'].apply(
             lambda x: f"{x:,.0f}" if not pd.isna(x) else "N/A"
         ),
         'Max Leverage': sorted_df['max_leverage'].apply(
@@ -570,41 +541,46 @@ def render_parameter_table(params_df, market_data_df, baselines_df, sort_by="Pai
     </div>
     """, unsafe_allow_html=True)
 
-def render_rollbit_comparison(comparison_df):
+def render_rollbit_comparison(params_df, rollbit_df):
     """Render the Rollbit comparison tab"""
-    
-    if comparison_df is None or comparison_df.empty:
-        st.info("No matching pairs found with Rollbit data for comparison.")
+    if params_df is None or rollbit_df is None or params_df.empty or rollbit_df.empty:
+        st.info("No data available for Rollbit comparison.")
         return
     
-    # Filter to pairs that have Rollbit data
-    rollbit_df = comparison_df.dropna(subset=['rollbit_buffer_rate', 'rollbit_position_multiplier'])
+    # Merge the dataframes on pair_name
+    merged_df = pd.merge(
+        params_df[['pair_name', 'buffer_rate', 'position_multiplier']], 
+        rollbit_df[['pair_name', 'buffer_rate', 'position_multiplier']], 
+        on='pair_name', 
+        how='inner',
+        suffixes=('', '_rollbit')
+    )
     
-    if rollbit_df.empty:
-        st.info("No matching pairs found with Rollbit data for comparison.")
+    if merged_df.empty:
+        st.info("No matching pairs found for Rollbit comparison.")
         return
     
-    # Display parameter comparison
+    # Buffer Rate Comparison
     st.markdown("### Buffer Rate Comparison")
     
     # Create buffer rate comparison table
     buffer_df = pd.DataFrame({
-        'Pair': rollbit_df['pair_name'],
-        'Type': rollbit_df['pair_name'].apply(lambda x: 'Major' if is_major(x) else 'Altcoin'),
-        'SURF Buffer': rollbit_df['buffer_rate'].apply(
+        'Pair': merged_df['pair_name'],
+        'Type': merged_df['pair_name'].apply(lambda x: 'Major' if is_major(x) else 'Altcoin'),
+        'SURF Buffer': merged_df['buffer_rate'].apply(
             lambda x: f"{x*100:.3f}%" if not pd.isna(x) else "N/A"
         ),
-        'Rollbit Buffer': rollbit_df['rollbit_buffer_rate'].apply(
+        'Rollbit Buffer': merged_df['buffer_rate_rollbit'].apply(
             lambda x: f"{x*100:.3f}%" if not pd.isna(x) else "N/A"
         )
     })
     
-    # Add buffer ratio column - use safer calculation
+    # Add buffer ratio column
     buffer_ratio = []
-    for _, row in rollbit_df.iterrows():
-        if (not check_null_or_zero(row.get('buffer_rate')) and 
-            not check_null_or_zero(row.get('rollbit_buffer_rate'))):
-            ratio = safe_division(row['buffer_rate'], row['rollbit_buffer_rate'], None)
+    for _, row in merged_df.iterrows():
+        if (not check_null_or_zero(row['buffer_rate']) and 
+            not check_null_or_zero(row['buffer_rate_rollbit'])):
+            ratio = safe_division(row['buffer_rate'], row['buffer_rate_rollbit'], None)
             buffer_ratio.append(f"{ratio:.2f}x" if ratio is not None else "N/A")
         else:
             buffer_ratio.append("N/A")
@@ -619,22 +595,22 @@ def render_rollbit_comparison(comparison_df):
     
     # Create position multiplier comparison table
     position_df = pd.DataFrame({
-        'Pair': rollbit_df['pair_name'],
-        'Type': rollbit_df['pair_name'].apply(lambda x: 'Major' if is_major(x) else 'Altcoin'),
-        'SURF Position Mult.': rollbit_df['position_multiplier'].apply(
+        'Pair': merged_df['pair_name'],
+        'Type': merged_df['pair_name'].apply(lambda x: 'Major' if is_major(x) else 'Altcoin'),
+        'SURF Position Mult.': merged_df['position_multiplier'].apply(
             lambda x: f"{x:,.0f}" if not pd.isna(x) else "N/A"
         ),
-        'Rollbit Position Mult.': rollbit_df['rollbit_position_multiplier'].apply(
+        'Rollbit Position Mult.': merged_df['position_multiplier_rollbit'].apply(
             lambda x: f"{x:,.0f}" if not pd.isna(x) else "N/A"
         )
     })
     
     # Add position ratio column
     position_ratio = []
-    for _, row in rollbit_df.iterrows():
-        if (not check_null_or_zero(row.get('position_multiplier')) and 
-            not check_null_or_zero(row.get('rollbit_position_multiplier'))):
-            ratio = safe_division(row['position_multiplier'], row['rollbit_position_multiplier'], None)
+    for _, row in merged_df.iterrows():
+        if (not check_null_or_zero(row['position_multiplier']) and 
+            not check_null_or_zero(row['position_multiplier_rollbit'])):
+            ratio = safe_division(row['position_multiplier'], row['position_multiplier_rollbit'], None)
             position_ratio.append(f"{ratio:.2f}x" if ratio is not None else "N/A")
         else:
             position_ratio.append("N/A")
@@ -726,28 +702,10 @@ def main():
             
             # Show parameter table
             st.markdown("### Parameter Table")
-            render_parameter_table(current_params_df, market_data_df, baselines_df, sort_by)
+            render_complete_parameter_table(current_params_df, market_data_df, baselines_df, sort_by)
             
         with tabs[1]:  # Rollbit Comparison
-            if rollbit_df is not None:
-                # For the Rollbit comparison, we need to directly compare the columns
-                st.markdown("### Rollbit Comparison")
-                
-                # Merge the dataframes on pair_name
-                merged_df = pd.merge(
-                    current_params_df[['pair_name', 'buffer_rate', 'position_multiplier']], 
-                    rollbit_df[['pair_name', 'buffer_rate', 'position_multiplier']], 
-                    on='pair_name', 
-                    how='inner',
-                    suffixes=('', '_rollbit')
-                )
-                
-                if not merged_df.empty:
-                    render_rollbit_comparison(merged_df)
-                else:
-                    st.info("No matching pairs found between our parameters and Rollbit's.")
-            else:
-                st.info("No Rollbit data available for comparison.")
+            render_rollbit_comparison(current_params_df, rollbit_df)
             
     else:
         st.error("Failed to load required data. Please check database connection and try refreshing.")
