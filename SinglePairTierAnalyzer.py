@@ -13,7 +13,7 @@ st.cache_data.clear()
 
 # Page configuration - absolute minimum for speed
 st.set_page_config(
-    page_title="Enhanced Depth Tier Analyzer",
+    page_title="Aggregated Depth Tier Analyzer",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="collapsed"  # Start with sidebar collapsed for speed
