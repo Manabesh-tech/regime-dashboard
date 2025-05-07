@@ -89,8 +89,6 @@ def init_session_state():
         st.session_state.has_applied_recommendations = False
     if 'show_confirm_dialog' not in st.session_state:
         st.session_state.show_confirm_dialog = False
-    if 'table_created' not in st.session_state:
-        st.session_state.table_created = False
 
 # --- Utility Functions ---
 def format_percent(value):
@@ -275,21 +273,39 @@ def fetch_spread_baselines():
         return None
 
 @st.cache_data(ttl=600)
-def fetch_spread_weekly_stats():
-    """Fetch weekly spread statistics"""
+def fetch_weekly_spread_stats():
+    """Fetch weekly spread statistics for the past 7 days"""
     try:
         engine = init_connection()
         if not engine:
             return None
-        query = """
+            
+        # Get current time in Singapore timezone and calculate 7 days ago
+        singapore_timezone = pytz.timezone('Asia/Singapore')
+        now_utc = datetime.now(pytz.utc)
+        now_sg = now_utc.astimezone(singapore_timezone)
+        start_time_sg = now_sg - timedelta(days=7)
+        
+        # Convert back to UTC for database query
+        start_time_utc = start_time_sg.astimezone(pytz.utc)
+        end_time_utc = now_sg.astimezone(pytz.utc)
+        
+        query = f"""
         SELECT 
             pair_name,
-            min_spread,
-            max_spread,
-            std_dev,
-            updated_at
-        FROM spread_weekly_stats
+            MAX(fee1) as max_spread,
+            MIN(fee1) as min_spread
+        FROM 
+            oracle_exchange_fee
+        WHERE 
+            source IN ('binanceFuture', 'gateFuture', 'hyperliquidFuture')
+            AND time_group BETWEEN '{start_time_utc}' AND '{end_time_utc}'
+        GROUP BY 
+            pair_name
+        ORDER BY 
+            pair_name
         """
+        
         df = pd.read_sql(query, engine)
         return df if not df.empty else None
     except Exception as e:
@@ -442,7 +458,7 @@ def reset_all_baselines(market_data_df):
     
     return success_count > 0, success_count, error_count
 
-def render_complete_parameter_table(params_df, market_data_df, baselines_df, sort_by="Pair Name"):
+def render_complete_parameter_table(params_df, market_data_df, baselines_df, weekly_stats_df, sort_by="Pair Name"):
     """Render the complete parameter table with all pairs"""
     
     if params_df is None or params_df.empty:
@@ -463,11 +479,27 @@ def render_complete_parameter_table(params_df, market_data_df, baselines_df, sor
         for _, row in baselines_df.iterrows():
             baselines[row['pair_name']] = row['baseline_spread']
     
+    # Create weekly stats dict
+    weekly_stats = {}
+    if weekly_stats_df is not None and not weekly_stats_df.empty:
+        for _, row in weekly_stats_df.iterrows():
+            weekly_stats[row['pair_name']] = {
+                'min_spread': row['min_spread'],
+                'max_spread': row['max_spread']
+            }
+    
     for _, row in params_df.iterrows():
         pair_name = row['pair_name']
         current_spread = current_spreads.get(pair_name, None)
         baseline_spread = baselines.get(pair_name, None)
         
+        # Get weekly stats
+        weekly_min = None
+        weekly_max = None
+        if pair_name in weekly_stats:
+            weekly_min = weekly_stats[pair_name]['min_spread']
+            weekly_max = weekly_stats[pair_name]['max_spread']
+            
         # Calculate spread change percentage
         spread_change_pct = None
         if current_spread is not None and baseline_spread is not None and baseline_spread > 0:
@@ -480,6 +512,8 @@ def render_complete_parameter_table(params_df, market_data_df, baselines_df, sor
             'position_multiplier': row['position_multiplier'],
             'current_spread': current_spread,
             'baseline_spread': baseline_spread,
+            'weekly_min': weekly_min,
+            'weekly_max': weekly_max,
             'spread_change_pct': spread_change_pct,
             'max_leverage': row['max_leverage']
         })
@@ -513,6 +547,8 @@ def render_complete_parameter_table(params_df, market_data_df, baselines_df, sor
         'Type': sorted_df['token_type'],
         'Current Spread': sorted_df['current_spread'].apply(lambda x: f"{x*10000:.2f}" if not pd.isna(x) else "N/A"),
         'Baseline Spread': sorted_df['baseline_spread'].apply(lambda x: f"{x*10000:.2f}" if not pd.isna(x) else "N/A"),
+        'Weekly High': sorted_df['weekly_max'].apply(lambda x: f"{x*10000:.2f}" if not pd.isna(x) else "N/A"),
+        'Weekly Low': sorted_df['weekly_min'].apply(lambda x: f"{x*10000:.2f}" if not pd.isna(x) else "N/A"),
         'Spread Change': sorted_df['spread_change_pct'].apply(
             lambda x: f"{x:+.2f}%" if not pd.isna(x) else "N/A"
         ),
@@ -637,12 +673,7 @@ def main():
     # Initialize session state
     init_session_state()
     
-    # Create weekly stats table if not already created
-    if not st.session_state.table_created:
-        if create_weekly_stats_table():
-            st.session_state.table_created = True
-    
-    st.markdown('<div class="header-style">Exchange Parameter Dashboard</div>', unsafe_allow_html=True)
+    st.markdown('<div class="header-style">Surf vs Rollbit Parameters</div>', unsafe_allow_html=True)
 
     # Sidebar controls
     st.sidebar.header("Controls")
@@ -665,20 +696,6 @@ def main():
                 st.sidebar.error(f"Failed to reset baselines. {errors} errors occurred.")
         else:
             st.sidebar.error("No market data available to reset baselines")
-    
-    # Add weekly stats update button
-    if st.sidebar.button("Update Weekly Spread Stats", use_container_width=True):
-        market_data_df = fetch_market_spread_data()
-        if market_data_df is not None and not market_data_df.empty:
-            success, message = update_weekly_spread_stats(market_data_df)
-            if success:
-                st.sidebar.success(message)
-                # Clear cache to refresh data
-                st.cache_data.clear()
-            else:
-                st.sidebar.error(message)
-        else:
-            st.sidebar.error("No market data available to update weekly stats")
 
     # Create simplified tab navigation
     tabs = st.tabs(["Parameter Table", "Rollbit Comparison"])
@@ -688,6 +705,7 @@ def main():
     market_data_df = fetch_market_spread_data()
     baselines_df = fetch_spread_baselines()
     rollbit_df = fetch_rollbit_parameters()
+    weekly_stats_df = fetch_weekly_spread_stats()
 
     # Process the data and render tabs
     if current_params_df is not None:
@@ -702,7 +720,7 @@ def main():
             
             # Show parameter table
             st.markdown("### Parameter Table")
-            render_complete_parameter_table(current_params_df, market_data_df, baselines_df, sort_by)
+            render_complete_parameter_table(current_params_df, market_data_df, baselines_df, weekly_stats_df, sort_by)
             
         with tabs[1]:  # Rollbit Comparison
             render_rollbit_comparison(current_params_df, rollbit_df)
