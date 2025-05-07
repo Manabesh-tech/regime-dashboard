@@ -345,18 +345,19 @@ def process_token_data(token):
 results = {}
 all_blocks_avg = pd.DataFrame()
 
-with st.spinner("Processing data for selected tokens..."):
-    for token in selected_tokens:
-        result = process_token_data(token)
-        if result:
-            results[token] = result
-            
-            # Add to all blocks average dataframe
-            block_avg = result['avg_by_block']
-            if not block_avg.empty:
-                all_blocks_avg[token] = block_avg
+if selected_tokens:  # Only run analysis if tokens are selected
+    with st.spinner("Processing data for selected tokens..."):
+        for token in selected_tokens:
+            result = process_token_data(token)
+            if result:
+                results[token] = result
+                
+                # Add to all blocks average dataframe
+                block_avg = result['avg_by_block']
+                if not block_avg.empty:
+                    all_blocks_avg[token] = block_avg
 
-# Display results
+# Display results only if we have data
 if results and not all_blocks_avg.empty:
     # Make sure all blocks are represented (0, 3, 6, 9, 12, 15, 18, 21)
     for block in [0, 3, 6, 9, 12, 15, 18, 21]:
