@@ -16,7 +16,8 @@ st.set_page_config(
 )
 
 # --- DATABASE CONNECTION ---
-@st.cache_resource(ttl=3600)
+# Use a cached resource for the database connection instead of creating new ones
+@st.cache_resource
 def get_database_connection():
     """Create a database connection - cached to reuse connections"""
     try:
@@ -25,7 +26,7 @@ def get_database_connection():
             f"postgresql+psycopg2://{db_config['user']}:{db_config['password']}"
             f"@{db_config['host']}:{db_config['port']}/{db_config['database']}"
         )
-        return create_engine(db_uri, pool_pre_ping=True)
+        return create_engine(db_uri)
     except Exception as e:
         st.error(f"Database connection error: {e}")
         return None
@@ -107,6 +108,8 @@ st.subheader("Performance Analysis by User (Singapore Time)")
 st.write(f"Current Singapore Time: {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
 
 # --- CACHING DATA FETCH FUNCTIONS ---
+# These functions no longer take engine as parameter - get it inside
+
 @st.cache_data(ttl=600)
 def fetch_all_pairs():
     """Fetch all trading pairs"""
@@ -166,198 +169,147 @@ def fetch_top_users(limit=100):
         st.error(f"Error fetching users: {e}")
         return [f"user_{i}" for i in range(1, 11)]
 
-# --- OPTIMIZED BATCH DATA FETCH ---
 @st.cache_data(ttl=600)
-def fetch_user_pnl_batch(users, pairs, period, start_time, end_time):
-    """Fetch PNL data for multiple users and pairs for a specific time period in one query"""
-    if not users or not pairs:
-        return {}
-    
-    result = {}
-    for user in users:
-        result[user] = {}
-        for pair in pairs:
-            result[user][pair] = {"pnl": 0, "trades": 0}
-    
-    # Create formatted strings for SQL IN clause
-    user_ids_str = "'" + "', '".join(users) + "'"
-    pair_names_str = "'" + "', '".join(pairs) + "'"
-    
+def fetch_user_pnl_for_period(user_id, pair_name, start_time, end_time):
+    """Fetch PNL data for a specific user, pair and time period"""
     query = f"""
-    WITH pair_mapping AS (
-        SELECT pair_id, pair_name
-        FROM public.trade_pool_pairs
-        WHERE pair_name IN ({pair_names_str})
+    WITH 
+    user_order_pnl AS (
+      -- Calculate user order PNL
+      SELECT
+        COALESCE(SUM("taker_pnl" * "collateral_price"), 0) AS "user_order_pnl"
+      FROM
+        "public"."trade_fill_fresh"
+      WHERE
+        "created_at" BETWEEN '{start_time}' AND '{end_time}'
+        AND "pair_id" IN (SELECT "pair_id" FROM "public"."trade_pool_pairs" WHERE "pair_name" = '{pair_name}')
+        AND "taker_account_id" = '{user_id}'
+        AND "taker_way" IN (1, 2, 3, 4)
+    ),
+    
+    user_fee_payments AS (
+      -- Calculate user fee payments
+      SELECT
+        COALESCE(SUM(-1 * "taker_fee" * "collateral_price"), 0) AS "user_fee_payments"
+      FROM
+        "public"."trade_fill_fresh"
+      WHERE
+        "created_at" BETWEEN '{start_time}' AND '{end_time}'
+        AND "pair_id" IN (SELECT "pair_id" FROM "public"."trade_pool_pairs" WHERE "pair_name" = '{pair_name}')
+        AND "taker_account_id" = '{user_id}'
+        AND "taker_fee_mode" = 1
+        AND "taker_way" IN (1, 3)
+    ),
+    
+    user_funding_payments AS (
+      -- Calculate user funding fee payments
+      SELECT
+        COALESCE(SUM("funding_fee" * "collateral_price"), 0) AS "user_funding_payments"
+      FROM
+        "public"."trade_fill_fresh"
+      WHERE
+        "created_at" BETWEEN '{start_time}' AND '{end_time}'
+        AND "pair_id" IN (SELECT "pair_id" FROM "public"."trade_pool_pairs" WHERE "pair_name" = '{pair_name}')
+        AND "taker_account_id" = '{user_id}'
+        AND "taker_way" = 0
+    ),
+    
+    user_trade_count AS (
+      -- Calculate total number of trades
+      SELECT
+        COUNT(*) AS "trade_count"
+      FROM
+        "public"."trade_fill_fresh"
+      WHERE
+        "created_at" BETWEEN '{start_time}' AND '{end_time}'
+        AND "pair_id" IN (SELECT "pair_id" FROM "public"."trade_pool_pairs" WHERE "pair_name" = '{pair_name}')
+        AND "taker_account_id" = '{user_id}'
+        AND "taker_way" IN (1, 2, 3, 4)
     )
     
-    SELECT 
-        t.taker_account_id AS user_id,
-        p.pair_name,
-        COUNT(*) AS trade_count,
-        SUM(t.taker_pnl * t.collateral_price) AS order_pnl
-    FROM 
-        public.trade_fill_fresh t
-    JOIN 
-        pair_mapping p ON t.pair_id = p.pair_id
-    WHERE 
-        t.created_at BETWEEN '{start_time}' AND '{end_time}'
-        AND t.taker_account_id IN ({user_ids_str})
-        AND t.taker_way IN (1, 2, 3, 4)
-    GROUP BY 
-        t.taker_account_id, p.pair_name
+    -- Final query: combine all data sources
+    SELECT
+      (SELECT "user_order_pnl" FROM user_order_pnl) +
+      (SELECT "user_fee_payments" FROM user_fee_payments) +
+      (SELECT "user_funding_payments" FROM user_funding_payments) AS "user_total_pnl",
+      (SELECT "trade_count" FROM user_trade_count) AS "trade_count"
     """
     
     try:
         engine = get_database_connection()
         if not engine:
-            return result
+            return {"pnl": 0, "trades": 0}
             
         df = pd.read_sql(text(query), engine)
         
-        if not df.empty:
-            for _, row in df.iterrows():
-                user_id = row['user_id']
-                pair_name = row['pair_name']
-                if user_id in result and pair_name in result[user_id]:
-                    result[user_id][pair_name] = {
-                        "pnl": float(row['order_pnl']),
-                        "trades": int(row['trade_count'])
-                    }
+        if df.empty:
+            return {"pnl": 0, "trades": 0}
         
-        # Get fee data in a separate query
-        fee_query = f"""
-        WITH pair_mapping AS (
-            SELECT pair_id, pair_name
-            FROM public.trade_pool_pairs
-            WHERE pair_name IN ({pair_names_str})
-        )
-        
-        SELECT 
-            t.taker_account_id AS user_id,
-            p.pair_name,
-            SUM(-1 * t.taker_fee * t.collateral_price) AS fee_pnl
-        FROM 
-            public.trade_fill_fresh t
-        JOIN 
-            pair_mapping p ON t.pair_id = p.pair_id
-        WHERE 
-            t.created_at BETWEEN '{start_time}' AND '{end_time}'
-            AND t.taker_account_id IN ({user_ids_str})
-            AND t.taker_fee_mode = 1
-            AND t.taker_way IN (1, 3)
-        GROUP BY 
-            t.taker_account_id, p.pair_name
-        """
-        
-        fee_df = pd.read_sql(text(fee_query), engine)
-        
-        if not fee_df.empty:
-            for _, row in fee_df.iterrows():
-                user_id = row['user_id']
-                pair_name = row['pair_name']
-                if user_id in result and pair_name in result[user_id]:
-                    result[user_id][pair_name]["pnl"] += float(row['fee_pnl'])
-        
-        # Get funding data in a separate query
-        funding_query = f"""
-        WITH pair_mapping AS (
-            SELECT pair_id, pair_name
-            FROM public.trade_pool_pairs
-            WHERE pair_name IN ({pair_names_str})
-        )
-        
-        SELECT 
-            t.taker_account_id AS user_id,
-            p.pair_name,
-            SUM(t.funding_fee * t.collateral_price) AS funding_pnl
-        FROM 
-            public.trade_fill_fresh t
-        JOIN 
-            pair_mapping p ON t.pair_id = p.pair_id
-        WHERE 
-            t.created_at BETWEEN '{start_time}' AND '{end_time}'
-            AND t.taker_account_id IN ({user_ids_str})
-            AND t.taker_way = 0
-        GROUP BY 
-            t.taker_account_id, p.pair_name
-        """
-        
-        funding_df = pd.read_sql(text(funding_query), engine)
-        
-        if not funding_df.empty:
-            for _, row in funding_df.iterrows():
-                user_id = row['user_id']
-                pair_name = row['pair_name']
-                if user_id in result and pair_name in result[user_id]:
-                    result[user_id][pair_name]["pnl"] += float(row['funding_pnl'])
-        
-        return result
+        return {
+            "pnl": float(df.iloc[0]['user_total_pnl']),
+            "trades": int(df.iloc[0]['trade_count'])
+        }
     except Exception as e:
-        st.error(f"Error fetching PNL batch data for period {period}: {e}")
-        return result
+        # Log the error but return gracefully
+        print(f"Error processing PNL for user {user_id} on {pair_name}: {e}")
+        return {"pnl": 0, "trades": 0}
 
 @st.cache_data(ttl=600)
-def fetch_user_metadata_batch(users):
-    """Fetch metadata for multiple users in one query"""
-    if not users:
-        return {}
+def fetch_user_metadata(user_id):
+    """Fetch metadata about a user"""
+    query = f"""
+    SELECT 
+        MIN(created_at) as first_trade_date,
+        TO_CHAR(MIN(created_at), 'YYYY-MM-DD') as first_trade_date_str,
+        COUNT(*) as all_time_trades,
+        SUM(ABS("deal_size" * "deal_price")) as all_time_volume
+    FROM 
+        "public"."trade_fill_fresh"
+    WHERE 
+        "taker_account_id" = '{user_id}'
+        AND "taker_way" IN (1, 2, 3, 4)
+    """
     
-    result = {}
-    for user in users:
-        result[user] = {
+    try:
+        engine = get_database_connection()
+        if not engine:
+            return {
+                "first_trade_date": "Unknown",
+                "all_time_trades": 0,
+                "all_time_volume": 0,
+                "account_age_days": 0
+            }
+            
+        df = pd.read_sql(text(query), engine)
+        
+        if df.empty:
+            return {
+                "first_trade_date": "Unknown",
+                "all_time_trades": 0,
+                "all_time_volume": 0,
+                "account_age_days": 0
+            }
+        
+        first_trade = df.iloc[0]['first_trade_date']
+        if first_trade:
+            account_age = (now_utc - first_trade).days
+        else:
+            account_age = 0
+            
+        return {
+            "first_trade_date": df.iloc[0]['first_trade_date_str'],
+            "all_time_trades": int(df.iloc[0]['all_time_trades']),
+            "all_time_volume": float(df.iloc[0]['all_time_volume']),
+            "account_age_days": account_age
+        }
+    except Exception as e:
+        print(f"Error fetching metadata for user {user_id}: {e}")
+        return {
             "first_trade_date": "Unknown",
             "all_time_trades": 0,
             "all_time_volume": 0,
             "account_age_days": 0
         }
-    
-    user_ids_str = "'" + "', '".join(users) + "'"
-    
-    query = f"""
-    SELECT 
-        taker_account_id as user_identifier,
-        MIN(created_at) as first_trade_date,
-        TO_CHAR(MIN(created_at), 'YYYY-MM-DD') as first_trade_date_str,
-        COUNT(*) as all_time_trades,
-        SUM(ABS(deal_size * deal_price)) as all_time_volume
-    FROM 
-        public.trade_fill_fresh
-    WHERE 
-        taker_account_id IN ({user_ids_str})
-        AND taker_way IN (1, 2, 3, 4)
-    GROUP BY 
-        taker_account_id
-    """
-    
-    try:
-        engine = get_database_connection()
-        if not engine:
-            return result
-            
-        df = pd.read_sql(text(query), engine)
-        
-        if not df.empty:
-            now_utc = datetime.now(pytz.utc)
-            for _, row in df.iterrows():
-                user_id = row['user_identifier']
-                first_trade = row['first_trade_date']
-                
-                if first_trade:
-                    account_age = (now_utc - first_trade).days
-                else:
-                    account_age = 0
-                    
-                result[user_id] = {
-                    "first_trade_date": row['first_trade_date_str'],
-                    "all_time_trades": int(row['all_time_trades']),
-                    "all_time_volume": float(row['all_time_volume']),
-                    "account_age_days": account_age
-                }
-        
-        return result
-    except Exception as e:
-        st.error(f"Error fetching user metadata: {e}")
-        return result
 
 # --- LOAD INITIAL DATA ---
 with st.spinner("Loading trading pairs and users..."):
@@ -382,11 +334,12 @@ else:
 
 # User selector
 st.sidebar.subheader("Users")
+st.sidebar.warning("⚠️ Performance Warning: Selecting more than 10 users may cause slow loading.")
 user_limit = st.sidebar.slider(
     "Number of Top Users to Show", 
     min_value=5, 
     max_value=min(100, len(top_users)), 
-    value=25,
+    value=10,  # Reduced default from 25 to 10
     step=5
 )
 
@@ -406,6 +359,14 @@ if not top_selected_users:
     st.warning("No active users found for the selected period")
     st.stop()
 
+# Performance limitation (add this new section)
+max_pairs = 5  # Limit to 5 pairs maximum for performance
+if len(selected_pairs) > max_pairs:
+    st.warning(f"⚠️ For better performance, only the first {max_pairs} pairs will be processed.")
+    limited_pairs = selected_pairs[:max_pairs]
+else:
+    limited_pairs = selected_pairs
+
 # --- DATA PROCESSING ---
 # Show progress
 progress_bar = st.progress(0)
@@ -418,59 +379,62 @@ time_boundaries = get_time_boundaries()
 results = {}
 periods = ["today", "yesterday", "day_before_yesterday", "this_week", "this_month", "all_time"]
 
-# Fetch user metadata (one batch query for all users)
-status_text.text("Fetching user metadata...")
-progress_bar.progress(0.1)
-user_metadata = fetch_user_metadata_batch(top_selected_users)
-progress_bar.progress(0.2)
+# Process data - simpler sequential approach for reliability
+total_combinations = len(top_selected_users) * len(limited_pairs) * len(periods)
+processed_combinations = 0
 
-# Initialize the results structure with user metadata
+# First fetch user metadata since it doesn't depend on pairs
 for user_id in top_selected_users:
-    results[user_id] = {
-        "user_id": user_id,
-        "metadata": user_metadata.get(user_id, {
-            "first_trade_date": "Unknown",
-            "all_time_trades": 0,
-            "all_time_volume": 0,
-            "account_age_days": 0
-        }),
-        "pairs": {}
-    }
+    status_text.text(f"Fetching metadata for user {user_id}...")
+    progress = processed_combinations / total_combinations
+    progress_bar.progress(progress)
     
-    # Initialize pair data
-    for pair_name in selected_pairs:
-        results[user_id]["pairs"][pair_name] = {}
+    if user_id not in results:
+        results[user_id] = {
+            "user_id": user_id,
+            "metadata": fetch_user_metadata(user_id),
+            "pairs": {}
+        }
+    
+    processed_combinations += 1
 
-# Fetch PNL data for each period (one batch query per period)
-period_count = len(periods)
-for i, period in enumerate(periods):
-    status_text.text(f"Fetching data for {period}...")
-    start_time = time_boundaries[period]["start"]
-    end_time = time_boundaries[period]["end"]
-    
-    # Fetch PNL data for this period
-    period_data = fetch_user_pnl_batch(top_selected_users, selected_pairs, period, start_time, end_time)
-    
-    # Update results structure
-    for user_id in top_selected_users:
-        for pair_name in selected_pairs:
+# Then process each user-pair combination
+for user_id in top_selected_users:
+    for pair_name in limited_pairs:
+        status_text.text(f"Processing {user_id} - {pair_name}")
+        
+        if pair_name not in results[user_id]["pairs"]:
+            results[user_id]["pairs"][pair_name] = {}
+        
+        # Process each time period for this user-pair combination
+        for period in periods:
+            processed_combinations += 1
+            progress = processed_combinations / total_combinations
+            progress_bar.progress(progress)
+            
+            start_time = time_boundaries[period]["start"]
+            end_time = time_boundaries[period]["end"]
+            
+            # Fetch PNL data with properly memoized function
+            period_data = fetch_user_pnl_for_period(user_id, pair_name, start_time, end_time)
+            
             # Store results
-            pair_data = period_data.get(user_id, {}).get(pair_name, {"pnl": 0, "trades": 0})
-            results[user_id]["pairs"][pair_name][period] = pair_data
-    
-    # Update progress
-    progress_bar.progress(0.2 + 0.7 * (i + 1) / period_count)
+            results[user_id]["pairs"][pair_name][period] = period_data
+
+# Final progress update
+progress_bar.progress(1.0)
+status_text.text(f"Processed {len(results)} users across {len(limited_pairs)} pairs")
 
 # Calculate totals for each user and period
 for user_id in results:
     for period in periods:
         results[user_id][f"total_{period}_pnl"] = sum(
             results[user_id]["pairs"][pair][period]["pnl"] 
-            for pair in results[user_id]["pairs"] if period in results[user_id]["pairs"][pair]
+            for pair in results[user_id]["pairs"]
         )
         results[user_id][f"total_{period}_trades"] = sum(
             results[user_id]["pairs"][pair][period]["trades"] 
-            for pair in results[user_id]["pairs"] if period in results[user_id]["pairs"][pair]
+            for pair in results[user_id]["pairs"]
         )
 
 # Create DataFrames for display
@@ -501,35 +465,26 @@ user_matrix_df = pd.DataFrame(matrix_rows)
 # Create a DataFrame for per-pair analysis
 pair_rows = []
 for user_id, user_data in results.items():
-    for pair_name in selected_pairs:
-        if pair_name in user_data["pairs"]:
-            pair_data = user_data["pairs"][pair_name]
-            
-            # Only include if all period data exists
-            if all(period in pair_data for period in periods):
-                row = {
-                    'User ID': user_id,
-                    'Trading Pair': pair_name,
-                    'Today PNL': pair_data["today"]["pnl"],
-                    'Today Trades': pair_data["today"]["trades"],
-                    'Yesterday PNL': pair_data["yesterday"]["pnl"],
-                    'Yesterday Trades': pair_data["yesterday"]["trades"],
-                    'Day Before Yesterday PNL': pair_data["day_before_yesterday"]["pnl"],
-                    'Day Before Yesterday Trades': pair_data["day_before_yesterday"]["trades"],
-                    'Week PNL': pair_data["this_week"]["pnl"],
-                    'Week Trades': pair_data["this_week"]["trades"],
-                    'Month PNL': pair_data["this_month"]["pnl"],
-                    'Month Trades': pair_data["this_month"]["trades"],
-                    'All Time PNL': pair_data["all_time"]["pnl"],
-                    'All Time Trades': pair_data["all_time"]["trades"]
-                }
-                pair_rows.append(row)
+    for pair_name, pair_data in user_data["pairs"].items():
+        row = {
+            'User ID': user_id,
+            'Trading Pair': pair_name,
+            'Today PNL': pair_data["today"]["pnl"],
+            'Today Trades': pair_data["today"]["trades"],
+            'Yesterday PNL': pair_data["yesterday"]["pnl"],
+            'Yesterday Trades': pair_data["yesterday"]["trades"],
+            'Day Before Yesterday PNL': pair_data["day_before_yesterday"]["pnl"],
+            'Day Before Yesterday Trades': pair_data["day_before_yesterday"]["trades"],
+            'Week PNL': pair_data["this_week"]["pnl"],
+            'Week Trades': pair_data["this_week"]["trades"],
+            'Month PNL': pair_data["this_month"]["pnl"],
+            'Month Trades': pair_data["this_month"]["trades"],
+            'All Time PNL': pair_data["all_time"]["pnl"],
+            'All Time Trades': pair_data["all_time"]["trades"]
+        }
+        pair_rows.append(row)
 
 user_pair_df = pd.DataFrame(pair_rows)
-
-# Final progress update
-progress_bar.progress(1.0)
-status_text.text(f"Data processing complete for {len(results)} users across {len(selected_pairs)} pairs")
 
 # Calculate additional metrics for analysis
 if not user_matrix_df.empty:
@@ -573,6 +528,10 @@ tab1, tab2, tab3 = st.tabs([
 # Tab 1: User PNL Matrix
 with tab1:
     st.header("User PNL Overview Matrix")
+    
+    # Add notice about limited data
+    if len(selected_pairs) > len(limited_pairs):
+        st.info(f"Showing data for {len(limited_pairs)} out of {len(selected_pairs)} selected pairs. For full analysis, select fewer pairs.")
     
     if user_matrix_df.empty:
         st.warning("No data available for selected users and pairs")
@@ -709,263 +668,257 @@ with tab2:
     st.header("User Performance Details")
     
     # User selector
-    if not user_matrix_df.empty:
-        selected_user_id = st.selectbox(
-            "Select User to Analyze", 
-            user_matrix_df['User ID'].tolist()
-        )
-        
-        # Filter for selected user
-        user_pairs_df = user_pair_df[user_pair_df['User ID'] == selected_user_id].copy()
-        
-        if user_pairs_df.empty:
-            st.warning(f"No data available for user {selected_user_id}")
-        else:
-            # User metadata
-            user_metadata = results[selected_user_id]["metadata"]
-            
-            # Display user info
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("Account Age", f"{user_metadata['account_age_days']} days")
-            with col2:
-                st.metric("First Trade Date", user_metadata['first_trade_date'])
-            with col3:
-                st.metric("Total Trades", f"{user_metadata['all_time_trades']:,}")
-            with col4:
-                st.metric("Trading Volume", f"${user_metadata['all_time_volume']:,.2f}")
-            
-            # Display pair performance
-            st.subheader(f"Trading Pairs Performance for User {selected_user_id}")
-            
-            # Sort by All Time PNL
-            user_pairs_df = user_pairs_df.sort_values(by='All Time PNL', ascending=False)
-            
-            # Calculate additional metrics
-            user_pairs_df['All Time PNL/Trade'] = (
-                user_pairs_df['All Time PNL'] / user_pairs_df['All Time Trades']
-            ).replace([np.inf, -np.inf, np.nan], 0)
-            
-            # Display columns
-            display_cols = [
-                'Trading Pair', 'Today PNL', 'Yesterday PNL', 'Week PNL', 
-                'Month PNL', 'All Time PNL', 'All Time Trades', 'All Time PNL/Trade'
-            ]
-            
-            # Apply styling
-            styled_pairs_df = user_pairs_df[display_cols].style.applymap(
-                color_pnl_cells, 
-                subset=['Today PNL', 'Yesterday PNL', 'Week PNL', 'Month PNL', 'All Time PNL', 'All Time PNL/Trade']
-            ).format({
-                'Today PNL': '${:,.2f}',
-                'Yesterday PNL': '${:,.2f}',
-                'Week PNL': '${:,.2f}',
-                'Month PNL': '${:,.2f}',
-                'All Time PNL': '${:,.2f}',
-                'All Time PNL/Trade': '${:,.2f}',
-                'All Time Trades': '{:,}'
-            })
-            
-            # Display the styled DataFrame
-            st.dataframe(styled_pairs_df, height=400, use_container_width=True)
-            
-            # Create a visualization of PNL by trading pair
-            st.subheader("PNL by Trading Pair")
-            
-            # Filter out pairs with zero PNL
-            non_zero_pairs = user_pairs_df[user_pairs_df['All Time PNL'] != 0].copy()
-            
-            if not non_zero_pairs.empty:
-                # Select top pairs by absolute PNL
-                top_pairs = non_zero_pairs.reindex(
-                    non_zero_pairs['All Time PNL'].abs().sort_values(ascending=False).index
-                ).head(10)
-                
-                # Create a bar chart
-                fig = px.bar(
-                    top_pairs,
-                    x='Trading Pair',
-                    y=['Today PNL', 'Week PNL', 'All Time PNL'],
-                    title=f"PNL Comparison by Trading Pair for User {selected_user_id}",
-                    barmode='group',
-                    color_discrete_sequence=['#1f77b4', '#2ca02c', '#d62728']
-                )
-                
-                fig.update_layout(
-                    xaxis_title="Trading Pair",
-                    yaxis_title="PNL (USD)",
-                    height=500
-                )
-                
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.info("No non-zero PNL data available for this user.")
-    else:
-        st.warning("No user data available")
-
-# Tab 3: Pair Analysis
-with tab3:
-    st.header("Trading Pair Performance Analysis")
+    selected_user_id = st.selectbox(
+        "Select User to Analyze", 
+        user_matrix_df['User ID'].tolist()
+    )
     
-    if not user_pair_df.empty:
-        # Time period selector for analysis
-        period = st.selectbox(
-            "Time Period for Analysis",
-            ["Today", "Yesterday", "Week", "Month", "All Time"],
-            index=0
-        )
+    # Filter for selected user
+    user_pairs_df = user_pair_df[user_pair_df['User ID'] == selected_user_id].copy()
+    
+    if user_pairs_df.empty:
+        st.warning(f"No data available for user {selected_user_id}")
+    else:
+        # User metadata
+        user_metadata = results[selected_user_id]["metadata"]
         
-        # Map selection to data column
-        period_map = {
-            "Today": "Today PNL",
-            "Yesterday": "Yesterday PNL",
-            "Week": "Week PNL",
-            "Month": "Month PNL",
-            "All Time": "All Time PNL"
-        }
+        # Display user info
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Account Age", f"{user_metadata['account_age_days']} days")
+        with col2:
+            st.metric("First Trade Date", user_metadata['first_trade_date'])
+        with col3:
+            st.metric("Total Trades", f"{user_metadata['all_time_trades']:,}")
+        with col4:
+            st.metric("Trading Volume", f"${user_metadata['all_time_volume']:,.2f}")
         
-        selected_period = period_map[period]
+        # Display pair performance
+        st.subheader(f"Trading Pairs Performance for User {selected_user_id}")
         
-        # Create a summary by trading pair
-        pair_summary = user_pair_df.groupby('Trading Pair').agg({
-            'Today PNL': 'sum',
-            'Yesterday PNL': 'sum',
-            'Week PNL': 'sum',
-            'Month PNL': 'sum',
-            'All Time PNL': 'sum',
-            'Today Trades': 'sum',
-            'Yesterday Trades': 'sum',
-            'Week Trades': 'sum',
-            'Month Trades': 'sum',
-            'All Time Trades': 'sum'
-        }).reset_index()
+        # Sort by All Time PNL
+        user_pairs_df = user_pairs_df.sort_values(by='All Time PNL', ascending=False)
         
-        # Calculate efficiency metrics
-        pair_summary['PNL/Trade (Today)'] = (
-            pair_summary['Today PNL'] / pair_summary['Today Trades']
+        # Calculate additional metrics
+        user_pairs_df['All Time PNL/Trade'] = (
+            user_pairs_df['All Time PNL'] / user_pairs_df['All Time Trades']
         ).replace([np.inf, -np.inf, np.nan], 0)
         
-        pair_summary['PNL/Trade (Week)'] = (
-            pair_summary['Week PNL'] / pair_summary['Week Trades']
-        ).replace([np.inf, -np.inf, np.nan], 0)
-        
-        pair_summary['PNL/Trade (All Time)'] = (
-            pair_summary['All Time PNL'] / pair_summary['All Time Trades']
-        ).replace([np.inf, -np.inf, np.nan], 0)
-        
-        # Sort by selected period
-        pair_summary = pair_summary.sort_values(by=selected_period, ascending=False)
-        
-        # Display the pair summary
-        st.subheader(f"Trading Pair Summary ({period})")
-        
-        # Display columns based on period
-        if period == "Today":
-            display_cols = [
-                'Trading Pair', 'Today PNL', 'Today Trades', 'PNL/Trade (Today)', 
-                'Yesterday PNL', 'Week PNL', 'All Time PNL'
-            ]
-        elif period == "Yesterday":
-            display_cols = [
-                'Trading Pair', 'Yesterday PNL', 'Yesterday Trades', 'Today PNL', 
-                'Week PNL', 'All Time PNL'
-            ]
-        elif period == "Week":
-            display_cols = [
-                'Trading Pair', 'Week PNL', 'Week Trades', 'PNL/Trade (Week)', 
-                'Today PNL', 'All Time PNL'
-            ]
-        else:
-            display_cols = [
-                'Trading Pair', selected_period, 'All Time Trades', 'PNL/Trade (All Time)', 
-                'Today PNL', 'Week PNL'
-            ]
+        # Display columns
+        display_cols = [
+            'Trading Pair', 'Today PNL', 'Yesterday PNL', 'Week PNL', 
+            'Month PNL', 'All Time PNL', 'All Time Trades', 'All Time PNL/Trade'
+        ]
         
         # Apply styling
-        styled_summary = pair_summary[display_cols].style.applymap(
+        styled_pairs_df = user_pairs_df[display_cols].style.applymap(
             color_pnl_cells, 
-            subset=[col for col in display_cols if 'PNL' in col]
+            subset=['Today PNL', 'Yesterday PNL', 'Week PNL', 'Month PNL', 'All Time PNL', 'All Time PNL/Trade']
         ).format({
             'Today PNL': '${:,.2f}',
             'Yesterday PNL': '${:,.2f}',
             'Week PNL': '${:,.2f}',
             'Month PNL': '${:,.2f}',
             'All Time PNL': '${:,.2f}',
-            'PNL/Trade (Today)': '${:,.2f}',
-            'PNL/Trade (Week)': '${:,.2f}',
-            'PNL/Trade (All Time)': '${:,.2f}',
-            'Today Trades': '{:,}',
-            'Week Trades': '{:,}',
+            'All Time PNL/Trade': '${:,.2f}',
             'All Time Trades': '{:,}'
         })
         
-        st.dataframe(styled_summary, height=400, use_container_width=True)
+        # Display the styled DataFrame
+        st.dataframe(styled_pairs_df, height=400, use_container_width=True)
         
-        # Visualization of top pairs
-        st.subheader(f"Top Trading Pairs by PNL ({period})")
+        # Create a visualization of PNL by trading pair
+        st.subheader("PNL by Trading Pair")
         
-        # Get top and bottom pairs
-        top_pairs = pair_summary.nlargest(5, selected_period)
-        bottom_pairs = pair_summary.nsmallest(5, selected_period)
+        # Filter out pairs with zero PNL
+        non_zero_pairs = user_pairs_df[user_pairs_df['All Time PNL'] != 0].copy()
         
-        # Create visualization
-        fig = go.Figure()
-        
-        # Top pairs
-        fig.add_trace(go.Bar(
-            x=top_pairs['Trading Pair'],
-            y=top_pairs[selected_period],
-            name='Top Pairs',
-            marker_color='green'
-        ))
-        
-        # Bottom pairs
-        fig.add_trace(go.Bar(
-            x=bottom_pairs['Trading Pair'],
-            y=bottom_pairs[selected_period],
-            name='Bottom Pairs',
-            marker_color='red'
-        ))
-        
-        fig.update_layout(
-            title=f"Top and Bottom Trading Pairs by PNL ({period})",
-            xaxis_title="Trading Pair",
-            yaxis_title="PNL (USD)",
-            barmode='group',
-            height=500
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Create a heatmap showing pair popularity
-        st.subheader("User-Pair Activity Heatmap")
-        
-        # Count number of users per pair
-        pair_user_counts = user_pair_df.groupby('Trading Pair')['User ID'].nunique().reset_index()
-        pair_user_counts.columns = ['Trading Pair', 'User Count']
-        
-        # Sort by count
-        pair_user_counts = pair_user_counts.sort_values(by='User Count', ascending=False)
-        
-        # Create a bar chart
-        fig = px.bar(
-            pair_user_counts,
-            x='Trading Pair',
-            y='User Count',
-            title="Number of Users per Trading Pair",
-            color='User Count',
-            color_continuous_scale='Viridis'
-        )
-        
-        fig.update_layout(
-            xaxis_title="Trading Pair",
-            yaxis_title="Number of Users",
-            height=500
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
+        if not non_zero_pairs.empty:
+            # Select top pairs by absolute PNL
+            top_pairs = non_zero_pairs.reindex(
+                non_zero_pairs['All Time PNL'].abs().sort_values(ascending=False).index
+            ).head(10)
+            
+            # Create a bar chart
+            fig = px.bar(
+                top_pairs,
+                x='Trading Pair',
+                y=['Today PNL', 'Week PNL', 'All Time PNL'],
+                title=f"PNL Comparison by Trading Pair for User {selected_user_id}",
+                barmode='group',
+                color_discrete_sequence=['#1f77b4', '#2ca02c', '#d62728']
+            )
+            
+            fig.update_layout(
+                xaxis_title="Trading Pair",
+                yaxis_title="PNL (USD)",
+                height=500
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No non-zero PNL data available for this user.")
+
+# Tab 3: Pair Analysis
+with tab3:
+    st.header("Trading Pair Performance Analysis")
+    
+    # Time period selector for analysis
+    period = st.selectbox(
+        "Time Period for Analysis",
+        ["Today", "Yesterday", "Week", "Month", "All Time"],
+        index=0
+    )
+    
+    # Map selection to data column
+    period_map = {
+        "Today": "Today PNL",
+        "Yesterday": "Yesterday PNL",
+        "Week": "Week PNL",
+        "Month": "Month PNL",
+        "All Time": "All Time PNL"
+    }
+    
+    selected_period = period_map[period]
+    
+    # Create a summary by trading pair
+    pair_summary = user_pair_df.groupby('Trading Pair').agg({
+        'Today PNL': 'sum',
+        'Yesterday PNL': 'sum',
+        'Week PNL': 'sum',
+        'Month PNL': 'sum',
+        'All Time PNL': 'sum',
+        'Today Trades': 'sum',
+        'Yesterday Trades': 'sum',
+        'Week Trades': 'sum',
+        'Month Trades': 'sum',
+        'All Time Trades': 'sum'
+    }).reset_index()
+    
+    # Calculate efficiency metrics
+    pair_summary['PNL/Trade (Today)'] = (
+        pair_summary['Today PNL'] / pair_summary['Today Trades']
+    ).replace([np.inf, -np.inf, np.nan], 0)
+    
+    pair_summary['PNL/Trade (Week)'] = (
+        pair_summary['Week PNL'] / pair_summary['Week Trades']
+    ).replace([np.inf, -np.inf, np.nan], 0)
+    
+    pair_summary['PNL/Trade (All Time)'] = (
+        pair_summary['All Time PNL'] / pair_summary['All Time Trades']
+    ).replace([np.inf, -np.inf, np.nan], 0)
+    
+    # Sort by selected period
+    pair_summary = pair_summary.sort_values(by=selected_period, ascending=False)
+    
+    # Display the pair summary
+    st.subheader(f"Trading Pair Summary ({period})")
+    
+    # Display columns based on period
+    if period == "Today":
+        display_cols = [
+            'Trading Pair', 'Today PNL', 'Today Trades', 'PNL/Trade (Today)', 
+            'Yesterday PNL', 'Week PNL', 'All Time PNL'
+        ]
+    elif period == "Yesterday":
+        display_cols = [
+            'Trading Pair', 'Yesterday PNL', 'Yesterday Trades', 'Today PNL', 
+            'Week PNL', 'All Time PNL'
+        ]
+    elif period == "Week":
+        display_cols = [
+            'Trading Pair', 'Week PNL', 'Week Trades', 'PNL/Trade (Week)', 
+            'Today PNL', 'All Time PNL'
+        ]
     else:
-        st.warning("No pair data available")
+        display_cols = [
+            'Trading Pair', selected_period, 'All Time Trades', 'PNL/Trade (All Time)', 
+            'Today PNL', 'Week PNL'
+        ]
+    
+    # Apply styling
+    styled_summary = pair_summary[display_cols].style.applymap(
+        color_pnl_cells, 
+        subset=[col for col in display_cols if 'PNL' in col]
+    ).format({
+        'Today PNL': '${:,.2f}',
+        'Yesterday PNL': '${:,.2f}',
+        'Week PNL': '${:,.2f}',
+        'Month PNL': '${:,.2f}',
+        'All Time PNL': '${:,.2f}',
+        'PNL/Trade (Today)': '${:,.2f}',
+        'PNL/Trade (Week)': '${:,.2f}',
+        'PNL/Trade (All Time)': '${:,.2f}',
+        'Today Trades': '{:,}',
+        'Week Trades': '{:,}',
+        'All Time Trades': '{:,}'
+    })
+    
+    st.dataframe(styled_summary, height=400, use_container_width=True)
+    
+    # Visualization of top pairs
+    st.subheader(f"Top Trading Pairs by PNL ({period})")
+    
+    # Get top and bottom pairs
+    top_pairs = pair_summary.nlargest(5, selected_period)
+    bottom_pairs = pair_summary.nsmallest(5, selected_period)
+    
+    # Create visualization
+    fig = go.Figure()
+    
+    # Top pairs
+    fig.add_trace(go.Bar(
+        x=top_pairs['Trading Pair'],
+        y=top_pairs[selected_period],
+        name='Top Pairs',
+        marker_color='green'
+    ))
+    
+    # Bottom pairs
+    fig.add_trace(go.Bar(
+        x=bottom_pairs['Trading Pair'],
+        y=bottom_pairs[selected_period],
+        name='Bottom Pairs',
+        marker_color='red'
+    ))
+    
+    fig.update_layout(
+        title=f"Top and Bottom Trading Pairs by PNL ({period})",
+        xaxis_title="Trading Pair",
+        yaxis_title="PNL (USD)",
+        barmode='group',
+        height=500
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Create a heatmap showing pair popularity
+    st.subheader("User-Pair Activity Heatmap")
+    
+    # Count number of users per pair
+    pair_user_counts = user_pair_df.groupby('Trading Pair')['User ID'].nunique().reset_index()
+    pair_user_counts.columns = ['Trading Pair', 'User Count']
+    
+    # Sort by count
+    pair_user_counts = pair_user_counts.sort_values(by='User Count', ascending=False)
+    
+    # Create a bar chart
+    fig = px.bar(
+        pair_user_counts,
+        x='Trading Pair',
+        y='User Count',
+        title="Number of Users per Trading Pair",
+        color='User Count',
+        color_continuous_scale='Viridis'
+    )
+    
+    fig.update_layout(
+        xaxis_title="Trading Pair",
+        yaxis_title="Number of Users",
+        height=500
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
 
 # Add footer with last update time
 st.markdown("---")
