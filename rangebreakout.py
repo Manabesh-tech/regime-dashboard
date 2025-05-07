@@ -46,8 +46,12 @@ def fetch_trading_pairs():
         ORDER BY pair_name
         """
         
-        df = pd.read_sql_query(query, conn)
-        return df['pair_name'].tolist()
+        # Use cursor instead of pandas for compatibility
+        cursor = conn.cursor()
+        cursor.execute(query)
+        pairs = [row[0] for row in cursor.fetchall()]
+        cursor.close()
+        return pairs
     except Exception as e:
         st.error(f"Error fetching trading pairs: {e}")
         return []
@@ -89,6 +93,9 @@ with col2:
 with col3:
     # Refresh button
     refresh_pressed = st.button("Refresh Data", type="primary", use_container_width=True)
+    if refresh_pressed:
+        # Using st.rerun() instead of deprecated st.experimental_rerun
+        st.cache_data.clear()
 
 # Singapore time
 sg_tz = pytz.timezone('Asia/Singapore')
@@ -196,17 +203,26 @@ def get_price_data(token, days=7):
         return None
     
     try:
-        df = pd.read_sql_query(query, conn)
+        # Execute query directly with psycopg2 instead of pandas
+        cursor = conn.cursor()
+        cursor.execute(query)
         
-        if df.empty:
+        # Fetch all results
+        rows = cursor.fetchall()
+        cursor.close()
+        
+        if not rows:
             st.error(f"No data found for {token}")
             return None
+        
+        # Manually create DataFrame (avoiding pandas read_sql_query)
+        df = pd.DataFrame(rows, columns=['pair_name', 'timestamp', 'final_price'])
         
         # Process timestamps
         df['timestamp'] = pd.to_datetime(df['timestamp'])
         df = df.set_index('timestamp').sort_index()
         
-        # Create 5-minute OHLC data - Fixed deprecated 'T' to 'min'
+        # Create 5-minute OHLC data using 'min' instead of deprecated 'T'
         ohlc = df['final_price'].resample('5min').agg({
             'open': 'first',
             'high': 'max',
@@ -381,8 +397,7 @@ def process_token_data(token):
 
 # Only process data if there are tokens selected AND refresh button was pressed
 if selected_tokens and refresh_pressed:
-    # Clear cache when refreshing data
-    st.cache_data.clear()
+    # Cache was already cleared when refresh button was pressed
     
     # Process data for all selected tokens
     results = {}
