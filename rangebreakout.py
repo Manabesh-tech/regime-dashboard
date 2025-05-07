@@ -45,15 +45,10 @@ col1, col2, col3 = st.columns([2, 1, 1])
 
 with col1:
     # Select tokens
-    default_tokens = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
-    available_tokens = [t for t in default_tokens if t in all_tokens]
-    if not available_tokens:
-        available_tokens = all_tokens[:3]  # Default to first 3 if none of our defaults are available
-    
     selected_tokens = st.multiselect(
         "Select up to 5 tokens for analysis", 
         all_tokens,
-        default=available_tokens
+        default=[]
     )
     
     if len(selected_tokens) > 5:
@@ -61,10 +56,8 @@ with col1:
         selected_tokens = selected_tokens[:5]
     
     if not selected_tokens:
-        st.warning("Please select at least one token")
-        # Default to BTC/USDT or the first token
-        default_token = "BTC/USDT" if "BTC/USDT" in all_tokens else all_tokens[0]
-        selected_tokens = [default_token]
+        st.info("Please select at least one token to begin analysis")
+        # Don't set any default tokens, leave it blank
 
 with col2:
     # Breakout detection method
