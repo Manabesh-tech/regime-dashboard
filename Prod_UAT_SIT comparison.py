@@ -24,12 +24,12 @@ st.cache_data.clear()
 def init_db_connection():
     # DB parameters - these should be stored in Streamlit secrets in production
     db_params = {
-        'host': 'aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com',
-        'port': 5432,
-        'database': 'replication_report',
-        'user': 'public_replication',
-        'password': '866^FKC4hllk'
-    }
+    'host': 'aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com',
+    'port': 5432,
+    'database': 'report_dev',
+    'user': 'public_rw',
+    'password': 'aTJ92^kl04hllk'
+}
     
     try:
         conn = psycopg2.connect(
@@ -62,7 +62,7 @@ class SurfAnalyzer:
     
     def __init__(self):
         self.environment_data = {}  # Will store data from different SURF environments
-        self.all_environments = ['UAT', 'PROD', 'SIT']
+        self.all_environments = ['UAT']
         
         # Metrics to calculate
         self.metrics = [
@@ -550,7 +550,7 @@ def fetch_trading_pairs():
     query = """
     SELECT pair_name 
     FROM trade_pool_pairs 
-    WHERE status = 1
+    WHERE status in(1,2)
     ORDER BY pair_name
     """
     
