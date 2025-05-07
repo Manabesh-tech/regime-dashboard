@@ -70,8 +70,8 @@ with col2:
     # Breakout detection method
     breakout_method = st.selectbox(
         "Breakout Detection Method",
-        ["ATR Multiple", "Bollinger Bands", "Adaptive Threshold"],
-        index=2
+        ["Bollinger Bands", "ATR Multiple", "Adaptive Threshold"],
+        index=0
     )
 
 with col3:
