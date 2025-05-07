@@ -7,7 +7,6 @@ from sqlalchemy import create_engine, text
 from datetime import datetime, timedelta
 import pytz
 import time
-import altair as alt
 from collections import defaultdict
 
 # --- PAGE CONFIG ---
@@ -49,8 +48,9 @@ def fetch_trading_data(date_range=30, limit=10000):
     # Calculate the date range
     now_utc = datetime.now(pytz.utc)
     start_date = now_utc - timedelta(days=date_range)
+    start_date_str = start_date.strftime('%Y-%m-%d %H:%M:%S')
     
-    query = """
+    query = f"""
     SELECT 
         t.taker_account_id AS user_id,
         ul.address AS wallet_address,
@@ -83,6 +83,7 @@ def fetch_trading_data(date_range=30, limit=10000):
         CASE
             WHEN p.margin_type = 1 THEN 'Isolated'
             WHEN p.margin_type = 2 THEN 'Cross'
+            ELSE 'Unknown'
         END AS margin_type,
         t.created_at
     FROM 
@@ -92,12 +93,12 @@ def fetch_trading_data(date_range=30, limit=10000):
     LEFT JOIN 
         public.surfv2_position p ON t.taker_position = p.id
     WHERE 
-        t.created_at >= %s
+        t.created_at >= '{start_date_str}'
         AND (t.taker_way IN (1, 2, 3, 4))
         AND (t.taker_mode IN (1, 2, 3, 4))
     ORDER BY 
         t.created_at DESC
-    LIMIT %s
+    LIMIT {limit}
     """
     
     try:
@@ -105,7 +106,7 @@ def fetch_trading_data(date_range=30, limit=10000):
         if not engine:
             return pd.DataFrame()
             
-        df = pd.read_sql_query(text(query), engine, params=[start_date, limit])
+        df = pd.read_sql_query(query, engine)
         
         if df.empty:
             return pd.DataFrame()
@@ -173,7 +174,8 @@ def calculate_user_metrics(df):
         liq_orders = user_data[user_data['order_type'] == 'Liquidation'].shape[0]
         
         # Timing patterns
-        avg_trades_per_day = total_trades / max((last_trade - first_trade).days, 1)
+        days_trading = (last_trade - first_trade).days
+        avg_trades_per_day = total_trades / max(days_trading, 1)
         
         # Risk metrics
         avg_leverage = user_data['leverage'].mean()
@@ -181,7 +183,7 @@ def calculate_user_metrics(df):
         
         # Pair diversity
         unique_pairs = user_data['pair_name'].nunique()
-        most_traded_pair = user_data['pair_name'].value_counts().index[0] if not user_data['pair_name'].empty else "None"
+        most_traded_pair = user_data['pair_name'].value_counts().index[0] if not user_data.empty else "None"
         
         # Average position sizes
         avg_position_size = user_data['margin_usd'].mean()
@@ -214,13 +216,6 @@ def calculate_user_metrics(df):
         # Analyze order type usage
         uses_tp_sl = (tp_orders + sl_orders) / total_trades if total_trades > 0 else 0
         
-        # Account for position open duration
-        # Compute average time positions are held (for positions that are opened and closed)
-        open_longs = user_data[user_data['trade_type'] == 'Open Long']
-        close_longs = user_data[user_data['trade_type'] == 'Close Long']
-        open_shorts = user_data[user_data['trade_type'] == 'Open Short']
-        close_shorts = user_data[user_data['trade_type'] == 'Close Short']
-        
         # Determine primary trading style
         trading_styles = {
             "Scalper": scalper_score,
@@ -236,7 +231,7 @@ def calculate_user_metrics(df):
             'total_trades': total_trades,
             'first_trade': first_trade,
             'last_trade': last_trade,
-            'days_trading': (last_trade - first_trade).days,
+            'days_trading': days_trading,
             'total_pnl': total_pnl,
             'total_fee': total_fee,
             'net_pnl': net_pnl,
@@ -346,10 +341,7 @@ def analyze_user_trading_patterns(df, user_id):
         lambda x: (x == 'Take Profit').sum() + (x == 'Stop Loss').sum()
     ) / user_data.groupby('trade_date')['order_type'].count()
     
-    # Compute average time positions are held (if possible)
-    # This is complex and would require matching open and close orders
-    
-    # Pair rotation - how often user changes trading pairs
+    # Daily unique pairs
     daily_unique_pairs = user_data.groupby('trade_date')['pair_name'].nunique()
     
     # Liquidity analysis - when does user get liquidated
@@ -377,6 +369,144 @@ def analyze_user_trading_patterns(df, user_id):
         'liq_by_pair': liq_by_pair
     }
 
+# --- DUMMY DATA GENERATOR ---
+def generate_dummy_data(num_users=50, trades_per_user=100):
+    """Generate dummy data for testing when database connection fails"""
+    np.random.seed(42)  # For reproducibility
+    
+    dummy_data = []
+    pairs = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'DOGE/USDT', 'BNB/USDT', 'ADA/USDT', 'DOT/USDT']
+    
+    # Generate random user IDs
+    user_ids = [f"user_{i}" for i in range(1, num_users + 1)]
+    
+    # Current time
+    now = datetime.now(pytz.timezone('Asia/Singapore'))
+    
+    for user_id in user_ids:
+        # User has different trading patterns
+        scalper = np.random.random() > 0.7  # 30% chance of being a scalper
+        swing_trader = np.random.random() > 0.7 if not scalper else False  # 30% chance of being a swing trader if not a scalper
+        
+        # Scalpers have many small trades, swing traders have fewer larger trades
+        num_trades = np.random.randint(50, 200) if scalper else np.random.randint(10, 50)
+        position_sizes = np.random.uniform(50, 200, num_trades) if scalper else np.random.uniform(200, 1000, num_trades)
+        
+        # Scalpers use higher leverage
+        leverages = np.random.uniform(10, 50, num_trades) if scalper else np.random.uniform(2, 10, num_trades)
+        
+        # Win rates (some users are better than others)
+        win_rate = np.random.uniform(0.3, 0.7)
+        
+        # Preference for long or short
+        long_bias = np.random.uniform(0.3, 0.7)  # % of trades that are long
+        
+        # Trading date ranges
+        if swing_trader:
+            date_range = 90  # Swing traders trade over longer periods
+        elif scalper:
+            date_range = 10  # Scalpers trade frequently in short periods
+        else:
+            date_range = 30  # Default range
+            
+        for i in range(num_trades):
+            # Random trade details
+            pair = np.random.choice(pairs)
+            
+            # Trade direction (long or short)
+            is_long = np.random.random() < long_bias
+            
+            # Trade type (open or close)
+            is_open = np.random.random() < 0.5
+            
+            if is_long and is_open:
+                taker_way = 1  # Open Long
+                trade_type = 'Open Long'
+            elif is_long and not is_open:
+                taker_way = 4  # Close Long
+                trade_type = 'Close Long'
+            elif not is_long and is_open:
+                taker_way = 3  # Open Short
+                trade_type = 'Open Short'
+            else:
+                taker_way = 2  # Close Short
+                trade_type = 'Close Short'
+            
+            # Order type
+            is_tp_sl = np.random.random() < 0.4  # 40% chance of using TP/SL
+            is_liq = np.random.random() < 0.05  # 5% chance of liquidation
+            
+            if is_liq:
+                taker_mode = 4
+                order_type = 'Liquidation'
+            elif is_tp_sl and np.random.random() < 0.5:
+                taker_mode = 2
+                order_type = 'Take Profit'
+            elif is_tp_sl:
+                taker_mode = 3
+                order_type = 'Stop Loss'
+            else:
+                taker_mode = 1
+                order_type = 'Active'
+            
+            # Random trade date within range
+            trade_date = now - timedelta(days=np.random.randint(0, date_range), 
+                                         hours=np.random.randint(0, 24),
+                                         minutes=np.random.randint(0, 60))
+            
+            # Position size for this trade
+            position_size = position_sizes[i]
+            
+            # P&L (win or loss)
+            is_win = np.random.random() < win_rate
+            
+            if is_win:
+                pnl = np.random.uniform(0.1, 0.3) * position_size
+            else:
+                pnl = -np.random.uniform(0.1, 0.3) * position_size
+                
+            # If liquidation, always a loss
+            if is_liq:
+                pnl = -position_size
+            
+            # Fee is a small percentage of position size
+            fee = 0.001 * position_size
+            
+            # Generate trade record
+            trade = {
+                'user_id': user_id,
+                'wallet_address': f"0x{user_id.replace('user_', '')}abcdef",
+                'pair_name': pair,
+                'taker_way': taker_way,
+                'taker_mode': taker_mode,
+                'taker_fee_mode': 1,  # Default fee mode
+                'dual_side': np.random.choice([True, False]),
+                'leverage': leverages[i],
+                'deal_price': np.random.uniform(10, 50000),  # Random price
+                'deal_vol': position_size / leverages[i],  # Actual collateral
+                'deal_size': position_size,  # Notional size
+                'coin_name': pair.split('/')[0],
+                'pnl_usd': pnl,
+                'fee_usd': fee,
+                'share_pnl_usd': 0,
+                'margin_usd': position_size,
+                'trade_type': trade_type,
+                'order_type': order_type,
+                'margin_type': np.random.choice(['Isolated', 'Cross']),
+                'created_at': trade_date,
+                'trade_date': trade_date.date(),
+                'trade_hour': trade_date.hour,
+                'trade_day': trade_date.strftime('%A'),
+                'is_win': is_win,
+                'is_loss': not is_win,
+                'direction': 'Long' if is_long else 'Short',
+                'action': 'Open' if is_open else 'Close'
+            }
+            
+            dummy_data.append(trade)
+    
+    return pd.DataFrame(dummy_data)
+
 # --- CONTROL PANEL ---
 st.sidebar.title("Dashboard Controls")
 
@@ -399,6 +529,9 @@ row_limit = st.sidebar.slider(
     step=1000
 )
 
+# Option to use dummy data
+use_dummy_data = st.sidebar.checkbox("Use Demo Data (when DB fails)", value=False)
+
 # Add a refresh button
 if st.sidebar.button("🔄 Refresh Data"):
     st.cache_data.clear()
@@ -406,14 +539,19 @@ if st.sidebar.button("🔄 Refresh Data"):
 
 # Fetch the data
 with st.spinner("Loading trading data..."):
-    df = fetch_trading_data(date_range, row_limit)
+    if use_dummy_data:
+        st.warning("Using demo data. This is not real trading data.")
+        df = generate_dummy_data(num_users=50, trades_per_user=100)
+    else:
+        df = fetch_trading_data(date_range, row_limit)
+    
     if df.empty:
-        st.warning("No trading data found for the selected period.")
+        st.error("No trading data found for the selected period. Try using Demo Data option.")
         st.stop()
     
     user_metrics_df = calculate_user_metrics(df)
     if user_metrics_df.empty:
-        st.warning("No user metrics could be calculated.")
+        st.error("No user metrics could be calculated.")
         st.stop()
     
     # Sort users by trading volume
@@ -1332,9 +1470,9 @@ with tab4:
             x='trade_hour',
             y='Trade Count',
             color='Win Rate',
+            color_continuous_scale='RdYlGn',
             labels={'trade_hour': 'Hour of Day (SG Time)', 'Trade Count': 'Number of Trades'},
-            title=f"Trade Distribution by Hour for {selected_pair}",
-            color_continuous_scale='RdYlGn'
+            title=f"Trade Distribution by Hour for {selected_pair}"
         )
         
         st.plotly_chart(fig, use_container_width=True)
