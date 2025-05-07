@@ -44,11 +44,16 @@ all_tokens = fetch_trading_pairs()
 col1, col2, col3 = st.columns([2, 1, 1])
 
 with col1:
-    # Select tokens - NO DEFAULT SELECTION
+    # Select tokens
+    default_tokens = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+    available_tokens = [t for t in default_tokens if t in all_tokens]
+    if not available_tokens:
+        available_tokens = all_tokens[:3]  # Default to first 3 if none of our defaults are available
+    
     selected_tokens = st.multiselect(
         "Select up to 5 tokens for analysis", 
         all_tokens,
-        default=[]
+        default=available_tokens
     )
     
     if len(selected_tokens) > 5:
@@ -56,7 +61,10 @@ with col1:
         selected_tokens = selected_tokens[:5]
     
     if not selected_tokens:
-        st.info("Please select at least one token to begin analysis")
+        st.warning("Please select at least one token")
+        # Default to BTC/USDT or the first token
+        default_token = "BTC/USDT" if "BTC/USDT" in all_tokens else all_tokens[0]
+        selected_tokens = [default_token]
 
 with col2:
     # Breakout detection method - BOLLINGER BANDS DEFAULT
@@ -340,21 +348,20 @@ def process_token_data(token):
         'breakout_col': breakout_col
     }
 
-# Process data for all selected tokens - ONLY PROCESS IF TOKENS SELECTED
+# Process data for all selected tokens
 results = {}
 all_blocks_avg = pd.DataFrame()
 
-if selected_tokens:  # Only run analysis if tokens are selected
-    with st.spinner("Processing data for selected tokens..."):
-        for token in selected_tokens:
-            result = process_token_data(token)
-            if result:
-                results[token] = result
-                
-                # Add to all blocks average dataframe
-                block_avg = result['avg_by_block']
-                if not block_avg.empty:
-                    all_blocks_avg[token] = block_avg
+with st.spinner("Processing data for selected tokens..."):
+    for token in selected_tokens:
+        result = process_token_data(token)
+        if result:
+            results[token] = result
+            
+            # Add to all blocks average dataframe
+            block_avg = result['avg_by_block']
+            if not block_avg.empty:
+                all_blocks_avg[token] = block_avg
 
 # Display results only if we have data
 if results and not all_blocks_avg.empty:
@@ -546,72 +553,61 @@ if results and not all_blocks_avg.empty:
             
             st.markdown("---")
     
-    # Additional analysis - clustering time blocks - ONLY IF ENOUGH TOKENS AND DATA
-    if len(selected_tokens) >= 3 and not all_blocks_avg.empty:  # Only do clustering if we have enough data
-        st.subheader("Time Block Clustering Analysis")
+    # Additional analysis - clustering time blocks
+    st.subheader("Time Block Clustering Analysis")
+    
+    # Prepare data for clustering
+    cluster_data = all_blocks_avg.T
+    
+    if len(cluster_data) >= 3:  # Need at least 3 tokens for meaningful clustering
+        # Normalize data for clustering
+        normalized_data = (cluster_data - cluster_data.mean()) / cluster_data.std()
         
-        # Prepare data for clustering
-        cluster_data = all_blocks_avg.T
+        # K-means clustering to find similar time blocks
+        kmeans = KMeans(n_clusters=2, random_state=42)
+        cluster_data['cluster'] = kmeans.fit_predict(normalized_data)
         
-        if len(cluster_data) >= 3:  # Need at least 3 tokens for meaningful clustering
-            try:
-                # Normalize data for clustering
-                normalized_data = (cluster_data - cluster_data.mean()) / cluster_data.std()
-                
-                # K-means clustering to find similar time blocks
-                kmeans = KMeans(n_clusters=2, random_state=42)
-                cluster_labels = kmeans.fit_predict(normalized_data)
-                cluster_data['cluster'] = cluster_labels
-                
-                # Display clusters
-                st.markdown("### Time Block Clusters")
-                st.markdown("Grouping time blocks into clusters based on breakout patterns:")
-                
-                # Get cluster centers and interpret
-                centers = kmeans.cluster_centers_
-                
-                # Determine which cluster has higher average breakouts
-                cluster_0_avg = centers[0].mean()
-                cluster_1_avg = centers[1].mean()
-                
-                if cluster_0_avg > cluster_1_avg:
-                    breakout_cluster = 0
-                    range_cluster = 1
-                else:
-                    breakout_cluster = 1
-                    range_cluster = 0
-                
-                # Display results
-                breakout_times = [block_labels[block] for block, cluster in 
-                                zip(all_blocks_avg.index, kmeans.labels_) if cluster == breakout_cluster]
-                
-                range_times = [block_labels[block] for block, cluster in 
-                            zip(all_blocks_avg.index, kmeans.labels_) if cluster == range_cluster]
-                
-                st.markdown(f"""
-                #### Breakout Trading Times:
-                Times with significantly more breakouts, suggesting more breakout traders active:
-                {", ".join(breakout_times)}
-                
-                #### Range Trading Times:
-                Times with fewer breakouts, suggesting more range traders active:
-                {", ".join(range_times)}
-                """)
-                
-                # Create arrays of equal length for DataFrame
-                time_blocks = [block_labels[i] for i in all_blocks_avg.index]
-                avg_breakouts = all_blocks_avg.mean(axis=1).values
-                labels_list = kmeans.labels_.tolist()
-                
-                # Make sure all arrays are the same length
-                min_length = min(len(time_blocks), len(avg_breakouts), len(labels_list))
-                
-                # Visualize the clusters with equal length arrays
-                cluster_viz = pd.DataFrame({
-                    'Time Block': time_blocks[:min_length],
-                    'Cluster': labels_list[:min_length],
-                    'Average Breakouts': avg_breakouts[:min_length]
-                })
+        # Display clusters
+        st.markdown("### Time Block Clusters")
+        st.markdown("Grouping time blocks into clusters based on breakout patterns:")
+        
+        # Get cluster centers and interpret
+        centers = kmeans.cluster_centers_
+        
+        # Determine which cluster has higher average breakouts
+        cluster_0_avg = centers[0].mean()
+        cluster_1_avg = centers[1].mean()
+        
+        if cluster_0_avg > cluster_1_avg:
+            breakout_cluster = 0
+            range_cluster = 1
+        else:
+            breakout_cluster = 1
+            range_cluster = 0
+        
+        # Display results
+        breakout_times = [block_labels[block] for block, cluster in 
+                         zip(all_blocks_avg.index, kmeans.labels_) if cluster == breakout_cluster]
+        
+        range_times = [block_labels[block] for block, cluster in 
+                      zip(all_blocks_avg.index, kmeans.labels_) if cluster == range_cluster]
+        
+        st.markdown(f"""
+        #### Breakout Trading Times:
+        Times with significantly more breakouts, suggesting more breakout traders active:
+        {", ".join(breakout_times)}
+        
+        #### Range Trading Times:
+        Times with fewer breakouts, suggesting more range traders active:
+        {", ".join(range_times)}
+        """)
+        
+        # Visualize the clusters
+        cluster_viz = pd.DataFrame({
+            'Time Block': [block_labels[i] for i in all_blocks_avg.index],
+            'Cluster': kmeans.labels_,
+            'Average Breakouts': all_blocks_avg.mean(axis=1).values
+        })
             
             cluster_viz['Trading Style'] = cluster_viz['Cluster'].apply(
                 lambda x: 'Breakout Trading' if x == breakout_cluster else 'Range Trading'
