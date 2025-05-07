@@ -32,6 +32,7 @@ def connect_to_db():
         return None
 
 # Get available tokens
+@st.cache_data(ttl=600)  # 10-minute cache for token list
 def fetch_trading_pairs():
     conn = connect_to_db()
     if not conn:
@@ -65,28 +66,25 @@ all_tokens = fetch_trading_pairs()
 col1, col2, col3 = st.columns([2, 1, 1])
 
 with col1:
-    # Select tokens
+    # CHANGED: Use single token selection instead of multiple tokens
     default_tokens = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
-    available_tokens = [t for t in default_tokens if t in all_tokens]
-    if not available_tokens:
-        available_tokens = all_tokens[:3] if all_tokens else []
+    default_token = next((t for t in default_tokens if t in all_tokens), all_tokens[0] if all_tokens else None)
     
-    selected_tokens = st.multiselect(
-        "Select up to 5 tokens for analysis", 
+    selected_token = st.selectbox(
+        "Select token for analysis", 
         all_tokens,
-        default=available_tokens
+        index=all_tokens.index(default_token) if default_token in all_tokens else 0
     )
     
-    if len(selected_tokens) > 5:
-        st.warning("Please select up to 5 tokens for best performance")
-        selected_tokens = selected_tokens[:5]
+    # Keep selected_tokens as a list for compatibility with existing code
+    selected_tokens = [selected_token]
 
 with col2:
-    # Breakout detection method - Changed default to Bollinger Bands (index=1)
+    # Breakout detection method - Default is Bollinger Bands (index=1)
     breakout_method = st.selectbox(
         "Breakout Detection Method",
         ["ATR Multiple", "Bollinger Bands", "Adaptive Threshold"],
-        index=1  # Changed from 2 to 1 for Bollinger Bands
+        index=1
     )
 
 with col3:
@@ -103,6 +101,7 @@ now_sg = now_utc.astimezone(sg_tz)
 st.write(f"Current time (Singapore): {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
 
 # Get partition tables
+@st.cache_data(ttl=3600)  # Cache for 1 hour
 def get_partition_tables(start_date, end_date):
     if isinstance(start_date, str):
         start_date = pd.to_datetime(start_date)
@@ -176,7 +175,7 @@ def build_query(tables, token, start_time, end_time):
 
 # Get price data for the last 7 days
 @st.cache_data(ttl=300)  # 5-minute cache
-def get_price_data(token, days=7):
+def get_price_data(token, days=7, max_rows=10000):  # Added max_rows parameter
     # Time range
     now_sg = datetime.now(pytz.timezone('Asia/Singapore'))
     start_time_sg = now_sg - timedelta(days=days)
@@ -213,6 +212,12 @@ def get_price_data(token, days=7):
         if not rows:
             st.error(f"No data found for {token}")
             return None
+        
+        # ADDED: Subsample data if too many rows for better performance
+        if len(rows) > max_rows:
+            step = len(rows) // max_rows + 1
+            rows = rows[::step]
+            st.info(f"Sampled data for better performance (using 1 in {step} data points)")
         
         # Manually create DataFrame (avoiding pandas read_sql_query)
         df = pd.DataFrame(rows, columns=['pair_name', 'timestamp', 'final_price'])
@@ -355,6 +360,7 @@ def detect_breakouts_adaptive(df, short_window=12, long_window=48):
     return df
 
 # Process data and detect breakouts
+@st.cache_data(ttl=300)  # ADDED: Cache this function for 5 minutes
 def process_token_data(token):
     # Get price data
     ohlc_data = get_price_data(token)
@@ -394,32 +400,13 @@ def process_token_data(token):
         'breakout_col': breakout_col
     }
 
-# Only process data if there are tokens selected AND refresh button was pressed
+# Only process data if tokens are selected AND refresh button was pressed
 if selected_tokens and refresh_pressed:
-    # Process data for all selected tokens
-    results = {}
-    all_blocks_avg = pd.DataFrame()
-
-    with st.spinner("Processing data for selected tokens..."):
-        for token in selected_tokens:
-            result = process_token_data(token)
-            if result:
-                results[token] = result
-                
-                # Add to all blocks average dataframe
-                block_avg = result['avg_by_block']
-                if not block_avg.empty:
-                    all_blocks_avg[token] = block_avg
-
-    # Display results
-    if results and not all_blocks_avg.empty:
-        # Make sure all blocks are represented (0, 3, 6, 9, 12, 15, 18, 21)
-        for block in [0, 3, 6, 9, 12, 15, 18, 21]:
-            if block not in all_blocks_avg.index:
-                all_blocks_avg.loc[block] = 0
+    # Process data for the selected token
+    with st.spinner(f"Processing data for {selected_token}..."):
+        result = process_token_data(selected_token)
         
-        all_blocks_avg = all_blocks_avg.sort_index()
-        
+    if result:
         # Create block labels
         block_labels = {
             0: "00:00-03:00",
@@ -432,41 +419,39 @@ if selected_tokens and refresh_pressed:
             21: "21:00-00:00"
         }
         
+        # Extract data for easier access
+        breakout_df = result['breakout_df']
+        avg_by_block = result['avg_by_block']
+        breakout_col = result['breakout_col']
+        
+        # Make sure all blocks are represented (0, 3, 6, 9, 12, 15, 18, 21)
+        for block in [0, 3, 6, 9, 12, 15, 18, 21]:
+            if block not in avg_by_block.index:
+                avg_by_block.loc[block] = 0
+        
+        avg_by_block = avg_by_block.sort_index()
+        
         # Display block averages
         st.subheader(f"Average Number of Breakouts per 3-Hour Block (Past 7 Days)")
         
-        # Create a transposed view with better labels
-        display_df = all_blocks_avg.copy()
-        display_df.index = [block_labels[idx] for idx in display_df.index]
-        
-        # Calculate total breakouts and identify peak times
-        display_df['Total'] = display_df.sum(axis=1)
-        display_df = display_df.sort_values('Total', ascending=False)
-        
-        # Display the table
-        st.dataframe(display_df)
-        
-        # Create visualization
+        # Display the averages as a bar chart
         fig = px.bar(
-            all_blocks_avg, 
-            x=all_blocks_avg.index.map(lambda x: block_labels[x]),
-            y=all_blocks_avg.columns,
-            title="Average Breakouts by 3-Hour Block (Past 7 Days)",
-            labels={'index': 'Time Block (Singapore)', 'value': 'Avg. Number of Breakouts'}
+            x=[block_labels[b] for b in avg_by_block.index],
+            y=avg_by_block.values,
+            title=f"{selected_token} - Avg. Breakouts by 3-Hour Block",
+            labels={'x': 'Time Block (Singapore)', 'y': 'Avg. Number of Breakouts'}
         )
         
         fig.update_layout(
-            height=500,
+            height=400,
             xaxis_title="Time Block (Singapore)",
-            yaxis_title="Average Number of Breakouts",
-            legend_title="Token",
-            barmode='group'
+            yaxis_title="Average Number of Breakouts"
         )
         
         st.plotly_chart(fig, use_container_width=True)
         
-        # Show highest breakout periods overall
-        highest_overall = all_blocks_avg.mean(axis=1).sort_values(ascending=False)
+        # Show highest breakout periods
+        highest_overall = avg_by_block.sort_values(ascending=False)
         
         if not highest_overall.empty:
             highest_block = highest_overall.index[0]
@@ -502,8 +487,8 @@ if selected_tokens and refresh_pressed:
         # Trading recommendation
         st.subheader("Exchange Strategy Recommendations")
         
-        st.markdown("""
-        Based on the analysis of breakout patterns across different time blocks, here are some strategic recommendations:
+        st.markdown(f"""
+        Based on the analysis of {selected_token} breakout patterns across different time blocks, here are some strategic recommendations:
         
         1. **Liquidity Management:**
            - Increase liquidity during peak breakout times to handle higher volumes
@@ -516,127 +501,96 @@ if selected_tokens and refresh_pressed:
         3. **User Experience:**
            - Provide different trading tools based on time of day
            - Show relevant indicators (breakout vs. range) based on current market phase
-           
-        4. **Marketing and User Acquisition:**
-           - Target different trader types in campaigns based on their active hours
-           - Create educational content specific to both trading styles
         """)
         
-        # Show detailed breakout charts for individual tokens
-        st.subheader("Individual Token Analysis")
+        # Show detailed token analysis
+        st.subheader(f"Detailed Analysis for {selected_token}")
         
-        for token in selected_tokens:
-            if token in results:
-                result = results[token]
-                breakout_df = result['breakout_df']
-                avg_by_block = result['avg_by_block']
-                breakout_col = result['breakout_col']
-                
-                st.markdown(f"### {token}")
-                
-                # Show recent breakouts
-                recent_breakouts = breakout_df[breakout_df[breakout_col]].tail(10)
-                if not recent_breakouts.empty:
-                    st.markdown("#### Recent Breakouts")
-                    recent_display = recent_breakouts[['open', 'high', 'low', 'close']].copy()
-                    recent_display.index = recent_display.index.strftime('%Y-%m-%d %H:%M')
-                    st.dataframe(recent_display)
-                
-                # Create a candlestick chart with breakouts highlighted
-                recent_data = breakout_df.tail(288)  # Show last day of data (288 5-min candles)
-                
-                fig = go.Figure()
-                
-                # Add candlestick chart
-                fig.add_trace(
-                    go.Candlestick(
-                        x=recent_data.index,
-                        open=recent_data['open'],
-                        high=recent_data['high'],
-                        low=recent_data['low'],
-                        close=recent_data['close'],
-                        name="Price"
-                    )
+        # Show recent breakouts
+        recent_breakouts = breakout_df[breakout_df[breakout_col]].tail(10)
+        if not recent_breakouts.empty:
+            st.markdown("#### Recent Breakouts")
+            recent_display = recent_breakouts[['open', 'high', 'low', 'close']].copy()
+            recent_display.index = recent_display.index.strftime('%Y-%m-%d %H:%M')
+            st.dataframe(recent_display)
+        
+        # Create a candlestick chart with breakouts highlighted
+        # UPDATED: Show fewer candles for better performance
+        candle_count = 144  # Show 12 hours of 5-min candles (reduced from 24 hours)
+        recent_data = breakout_df.tail(candle_count)
+        
+        fig = go.Figure()
+        
+        # Add candlestick chart
+        fig.add_trace(
+            go.Candlestick(
+                x=recent_data.index,
+                open=recent_data['open'],
+                high=recent_data['high'],
+                low=recent_data['low'],
+                close=recent_data['close'],
+                name="Price"
+            )
+        )
+        
+        # Add upper and lower bands
+        fig.add_trace(
+            go.Scatter(
+                x=recent_data.index,
+                y=recent_data['upper_band'],
+                name="Upper Band",
+                line=dict(color='rgba(255, 0, 0, 0.5)', width=1, dash='dot')
+            )
+        )
+        
+        fig.add_trace(
+            go.Scatter(
+                x=recent_data.index,
+                y=recent_data['lower_band'],
+                name="Lower Band",
+                line=dict(color='rgba(0, 0, 255, 0.5)', width=1, dash='dot')
+            )
+        )
+        
+        # Highlight breakout points
+        breakout_points = recent_data[recent_data[breakout_col]]
+        
+        # Upward breakouts
+        up_breakouts = breakout_points[breakout_points.get('breakout_up', False)]
+        if not up_breakouts.empty and 'breakout_up' in breakout_points.columns:
+            fig.add_trace(
+                go.Scatter(
+                    x=up_breakouts.index,
+                    y=up_breakouts['high'],
+                    mode='markers',
+                    marker=dict(color='green', size=10, symbol='triangle-up'),
+                    name="Upward Breakout"
                 )
-                
-                # Add upper and lower bands
-                fig.add_trace(
-                    go.Scatter(
-                        x=recent_data.index,
-                        y=recent_data['upper_band'],
-                        name="Upper Band",
-                        line=dict(color='rgba(255, 0, 0, 0.5)', width=1, dash='dot')
-                    )
+            )
+        
+        # Downward breakouts
+        down_breakouts = breakout_points[breakout_points.get('breakout_down', False)]
+        if not down_breakouts.empty and 'breakout_down' in breakout_points.columns:
+            fig.add_trace(
+                go.Scatter(
+                    x=down_breakouts.index,
+                    y=down_breakouts['low'],
+                    mode='markers',
+                    marker=dict(color='red', size=10, symbol='triangle-down'),
+                    name="Downward Breakout"
                 )
-                
-                fig.add_trace(
-                    go.Scatter(
-                        x=recent_data.index,
-                        y=recent_data['lower_band'],
-                        name="Lower Band",
-                        line=dict(color='rgba(0, 0, 255, 0.5)', width=1, dash='dot')
-                    )
-                )
-                
-                # Highlight breakout points
-                breakout_points = recent_data[recent_data[breakout_col]]
-                
-                # Upward breakouts
-                up_breakouts = breakout_points[breakout_points.get('breakout_up', False)]
-                if not up_breakouts.empty and 'breakout_up' in breakout_points.columns:
-                    fig.add_trace(
-                        go.Scatter(
-                            x=up_breakouts.index,
-                            y=up_breakouts['high'],
-                            mode='markers',
-                            marker=dict(color='green', size=10, symbol='triangle-up'),
-                            name="Upward Breakout"
-                        )
-                    )
-                
-                # Downward breakouts
-                down_breakouts = breakout_points[breakout_points.get('breakout_down', False)]
-                if not down_breakouts.empty and 'breakout_down' in breakout_points.columns:
-                    fig.add_trace(
-                        go.Scatter(
-                            x=down_breakouts.index,
-                            y=down_breakouts['low'],
-                            mode='markers',
-                            marker=dict(color='red', size=10, symbol='triangle-down'),
-                            name="Downward Breakout"
-                        )
-                    )
-                
-                fig.update_layout(
-                    title=f"{token} Recent Price Action with Breakouts",
-                    xaxis_title="Time",
-                    yaxis_title="Price",
-                    height=500
-                )
-                
-                st.plotly_chart(fig, use_container_width=True)
-                
-                # Display breakout distribution by block
-                avg_by_block_display = avg_by_block.copy()
-                avg_by_block_display.index = [block_labels[idx] for idx in avg_by_block_display.index]
-                
-                block_fig = px.bar(
-                    x=avg_by_block_display.index,
-                    y=avg_by_block_display.values,
-                    title=f"{token} - Avg. Breakouts by 3-Hour Block",
-                    labels={'x': 'Time Block (Singapore)', 'y': 'Avg. Number of Breakouts'}
-                )
-                
-                st.plotly_chart(block_fig, use_container_width=True)
-                
-                st.markdown("---")
-                
+            )
+        
+        fig.update_layout(
+            title=f"{selected_token} Recent Price Action with Breakouts",
+            xaxis_title="Time",
+            yaxis_title="Price",
+            height=500
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
     else:
-        if refresh_pressed:
-            st.error("No valid data available for the selected tokens. Please try different tokens or adjust the date range.")
+        st.error(f"No valid data available for {selected_token}. Please try a different token or adjust the date range.")
 else:
     # Initial state, show instructions to select tokens and click refresh
-    if not selected_tokens:
-        st.info("👆 Please select at least one token from the dropdown above")
-    if selected_tokens and not refresh_pressed:
-        st.info("👆 Click the 'Refresh Data' button to analyze the selected tokens")
+    st.info("👆 Click the 'Refresh Data' button to analyze the selected token")
