@@ -172,7 +172,10 @@ def fetch_all_user_metadata(user_ids):
     if not user_ids:
         return {}
     
-    user_list = "', '".join(user_ids)
+    # Prepare a properly formatted list for SQL IN clause
+    # This handles formatting and escaping correctly
+    placeholders = ', '.join([f"'{user_id}'" for user_id in user_ids])
+    
     query = f"""
     SELECT 
         "taker_account_id" as user_identifier,
@@ -183,7 +186,7 @@ def fetch_all_user_metadata(user_ids):
     FROM 
         "public"."trade_fill_fresh"
     WHERE 
-        "taker_account_id" IN ('{user_list}')
+        "taker_account_id" IN ({placeholders})
         AND "taker_way" IN (1, 2, 3, 4)
     GROUP BY 
         "taker_account_id"
@@ -256,9 +259,9 @@ def fetch_all_user_pnl_data(user_ids, pair_names, time_boundaries):
     if not user_ids or not pair_names:
         return {}
     
-    # Convert lists to strings for SQL query
-    user_list = "', '".join(user_ids)
-    pair_list = "', '".join(pair_names)
+    # Properly format lists for SQL IN clause
+    user_placeholders = ', '.join([f"'{user_id}'" for user_id in user_ids])
+    pair_placeholders = ', '.join([f"'{pair_name}'" for pair_name in pair_names])
     
     # Initialize results structure
     results = {user_id: {"pairs": {pair: {} for pair in pair_names}} for user_id in user_ids}
@@ -280,10 +283,10 @@ def fetch_all_user_pnl_data(user_ids, pair_names, time_boundaries):
               "public"."trade_fill_fresh"
             WHERE
               "created_at" BETWEEN '{start_time}' AND '{end_time}'
-              AND "taker_account_id" IN ('{user_list}')
+              AND "taker_account_id" IN ({user_placeholders})
               AND "pair_id" IN (
                 SELECT "pair_id" FROM "public"."trade_pool_pairs" 
-                WHERE "pair_name" IN ('{pair_list}')
+                WHERE "pair_name" IN ({pair_placeholders})
               )
               AND "taker_way" IN (1, 2, 3, 4)
             GROUP BY
@@ -300,10 +303,10 @@ def fetch_all_user_pnl_data(user_ids, pair_names, time_boundaries):
               "public"."trade_fill_fresh"
             WHERE
               "created_at" BETWEEN '{start_time}' AND '{end_time}'
-              AND "taker_account_id" IN ('{user_list}')
+              AND "taker_account_id" IN ({user_placeholders})
               AND "pair_id" IN (
                 SELECT "pair_id" FROM "public"."trade_pool_pairs" 
-                WHERE "pair_name" IN ('{pair_list}')
+                WHERE "pair_name" IN ({pair_placeholders})
               )
               AND "taker_fee_mode" = 1
               AND "taker_way" IN (1, 3)
@@ -321,10 +324,10 @@ def fetch_all_user_pnl_data(user_ids, pair_names, time_boundaries):
               "public"."trade_fill_fresh"
             WHERE
               "created_at" BETWEEN '{start_time}' AND '{end_time}'
-              AND "taker_account_id" IN ('{user_list}')
+              AND "taker_account_id" IN ({user_placeholders})
               AND "pair_id" IN (
                 SELECT "pair_id" FROM "public"."trade_pool_pairs" 
-                WHERE "pair_name" IN ('{pair_list}')
+                WHERE "pair_name" IN ({pair_placeholders})
               )
               AND "taker_way" = 0
             GROUP BY
