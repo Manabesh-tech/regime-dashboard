@@ -590,7 +590,7 @@ def render_rollbit_comparison(comparison_df):
     # Create buffer rate comparison table
     buffer_df = pd.DataFrame({
         'Pair': rollbit_df['pair_name'],
-        'Type': rollbit_df['token_type'],
+        'Type': rollbit_df['pair_name'].apply(lambda x: 'Major' if is_major(x) else 'Altcoin'),
         'SURF Buffer': rollbit_df['current_buffer_rate'].apply(
             lambda x: f"{x*100:.3f}%" if not pd.isna(x) else "N/A"
         ),
@@ -620,7 +620,7 @@ def render_rollbit_comparison(comparison_df):
     # Create position multiplier comparison table
     position_df = pd.DataFrame({
         'Pair': rollbit_df['pair_name'],
-        'Type': rollbit_df['token_type'],
+        'Type': rollbit_df['pair_name'].apply(lambda x: 'Major' if is_major(x) else 'Altcoin'),
         'SURF Position Mult.': rollbit_df['current_position_multiplier'].apply(
             lambda x: f"{x:,.0f}" if not pd.isna(x) else "N/A"
         ),
