@@ -654,28 +654,41 @@ if selected_tokens and refresh_pressed:
             """)
             
             # Visualize the clusters
-            cluster_viz = pd.DataFrame({
-                'Time Block': [block_labels[i] for i in all_blocks_avg.index],
-                'Cluster': kmeans.labels_,
-                'Average Breakouts': all_blocks_avg.mean(axis=1).values
-            })
-            
-            cluster_viz['Trading Style'] = cluster_viz['Cluster'].apply(
-                lambda x: 'Breakout Trading' if x == breakout_cluster else 'Range Trading'
-            )
-            
-            cluster_fig = px.scatter(
-                cluster_viz,
-                x='Time Block',
-                y='Average Breakouts',
-                color='Trading Style',
-                size='Average Breakouts',
-                title="Time Blocks Clustered by Trading Style",
-                labels={'Average Breakouts': 'Avg. Number of Breakouts'}
-            )
-            
-            cluster_fig.update_layout(height=500)
-            st.plotly_chart(cluster_fig, use_container_width=True)
+            try:
+                # Create a DataFrame with explicit indices to ensure all arrays have the same length
+                cluster_viz_data = {
+                    'Time Block': [block_labels[i] for i in all_blocks_avg.index],
+                    'Cluster': [int(label) for label in kmeans.labels_],
+                    'Average Breakouts': all_blocks_avg.mean(axis=1).values
+                }
+                
+                # Verify all arrays are the same length
+                lengths = [len(v) for v in cluster_viz_data.values()]
+                if len(set(lengths)) != 1:
+                    st.warning(f"Array length mismatch detected. Unable to create cluster visualization.")
+                    st.write(f"Debug info - lengths: {lengths}")
+                else:
+                    cluster_viz = pd.DataFrame(cluster_viz_data)
+                    
+                    cluster_viz['Trading Style'] = cluster_viz['Cluster'].apply(
+                        lambda x: 'Breakout Trading' if x == breakout_cluster else 'Range Trading'
+                    )
+                    
+                    cluster_fig = px.scatter(
+                        cluster_viz,
+                        x='Time Block',
+                        y='Average Breakouts',
+                        color='Trading Style',
+                        size='Average Breakouts',
+                        title="Time Blocks Clustered by Trading Style",
+                        labels={'Average Breakouts': 'Avg. Number of Breakouts'}
+                    )
+                    
+                    cluster_fig.update_layout(height=500)
+                    st.plotly_chart(cluster_fig, use_container_width=True)
+            except Exception as e:
+                st.error(f"Error creating cluster visualization: {e}")
+                st.write("Continuing with the rest of the analysis...")
             
             # Trading recommendation
             st.subheader("Exchange Strategy Recommendations")
