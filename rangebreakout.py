@@ -385,7 +385,7 @@ if results and not all_blocks_avg.empty:
     }
     
     # Display block averages
-    st.subheader(f"Average Number of Breakouts per 3-Hour Block (Past 7 Days)")
+    st.subheader(f"All Pairs: Average Number of Breakouts per 3-Hour Block (Past 7 Days)")
     
     # Create a transposed view with better labels
     display_df = all_blocks_avg.copy()
@@ -403,7 +403,7 @@ if results and not all_blocks_avg.empty:
         all_blocks_avg, 
         x=all_blocks_avg.index.map(lambda x: block_labels[x]),
         y=all_blocks_avg.columns,
-        title="Average Breakouts by 3-Hour Block (Past 7 Days)",
+        title="All Pairs: Average Breakouts by 3-Hour Block (Past 7 Days)",
         labels={'index': 'Time Block (Singapore)', 'value': 'Avg. Number of Breakouts'}
     )
     
