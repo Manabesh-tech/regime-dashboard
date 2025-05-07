@@ -605,42 +605,20 @@ if results and not all_blocks_avg.empty:
                 {", ".join(range_times)}
                 """)
                 
-                # Create DataFrame for visualization - create lists manually first
-                time_blocks = []
-                clusters = []
-                avg_breakouts = []
+                # Skip creating DataFrame for plotly - use simple bar chart instead
+                st.markdown("### Trading Style by Time Block:")
                 
-                # Only add data for indices that exist in all arrays
+                # Create a simpler plot using two separate bar charts to avoid DataFrame issue
+                trading_style_data = {
+                    'breakout': [],
+                    'range': []
+                }
+                
                 for i, block in enumerate(all_blocks_avg.index):
-                    if i < len(cluster_labels):
-                        time_blocks.append(block_labels[block])
-                        clusters.append(int(cluster_labels[i]))
-                        avg_breakouts.append(float(all_blocks_avg.mean(axis=1).iloc[i]))
-                
-                # Create DataFrame with lists of equal length
-                cluster_viz = pd.DataFrame({
-                    'Time Block': time_blocks,
-                    'Cluster': clusters,
-                    'Average Breakouts': avg_breakouts
-                })
-                
-                # Add trading style column
-                cluster_viz['Trading Style'] = cluster_viz['Cluster'].apply(
-                    lambda x: 'Breakout Trading' if x == breakout_cluster else 'Range Trading'
-                )
-                
-                cluster_fig = px.scatter(
-                    cluster_viz,
-                    x='Time Block',
-                    y='Average Breakouts',
-                    color='Trading Style',
-                    size='Average Breakouts',
-                    title="Time Blocks Clustered by Trading Style",
-                    labels={'Average Breakouts': 'Avg. Number of Breakouts'}
-                )
-                
-                cluster_fig.update_layout(height=500)
-                st.plotly_chart(cluster_fig, use_container_width=True)
+                    if cluster_labels[i] == breakout_cluster:
+                        st.markdown(f"- **{block_labels[block]}**: Breakout Trading (avg: {all_blocks_avg.mean(axis=1).iloc[i]:.2f})")
+                    else:
+                        st.markdown(f"- **{block_labels[block]}**: Range Trading (avg: {all_blocks_avg.mean(axis=1).iloc[i]:.2f})")
                 
                 # Trading recommendation
                 st.subheader("Exchange Strategy Recommendations")
