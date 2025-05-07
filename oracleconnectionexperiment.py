@@ -181,7 +181,7 @@ def analyze_tiers(pair_name, progress_bar=None):
             now_sg = datetime.now(singapore_tz)
             
             # Explicitly set the exact 12-hour period we want to analyze (reduced from 24hr)
-            end_time = now_sg.replace(tzinfo=None)
+            end_time = now_sg
             start_time = end_time - timedelta(hours=12)  # Reduced to 12 hours
             
             if progress_bar:
@@ -192,7 +192,7 @@ def analyze_tiers(pair_name, progress_bar=None):
             
             # Add 3 days prior for data collection to ensure we get 12 hours coverage
             dates_to_check = []
-            for i in range(3):  # Reduced from 4 days to 3 for faster loading
+            for i in range(1):  # Reduced from 4 days to 3 for faster loading
                 check_date = (now_sg - timedelta(days=i)).strftime("%Y%m%d")
                 dates_to_check.append(check_date)
             
@@ -239,8 +239,6 @@ def analyze_tiers(pair_name, progress_bar=None):
                             pair_name = :pair_name
                             AND created_at >= :start_time
                             AND created_at <= :end_time
-                            AND source IN ('binanceFuture', 'bitgetFuture', 'okxFuture', 'bybitFuture', 
-                                          'gateFuture', 'mexcFuture', 'hyperliquidFuture')
                         ORDER BY 
                             created_at DESC
                         LIMIT 200000
