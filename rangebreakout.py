@@ -479,8 +479,8 @@ if selected_tokens and refresh_pressed:
             st.markdown(f"""
             ### Key Findings:
             
-            - **Peak Breakout Period:** {block_labels[highest_block]} (Avg: {highest_overall.iloc[0]:.2f} breakouts)
-            - **Lowest Breakout Period:** {block_labels[lowest_block]} (Avg: {highest_overall.iloc[-1]:.2f} breakouts)
+            - **Peak Breakout Period:** {block_labels[highest_block]} (Avg: {float(highest_overall.iloc[0]):.2f} breakouts)
+            - **Lowest Breakout Period:** {block_labels[lowest_block]} (Avg: {float(highest_overall.iloc[-1]):.2f} breakouts)
             """)
             
             # Trader type analysis
