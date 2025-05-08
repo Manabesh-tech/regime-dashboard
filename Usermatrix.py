@@ -53,8 +53,8 @@ def fetch_trading_data(date_range=30, limit=10000):
     query = f"""
     SELECT 
         t.taker_account_id AS user_id,
-        ul.address AS wallet_address,
-        t.pair_name,
+        t.pair_id,
+        p.pair_name,
         t.taker_way,
         t.taker_mode,
         t.taker_fee_mode,
@@ -63,39 +63,17 @@ def fetch_trading_data(date_range=30, limit=10000):
         t.deal_price,
         t.deal_vol,
         t.deal_size,
-        t.coin_name,
         t.taker_pnl * t.collateral_price AS pnl_usd,
         t.taker_fee * t.collateral_price AS fee_usd,
         t.taker_share_pnl * t.collateral_price AS share_pnl_usd,
-        t.deal_vol * t.collateral_price AS margin_usd,
-        CASE
-            WHEN t.taker_way = 1 THEN 'Open Long'
-            WHEN t.taker_way = 2 THEN 'Close Short'
-            WHEN t.taker_way = 3 THEN 'Open Short'
-            WHEN t.taker_way = 4 THEN 'Close Long'
-        END AS trade_type,
-        CASE
-            WHEN t.taker_mode = 1 THEN 'Active'
-            WHEN t.taker_mode = 2 THEN 'Take Profit'
-            WHEN t.taker_mode = 3 THEN 'Stop Loss'
-            WHEN t.taker_mode = 4 THEN 'Liquidation'
-        END AS order_type,
-        CASE
-            WHEN p.margin_type = 1 THEN 'Isolated'
-            WHEN p.margin_type = 2 THEN 'Cross'
-            ELSE 'Unknown'
-        END AS margin_type,
         t.created_at
     FROM 
-        public.surfv2_trade t
-    LEFT JOIN 
-        public.surfv2_user_login_log ul ON t.taker_account_id = ul.account_id
-    LEFT JOIN 
-        public.surfv2_position p ON t.taker_position = p.id
+        trade_fill_fresh t
+    JOIN 
+        trade_pool_pairs p ON t.pair_id = p.pair_id
     WHERE 
         t.created_at >= '{start_date_str}'
         AND (t.taker_way IN (1, 2, 3, 4))
-        AND (t.taker_mode IN (1, 2, 3, 4))
     ORDER BY 
         t.created_at DESC
     LIMIT {limit}
@@ -131,9 +109,49 @@ def fetch_trading_data(date_range=30, limit=10000):
         df.loc[df['taker_way'].isin([1, 3]), 'action'] = 'Open'  # Open Long or Open Short
         df.loc[df['taker_way'].isin([2, 4]), 'action'] = 'Close'  # Close Short or Close Long
         
+        # Map taker_way to readable values
+        df['trade_type'] = df['taker_way'].map({
+            1: 'Open Long',
+            2: 'Close Short',
+            3: 'Open Short',
+            4: 'Close Long'
+        })
+        
+        # Map taker_mode to readable values
+        df['order_type'] = df['taker_mode'].map({
+            1: 'Active',
+            2: 'Take Profit',
+            3: 'Stop Loss',
+            4: 'Liquidation'
+        })
+        
         return df
     except Exception as e:
         st.error(f"Error fetching trading data: {e}")
+        return pd.DataFrame()
+
+@st.cache_data(ttl=600)
+def fetch_pair_config():
+    """Fetch pair configuration data"""
+    query = """
+    SELECT 
+        pair_id,
+        pair_name,
+        max_leverage,
+        base_fee_rate
+    FROM 
+        trade_pool_pairs
+    """
+    
+    try:
+        engine = get_database_connection()
+        if not engine:
+            return pd.DataFrame()
+            
+        df = pd.read_sql_query(query, engine)
+        return df
+    except Exception as e:
+        st.error(f"Error fetching pair config: {e}")
         return pd.DataFrame()
 
 @st.cache_data(ttl=600)
@@ -147,14 +165,13 @@ def calculate_user_metrics(df):
     # Group by user
     for user_id, user_data in df.groupby('user_id'):
         # Basic metrics
-        wallet_address = user_data['wallet_address'].iloc[0] if not user_data['wallet_address'].isna().all() else "Unknown"
         total_trades = len(user_data)
         first_trade = user_data['created_at'].min()
         last_trade = user_data['created_at'].max()
         
         # PNL metrics
         total_pnl = user_data['pnl_usd'].sum()
-        total_fee = user_data['fee_usd'].sum()
+        total_fee = user_data['fee_usd'].sum() if 'fee_usd' in user_data.columns else 0
         net_pnl = total_pnl - total_fee
         
         # Trading behavior
@@ -168,29 +185,35 @@ def calculate_user_metrics(df):
         long_pct = long_trades / total_trades if total_trades > 0 else 0
         
         # Order type breakdown
-        active_orders = user_data[user_data['order_type'] == 'Active'].shape[0]
-        tp_orders = user_data[user_data['order_type'] == 'Take Profit'].shape[0]
-        sl_orders = user_data[user_data['order_type'] == 'Stop Loss'].shape[0]
-        liq_orders = user_data[user_data['order_type'] == 'Liquidation'].shape[0]
+        active_orders = user_data[user_data['order_type'] == 'Active'].shape[0] if 'order_type' in user_data.columns else 0
+        tp_orders = user_data[user_data['order_type'] == 'Take Profit'].shape[0] if 'order_type' in user_data.columns else 0
+        sl_orders = user_data[user_data['order_type'] == 'Stop Loss'].shape[0] if 'order_type' in user_data.columns else 0
+        liq_orders = user_data[user_data['order_type'] == 'Liquidation'].shape[0] if 'order_type' in user_data.columns else 0
         
         # Timing patterns
         days_trading = (last_trade - first_trade).days
         avg_trades_per_day = total_trades / max(days_trading, 1)
         
         # Risk metrics
-        avg_leverage = user_data['leverage'].mean()
-        max_leverage = user_data['leverage'].max()
+        avg_leverage = user_data['leverage'].mean() if 'leverage' in user_data.columns else 0
+        max_leverage = user_data['leverage'].max() if 'leverage' in user_data.columns else 0
         
         # Pair diversity
         unique_pairs = user_data['pair_name'].nunique()
         most_traded_pair = user_data['pair_name'].value_counts().index[0] if not user_data.empty else "None"
         
         # Average position sizes
-        avg_position_size = user_data['margin_usd'].mean()
-        max_position_size = user_data['margin_usd'].max()
+        avg_position_size = 0
+        if 'deal_size' in user_data.columns:
+            avg_position_size = user_data['deal_size'].mean()
+        elif 'deal_vol' in user_data.columns and 'deal_price' in user_data.columns:
+            avg_position_size = (user_data['deal_vol'] * user_data['deal_price']).mean()
         
-        # Margin preferences
-        isolated_margin_pct = user_data[user_data['margin_type'] == 'Isolated'].shape[0] / total_trades if total_trades > 0 else 0
+        max_position_size = 0
+        if 'deal_size' in user_data.columns:
+            max_position_size = user_data['deal_size'].max()
+        elif 'deal_vol' in user_data.columns and 'deal_price' in user_data.columns:
+            max_position_size = (user_data['deal_vol'] * user_data['deal_price']).max()
         
         # Calculate trading style indicators
         # Scalper: Many trades, small position sizes, short timeframes
@@ -227,7 +250,6 @@ def calculate_user_metrics(df):
         # Create user metrics dictionary
         user_metric = {
             'user_id': user_id,
-            'wallet_address': wallet_address,
             'total_trades': total_trades,
             'first_trade': first_trade,
             'last_trade': last_trade,
@@ -252,7 +274,6 @@ def calculate_user_metrics(df):
             'most_traded_pair': most_traded_pair,
             'avg_position_size': avg_position_size,
             'max_position_size': max_position_size,
-            'isolated_margin_pct': isolated_margin_pct,
             'uses_tp_sl': uses_tp_sl,
             'primary_style': primary_style,
             'scalper_score': scalper_score,
@@ -327,26 +348,36 @@ def analyze_user_trading_patterns(df, user_id):
     avg_loss_streak = sum(loss_streaks) / len(loss_streaks) if loss_streaks else 0
     
     # Leverage patterns
-    leverage_over_time = user_data.groupby('trade_date')['leverage'].mean()
+    leverage_over_time = user_data.groupby('trade_date')['leverage'].mean() if 'leverage' in user_data.columns else pd.Series()
     
     # Position size patterns
-    position_size_over_time = user_data.groupby('trade_date')['margin_usd'].mean()
+    position_size_over_time = pd.Series()
+    if 'deal_size' in user_data.columns:
+        position_size_over_time = user_data.groupby('trade_date')['deal_size'].mean()
+    elif 'deal_vol' in user_data.columns and 'deal_price' in user_data.columns:
+        user_data['position_size'] = user_data['deal_vol'] * user_data['deal_price']
+        position_size_over_time = user_data.groupby('trade_date')['position_size'].mean()
     
     # Order type usage over time
-    order_types_over_time = user_data.groupby(['trade_date', 'order_type']).size().unstack(fill_value=0)
+    order_types_over_time = pd.DataFrame()
+    if 'order_type' in user_data.columns:
+        order_types_over_time = user_data.groupby(['trade_date', 'order_type']).size().unstack(fill_value=0)
     
     # Risk management patterns
-    # Analyze how user manages risk - TP/SL usage vs manual closing
-    tp_sl_usage = user_data.groupby('trade_date')['order_type'].apply(
-        lambda x: (x == 'Take Profit').sum() + (x == 'Stop Loss').sum()
-    ) / user_data.groupby('trade_date')['order_type'].count()
+    tp_sl_usage = pd.Series()
+    if 'order_type' in user_data.columns:
+        tp_sl_usage = user_data.groupby('trade_date')['order_type'].apply(
+            lambda x: ((x == 'Take Profit').sum() + (x == 'Stop Loss').sum()) / len(x)
+        )
     
     # Daily unique pairs
     daily_unique_pairs = user_data.groupby('trade_date')['pair_name'].nunique()
     
-    # Liquidity analysis - when does user get liquidated
-    liquidations = user_data[user_data['order_type'] == 'Liquidation']
-    liq_by_pair = liquidations['pair_name'].value_counts()
+    # Liquidity analysis
+    liq_by_pair = pd.Series()
+    if 'order_type' in user_data.columns:
+        liquidations = user_data[user_data['order_type'] == 'Liquidation']
+        liq_by_pair = liquidations['pair_name'].value_counts() if not liquidations.empty else pd.Series()
     
     # Return analysis results
     return {
@@ -368,144 +399,6 @@ def analyze_user_trading_patterns(df, user_id):
         'daily_unique_pairs': daily_unique_pairs,
         'liq_by_pair': liq_by_pair
     }
-
-# --- DUMMY DATA GENERATOR ---
-def generate_dummy_data(num_users=50, trades_per_user=100):
-    """Generate dummy data for testing when database connection fails"""
-    np.random.seed(42)  # For reproducibility
-    
-    dummy_data = []
-    pairs = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'DOGE/USDT', 'BNB/USDT', 'ADA/USDT', 'DOT/USDT']
-    
-    # Generate random user IDs
-    user_ids = [f"user_{i}" for i in range(1, num_users + 1)]
-    
-    # Current time
-    now = datetime.now(pytz.timezone('Asia/Singapore'))
-    
-    for user_id in user_ids:
-        # User has different trading patterns
-        scalper = np.random.random() > 0.7  # 30% chance of being a scalper
-        swing_trader = np.random.random() > 0.7 if not scalper else False  # 30% chance of being a swing trader if not a scalper
-        
-        # Scalpers have many small trades, swing traders have fewer larger trades
-        num_trades = np.random.randint(50, 200) if scalper else np.random.randint(10, 50)
-        position_sizes = np.random.uniform(50, 200, num_trades) if scalper else np.random.uniform(200, 1000, num_trades)
-        
-        # Scalpers use higher leverage
-        leverages = np.random.uniform(10, 50, num_trades) if scalper else np.random.uniform(2, 10, num_trades)
-        
-        # Win rates (some users are better than others)
-        win_rate = np.random.uniform(0.3, 0.7)
-        
-        # Preference for long or short
-        long_bias = np.random.uniform(0.3, 0.7)  # % of trades that are long
-        
-        # Trading date ranges
-        if swing_trader:
-            date_range = 90  # Swing traders trade over longer periods
-        elif scalper:
-            date_range = 10  # Scalpers trade frequently in short periods
-        else:
-            date_range = 30  # Default range
-            
-        for i in range(num_trades):
-            # Random trade details
-            pair = np.random.choice(pairs)
-            
-            # Trade direction (long or short)
-            is_long = np.random.random() < long_bias
-            
-            # Trade type (open or close)
-            is_open = np.random.random() < 0.5
-            
-            if is_long and is_open:
-                taker_way = 1  # Open Long
-                trade_type = 'Open Long'
-            elif is_long and not is_open:
-                taker_way = 4  # Close Long
-                trade_type = 'Close Long'
-            elif not is_long and is_open:
-                taker_way = 3  # Open Short
-                trade_type = 'Open Short'
-            else:
-                taker_way = 2  # Close Short
-                trade_type = 'Close Short'
-            
-            # Order type
-            is_tp_sl = np.random.random() < 0.4  # 40% chance of using TP/SL
-            is_liq = np.random.random() < 0.05  # 5% chance of liquidation
-            
-            if is_liq:
-                taker_mode = 4
-                order_type = 'Liquidation'
-            elif is_tp_sl and np.random.random() < 0.5:
-                taker_mode = 2
-                order_type = 'Take Profit'
-            elif is_tp_sl:
-                taker_mode = 3
-                order_type = 'Stop Loss'
-            else:
-                taker_mode = 1
-                order_type = 'Active'
-            
-            # Random trade date within range
-            trade_date = now - timedelta(days=np.random.randint(0, date_range), 
-                                         hours=np.random.randint(0, 24),
-                                         minutes=np.random.randint(0, 60))
-            
-            # Position size for this trade
-            position_size = position_sizes[i]
-            
-            # P&L (win or loss)
-            is_win = np.random.random() < win_rate
-            
-            if is_win:
-                pnl = np.random.uniform(0.1, 0.3) * position_size
-            else:
-                pnl = -np.random.uniform(0.1, 0.3) * position_size
-                
-            # If liquidation, always a loss
-            if is_liq:
-                pnl = -position_size
-            
-            # Fee is a small percentage of position size
-            fee = 0.001 * position_size
-            
-            # Generate trade record
-            trade = {
-                'user_id': user_id,
-                'wallet_address': f"0x{user_id.replace('user_', '')}abcdef",
-                'pair_name': pair,
-                'taker_way': taker_way,
-                'taker_mode': taker_mode,
-                'taker_fee_mode': 1,  # Default fee mode
-                'dual_side': np.random.choice([True, False]),
-                'leverage': leverages[i],
-                'deal_price': np.random.uniform(10, 50000),  # Random price
-                'deal_vol': position_size / leverages[i],  # Actual collateral
-                'deal_size': position_size,  # Notional size
-                'coin_name': pair.split('/')[0],
-                'pnl_usd': pnl,
-                'fee_usd': fee,
-                'share_pnl_usd': 0,
-                'margin_usd': position_size,
-                'trade_type': trade_type,
-                'order_type': order_type,
-                'margin_type': np.random.choice(['Isolated', 'Cross']),
-                'created_at': trade_date,
-                'trade_date': trade_date.date(),
-                'trade_hour': trade_date.hour,
-                'trade_day': trade_date.strftime('%A'),
-                'is_win': is_win,
-                'is_loss': not is_win,
-                'direction': 'Long' if is_long else 'Short',
-                'action': 'Open' if is_open else 'Close'
-            }
-            
-            dummy_data.append(trade)
-    
-    return pd.DataFrame(dummy_data)
 
 # --- CONTROL PANEL ---
 st.sidebar.title("Dashboard Controls")
@@ -529,9 +422,6 @@ row_limit = st.sidebar.slider(
     step=1000
 )
 
-# Option to use dummy data
-use_dummy_data = st.sidebar.checkbox("Use Demo Data (when DB fails)", value=False)
-
 # Add a refresh button
 if st.sidebar.button("🔄 Refresh Data"):
     st.cache_data.clear()
@@ -539,14 +429,11 @@ if st.sidebar.button("🔄 Refresh Data"):
 
 # Fetch the data
 with st.spinner("Loading trading data..."):
-    if use_dummy_data:
-        st.warning("Using demo data. This is not real trading data.")
-        df = generate_dummy_data(num_users=50, trades_per_user=100)
-    else:
-        df = fetch_trading_data(date_range, row_limit)
+    df = fetch_trading_data(date_range, row_limit)
+    pair_config = fetch_pair_config()
     
     if df.empty:
-        st.error("No trading data found for the selected period. Try using Demo Data option.")
+        st.error("No trading data found for the selected period. Try adjusting the date range or row limit.")
         st.stop()
     
     user_metrics_df = calculate_user_metrics(df)
@@ -972,9 +859,9 @@ with tab3:
             st.plotly_chart(fig, use_container_width=True)
         
         # Order type usage
-        st.subheader("Order Type Usage")
-        
         if 'order_types_over_time' in user_patterns and not user_patterns['order_types_over_time'].empty:
+            st.subheader("Order Type Usage")
+        
             # Sum up order types
             order_type_sums = user_patterns['order_types_over_time'].sum()
             
@@ -996,8 +883,6 @@ with tab3:
             )
             
             st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("No order type data available for this user.")
         
         # Trading pairs analysis
         st.subheader("Trading Pairs Analysis")
@@ -1078,8 +963,6 @@ with tab3:
             )
             
             st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("No leverage data available for this user.")
         
         # Position size over time
         if 'position_size_over_time' in user_patterns and not user_patterns['position_size_over_time'].empty:
@@ -1091,8 +974,6 @@ with tab3:
             )
             
             st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("No position size data available for this user.")
         
         # Streak analysis
         st.subheader("Win/Loss Streak Analysis")
@@ -1124,8 +1005,6 @@ with tab3:
             )
             
             st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("No streak data available for this user.")
         
         # Trading behavior summary
         st.subheader("Trading Behavior Summary")
@@ -1192,13 +1071,13 @@ with tab4:
         'user_id': pd.Series.nunique,
         'pnl_usd': ['sum', 'mean'],
         'leverage': 'mean',
-        'margin_usd': 'mean',
+        'pnl_usd': 'mean',
         'is_win': 'mean'
     })
     
     pair_metrics.columns = [
         'Unique Users', 'Total PNL', 'Avg PNL per Trade',
-        'Avg Leverage', 'Avg Position Size', 'Win Rate'
+        'Avg Leverage', 'Win Rate'
     ]
     
     pair_metrics = pair_metrics.reset_index()
@@ -1212,6 +1091,13 @@ with tab4:
         options=pair_metrics['pair_name'].tolist(),
         format_func=lambda x: f"{x} ({pair_metrics[pair_metrics['pair_name'] == x]['Unique Users'].values[0]} users)"
     )
+    
+    # Get pair config
+    pair_config_row = None
+    if not pair_config.empty:
+        pair_config_matches = pair_config[pair_config['pair_name'] == selected_pair]
+        if not pair_config_matches.empty:
+            pair_config_row = pair_config_matches.iloc[0]
     
     # Filter data for selected pair
     pair_data = df[df['pair_name'] == selected_pair]
@@ -1248,14 +1134,21 @@ with tab4:
             st.metric("Avg Leverage", f"{pair_metric['Avg Leverage']:.2f}x")
         
         with col3:
-            st.metric("Avg Position Size", f"${pair_metric['Avg Position Size']:,.2f}")
-        
-        with col4:
             # Calculate long percentage
             long_trades = pair_data[pair_data['direction'] == 'Long'].shape[0]
             total_trades = len(pair_data)
             long_pct = long_trades / total_trades if total_trades > 0 else 0
             st.metric("Long/Short Split", f"{long_pct:.0%} Long")
+        
+        with col4:
+            if pair_config_row is not None:
+                st.metric("Max Leverage", f"{pair_config_row['max_leverage']}x")
+            
+        # Third row if there's pair config
+        if pair_config_row is not None:
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Base Fee Rate", f"{pair_config_row['base_fee_rate']:.4f}")
         
         # Trading volume over time
         st.subheader("Trading Volume Over Time")
@@ -1322,35 +1215,36 @@ with tab4:
         st.plotly_chart(fig, use_container_width=True)
         
         # Order type analysis
-        st.subheader("Order Type Analysis")
-        
-        # Calculate metrics by order type
-        order_metrics = pair_data.groupby('order_type').agg({
-            'pnl_usd': ['sum', 'mean'],
-            'is_win': 'mean',
-            'user_id': 'count'
-        })
-        
-        order_metrics.columns = [
-            'Total PNL', 'Avg PNL per Trade', 'Win Rate', 'Trade Count'
-        ]
-        
-        order_metrics = order_metrics.reset_index()
-        
-        # Create a bar chart
-        fig = px.bar(
-            order_metrics,
-            x='order_type',
-            y='Trade Count',
-            color='Avg PNL per Trade',
-            text='Win Rate',
-            labels={'order_type': 'Order Type', 'Trade Count': 'Number of Trades'},
-            title=f"Order Type Usage for {selected_pair}",
-            color_continuous_scale='RdBu',
-            color_continuous_midpoint=0
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
+        if 'order_type' in pair_data.columns:
+            st.subheader("Order Type Analysis")
+            
+            # Calculate metrics by order type
+            order_metrics = pair_data.groupby('order_type').agg({
+                'pnl_usd': ['sum', 'mean'],
+                'is_win': 'mean',
+                'user_id': 'count'
+            })
+            
+            order_metrics.columns = [
+                'Total PNL', 'Avg PNL per Trade', 'Win Rate', 'Trade Count'
+            ]
+            
+            order_metrics = order_metrics.reset_index()
+            
+            # Create a bar chart
+            fig = px.bar(
+                order_metrics,
+                x='order_type',
+                y='Trade Count',
+                color='Avg PNL per Trade',
+                text='Win Rate',
+                labels={'order_type': 'Order Type', 'Trade Count': 'Number of Trades'},
+                title=f"Order Type Usage for {selected_pair}",
+                color_continuous_scale='RdBu',
+                color_continuous_midpoint=0
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
         
         # User performance on this pair
         st.subheader("Top Users on This Pair")
@@ -1359,14 +1253,12 @@ with tab4:
         user_pair_metrics = pair_data.groupby('user_id').agg({
             'pnl_usd': 'sum',
             'is_win': 'mean',
-            'margin_usd': 'mean',
             'leverage': 'mean',
             'user_id': 'count'
         })
         
         user_pair_metrics.columns = [
-            'Total PNL', 'Win Rate', 'Avg Position Size',
-            'Avg Leverage', 'Trade Count'
+            'Total PNL', 'Win Rate', 'Avg Leverage', 'Trade Count'
         ]
         
         user_pair_metrics = user_pair_metrics.reset_index()
@@ -1383,7 +1275,6 @@ with tab4:
                 user_pair_metrics.head(10).style.format({
                     'Total PNL': '${:.2f}',
                     'Win Rate': '{:.2%}',
-                    'Avg Position Size': '${:.2f}',
                     'Avg Leverage': '{:.2f}x'
                 }),
                 use_container_width=True
@@ -1396,7 +1287,7 @@ with tab4:
                 y='Total PNL',
                 size='Trade Count',
                 color='Avg Leverage',
-                hover_data=['user_id', 'Trade Count', 'Avg Position Size'],
+                hover_data=['user_id', 'Trade Count'],
                 labels={
                     'Win Rate': 'Win Rate',
                     'Total PNL': 'Total PNL (USD)',
@@ -1415,38 +1306,39 @@ with tab4:
         st.subheader("Leverage Analysis")
         
         # Create leverage bins
-        pair_data['leverage_bin'] = pd.cut(
-            pair_data['leverage'],
-            bins=[0, 2, 5, 10, 20, 50, 100, 1000],
-            labels=['1-2x', '2-5x', '5-10x', '10-20x', '20-50x', '50-100x', '100x+']
-        )
-        
-        # Calculate metrics by leverage bin
-        leverage_metrics = pair_data.groupby('leverage_bin').agg({
-            'pnl_usd': ['sum', 'mean'],
-            'is_win': 'mean',
-            'user_id': 'count'
-        })
-        
-        leverage_metrics.columns = [
-            'Total PNL', 'Avg PNL per Trade', 'Win Rate', 'Trade Count'
-        ]
-        
-        leverage_metrics = leverage_metrics.reset_index()
-        
-        # Create a bar chart
-        fig = px.bar(
-            leverage_metrics,
-            x='leverage_bin',
-            y='Trade Count',
-            color='Win Rate',
-            labels={'leverage_bin': 'Leverage Range', 'Trade Count': 'Number of Trades'},
-            title=f"Trade Distribution by Leverage for {selected_pair}",
-            color_continuous_scale='RdYlGn',
-            text='Avg PNL per Trade'
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
+        if 'leverage' in pair_data.columns:
+            pair_data['leverage_bin'] = pd.cut(
+                pair_data['leverage'],
+                bins=[0, 2, 5, 10, 20, 50, 100, 1000],
+                labels=['1-2x', '2-5x', '5-10x', '10-20x', '20-50x', '50-100x', '100x+']
+            )
+            
+            # Calculate metrics by leverage bin
+            leverage_metrics = pair_data.groupby('leverage_bin').agg({
+                'pnl_usd': ['sum', 'mean'],
+                'is_win': 'mean',
+                'user_id': 'count'
+            })
+            
+            leverage_metrics.columns = [
+                'Total PNL', 'Avg PNL per Trade', 'Win Rate', 'Trade Count'
+            ]
+            
+            leverage_metrics = leverage_metrics.reset_index()
+            
+            # Create a bar chart
+            fig = px.bar(
+                leverage_metrics,
+                x='leverage_bin',
+                y='Trade Count',
+                color='Win Rate',
+                labels={'leverage_bin': 'Leverage Range', 'Trade Count': 'Number of Trades'},
+                title=f"Trade Distribution by Leverage for {selected_pair}",
+                color_continuous_scale='RdYlGn',
+                text='Avg PNL per Trade'
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
         
         # Hour analysis
         st.subheader("Trading Hour Analysis")
