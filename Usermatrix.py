@@ -67,11 +67,11 @@ def fetch_all_users():
     query = """
     SELECT DISTINCT
       taker_account_id,
-      CONCAT(taker_account_id, '') AS user_id
+      CONCAT(taker_account_id, '') AS user_id_str
     FROM
       public.trade_fill_fresh
     ORDER BY
-      user_id;
+      user_id_str;
     """
     
     try:
@@ -319,7 +319,7 @@ if users_df is not None and trading_metrics_df is not None:
         filtered_df = merged_df.copy()
         
         if search_id:
-            filtered_df = filtered_df[filtered_df['user_id'].str.contains(search_id, na=False)]
+            filtered_df = filtered_df[filtered_df['user_id_str'].str.contains(search_id, na=False)]
         
         if trader_filter != "All":
             if trader_filter == "Has traded":
@@ -331,7 +331,7 @@ if users_df is not None and trading_metrics_df is not None:
         st.subheader(f"User List ({len(filtered_df)} users)")
         
         # Select columns to display based on what's available
-        display_cols = ['user_id']
+        display_cols = ['user_id_str']
         
         # Add status columns if available
         if 'is_enable' in filtered_df.columns:
@@ -576,12 +576,12 @@ if users_df is not None and trading_metrics_df is not None:
             if len(traders) > 0:
                 selected_user = st.selectbox(
                     "Select User for Analysis",
-                    options=traders['user_id'].unique(),
+                    options=traders['user_id_str'].unique(),
                     format_func=lambda x: f"User ID: {x}"
                 )
                 
                 # Get user data
-                user_data = merged_df[merged_df['user_id'] == selected_user].iloc[0]
+                user_data = merged_df[merged_df['user_id_str'] == selected_user].iloc[0]
                 
                 # Fetch detailed trade data
                 user_trades = fetch_user_trade_details(selected_user)
