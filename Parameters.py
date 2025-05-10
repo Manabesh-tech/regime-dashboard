@@ -8,6 +8,7 @@ import psycopg2
 import warnings
 import pytz
 
+
 # Suppress warnings
 warnings.filterwarnings('ignore')
 
