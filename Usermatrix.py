@@ -7,13 +7,14 @@ from datetime import datetime, timedelta
 import psycopg2
 import warnings
 import pytz
+from plotly.subplots import make_subplots
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
 
 # Set page config
 st.set_page_config(
-    page_title="User Behavior Analysis Dashboard",
+    page_title="User Trading Behavior Analysis",
     page_icon="📊",
     layout="wide"
 )
@@ -263,30 +264,28 @@ with st.spinner("Loading user data..."):
 
 # Combine the data
 if users_df is not None and trading_metrics_df is not None:
-    # Convert account_id to string to ensure matching formats
-    users_df['account_id_str'] = users_df['account_id'].astype(str)
-    trading_metrics_df['taker_account_id_str'] = trading_metrics_df['taker_account_id'].astype(str)
-    
-    # Merge user info with trading metrics
+    # Merge user info with trading metrics - use the user_id_str column directly
     merged_df = pd.merge(
         users_df, 
         trading_metrics_df, 
-        left_on='account_id_str', 
-        right_on='taker_account_id_str', 
+        on='user_id_str', 
         how='left'
     )
     
     # Add user client status if available
     if user_status_df is not None:
-        user_status_df['id_str'] = user_status_df['id'].astype(str)
-        merged_df = pd.merge(
-            merged_df,
-            user_status_df,
-            left_on='account_id_str',
-            right_on='id_str',
-            how='left',
-            suffixes=('', '_client')
-        )
+        try:
+            user_status_df['id_str'] = user_status_df['id'].astype(str)
+            merged_df = pd.merge(
+                merged_df,
+                user_status_df,
+                left_on='taker_account_id_x',  # Use the column from users_df
+                right_on='id',
+                how='left',
+                suffixes=('', '_client')
+            )
+        except Exception as e:
+            st.warning(f"Could not merge user status: {e}")
     
     # Fill NaN values for users who haven't traded
     trade_cols = ['total_trades', 'winning_trades', 'losing_trades', 'win_percentage', 
@@ -298,7 +297,7 @@ if users_df is not None and trading_metrics_df is not None:
         if col in merged_df.columns:
             merged_df[col] = merged_df[col].fillna(0)
     
-    # Display in tabs
+    # Display tabs
     with tab1:
         st.header("All Users")
         
@@ -467,7 +466,7 @@ if users_df is not None and trading_metrics_df is not None:
                 st.subheader(f"Trading Metrics ({len(traders_df)} users)")
                 
                 # Create clean display dataframe
-                metrics_cols = ['account_id']
+                metrics_cols = ['user_id_str']
                 
                 # Add available trading metrics
                 for col in ['total_trades', 'winning_trades', 'losing_trades', 'win_percentage', 
@@ -535,7 +534,7 @@ if users_df is not None and trading_metrics_df is not None:
                         y='net_pnl',
                         size='max_leverage' if 'max_leverage' in traders_df.columns else None,
                         color='win_percentage' if 'win_percentage' in traders_df.columns else None,
-                        hover_name='account_id',
+                        hover_name='user_id_str',
                         hover_data=['total_trades', 'net_pnl', 'win_percentage', 'profit_factor'],
                         title='Trading Activity vs Performance',
                         labels={
@@ -555,10 +554,10 @@ if users_df is not None and trading_metrics_df is not None:
                     
                     fig = px.bar(
                         top_users,
-                        x='account_id',
+                        x='user_id_str',
                         y='net_pnl',
                         title='Top 10 Users by Net PnL',
-                        labels={'account_id': 'Account ID', 'net_pnl': 'Net PnL (USD)'}
+                        labels={'user_id_str': 'User ID', 'net_pnl': 'Net PnL (USD)'}
                     )
                     st.plotly_chart(fig, use_container_width=True)
             else:
@@ -724,46 +723,49 @@ if users_df is not None and trading_metrics_df is not None:
                     st.subheader("Leverage Analysis")
                     
                     # Group by leverage
-                    leverage_groups = pd.cut(user_trades['leverage'], bins=10)
-                    leverage_analysis = user_trades.groupby(leverage_groups).agg(
-                        count=('leverage', 'count'),
-                        avg_pnl=('pnl_usd', 'mean'),
-                        total_pnl=('pnl_usd', 'sum')
-                    ).reset_index()
-                    
-                    leverage_analysis['leverage'] = leverage_analysis['leverage'].astype(str)
-                    
-                    # Create dual axis chart
-                    fig = make_subplots(specs=[[{"secondary_y": True}]])
-                    
-                    fig.add_trace(
-                        go.Bar(
-                            x=leverage_analysis['leverage'],
-                            y=leverage_analysis['count'],
-                            name='Number of Trades'
-                        ),
-                        secondary_y=False
-                    )
-                    
-                    fig.add_trace(
-                        go.Scatter(
-                            x=leverage_analysis['leverage'],
-                            y=leverage_analysis['avg_pnl'],
-                            name='Average PnL',
-                            mode='lines+markers'
-                        ),
-                        secondary_y=True
-                    )
-                    
-                    fig.update_layout(
-                        title='Leverage Analysis',
-                        xaxis_title='Leverage Range'
-                    )
-                    
-                    fig.update_yaxes(title_text='Number of Trades', secondary_y=False)
-                    fig.update_yaxes(title_text='Average PnL (USD)', secondary_y=True)
-                    
-                    st.plotly_chart(fig, use_container_width=True)
+                    try:
+                        leverage_groups = pd.cut(user_trades['leverage'], bins=10)
+                        leverage_analysis = user_trades.groupby(leverage_groups).agg(
+                            count=('leverage', 'count'),
+                            avg_pnl=('pnl_usd', 'mean'),
+                            total_pnl=('pnl_usd', 'sum')
+                        ).reset_index()
+                        
+                        leverage_analysis['leverage'] = leverage_analysis['leverage'].astype(str)
+                        
+                        # Create dual axis chart
+                        fig = make_subplots(specs=[[{"secondary_y": True}]])
+                        
+                        fig.add_trace(
+                            go.Bar(
+                                x=leverage_analysis['leverage'],
+                                y=leverage_analysis['count'],
+                                name='Number of Trades'
+                            ),
+                            secondary_y=False
+                        )
+                        
+                        fig.add_trace(
+                            go.Scatter(
+                                x=leverage_analysis['leverage'],
+                                y=leverage_analysis['avg_pnl'],
+                                name='Average PnL',
+                                mode='lines+markers'
+                            ),
+                            secondary_y=True
+                        )
+                        
+                        fig.update_layout(
+                            title='Leverage Analysis',
+                            xaxis_title='Leverage Range'
+                        )
+                        
+                        fig.update_yaxes(title_text='Number of Trades', secondary_y=False)
+                        fig.update_yaxes(title_text='Average PnL (USD)', secondary_y=True)
+                        
+                        st.plotly_chart(fig, use_container_width=True)
+                    except Exception as e:
+                        st.warning(f"Could not create leverage analysis: {e}")
                 else:
                     st.warning("No trade data available for this user.")
             else:
@@ -790,11 +792,8 @@ This dashboard provides comprehensive analysis of user behavior in the trading p
 - Detailed user-level analysis
 - Interactive charts and visualizations
 
-Data is sourced from the replication_report database.
+Data is sourced from the trade_fill_fresh table in the replication_report database.
 """)
 
 # Show last update time
 st.sidebar.markdown(f"*Last updated: {now_sg.strftime('%Y-%m-%d %H:%M:%S')} (SGT)*")
-
-# Import missing libraries
-from plotly.subplots import make_subplots
