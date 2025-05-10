@@ -19,9 +19,6 @@ st.set_page_config(
     layout="wide"
 )
 
-# Always clear cache at startup to ensure fresh data
-st.cache_data.clear()
-
 # Configure database
 def init_db_connection():
     # DB parameters - these should be stored in Streamlit secrets in production
@@ -51,7 +48,7 @@ conn, db_params = init_db_connection()
 
 # Main title
 st.title("User Trading Behavior Analysis Dashboard")
-st.caption("This dashboard analyzes user behavior based on trading data from the trade_fill_fresh table.")
+st.caption("This dashboard analyzes trading patterns for users")
 
 # Set up the timezone
 singapore_timezone = pytz.timezone('Asia/Singapore')
@@ -62,71 +59,9 @@ st.write(f"Current Singapore Time: {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
 # Create tabs
 tab1, tab2, tab3 = st.tabs(["All Users", "Trading Metrics", "User Analysis"])
 
-# Function to fetch all users
-@st.cache_data(ttl=600)
-def fetch_all_users():
-    query = """
-    SELECT DISTINCT
-      taker_account_id,
-      CONCAT(taker_account_id, '') AS user_id_str
-    FROM
-      public.trade_fill_fresh
-    ORDER BY
-      user_id_str;
-    """
-    
-    try:
-        df = pd.read_sql(query, conn)
-        return df
-    except Exception as e:
-        st.error(f"Error fetching user data: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
-
-# Function to fetch user client status
-@st.cache_data(ttl=600)
-def fetch_user_client_status():
-    # First check if we have access to the user_client table
-    check_query = """
-    SELECT 1 
-    FROM information_schema.tables 
-    WHERE table_schema = 'public' 
-    AND table_name = 'user_client'
-    AND has_table_privilege(current_user, 'public.user_client', 'SELECT');
-    """
-    
-    try:
-        check_df = pd.read_sql(check_query, conn)
-        if len(check_df) == 0:
-            st.warning("No access to user_client table. Skipping client status.")
-            return None
-            
-        query = """
-        SELECT
-          id,
-          create_way,
-          created_at + INTERVAL '8 hour' AS created_at,
-          updated_at + INTERVAL '8 hour' AS updated_at,
-          is_enable,
-          can_order,
-          can_withdraw,
-          role_type
-        FROM
-          public.user_client
-        ORDER BY
-          id;
-        """
-        
-        df = pd.read_sql(query, conn)
-        return df
-    except Exception as e:
-        st.warning(f"Cannot access user_client table: {e}")
-        return None
-
 # Function to fetch user trading metrics
 @st.cache_data(ttl=600)
-def fetch_user_trading_metrics():
+def fetch_trading_metrics():
     query = """
     SELECT
       taker_account_id,
@@ -255,49 +190,40 @@ def fetch_users_per_day():
         st.error(f"Error fetching users per day: {e}")
         return None
 
+# Try to access user_client table (but don't fail if not available)
+@st.cache_data(ttl=600)
+def fetch_user_client_info():
+    try:
+        query = """
+        SELECT
+          id,
+          CONCAT(id, '') AS id_str,
+          create_way,
+          created_at + INTERVAL '8 hour' AS created_at,
+          updated_at + INTERVAL '8 hour' AS updated_at,
+          is_enable,
+          can_order,
+          can_withdraw
+        FROM
+          public.user_client
+        ORDER BY
+          id;
+        """
+        df = pd.read_sql(query, conn)
+        return df
+    except Exception as e:
+        st.warning(f"Could not access user_client table (this is normal): {e}")
+        return None
+
 # Load data
 with st.spinner("Loading user data..."):
-    users_df = fetch_all_users()
-    user_status_df = fetch_user_client_status()
-    trading_metrics_df = fetch_user_trading_metrics()
+    trading_metrics_df = fetch_trading_metrics()
     users_per_day_df = fetch_users_per_day()
+    user_client_df = fetch_user_client_info()
 
-# Combine the data
-if users_df is not None and trading_metrics_df is not None:
-    # Merge user info with trading metrics - use the user_id_str column directly
-    merged_df = pd.merge(
-        users_df, 
-        trading_metrics_df, 
-        on='user_id_str', 
-        how='left'
-    )
-    
-    # Add user client status if available
-    if user_status_df is not None:
-        try:
-            user_status_df['id_str'] = user_status_df['id'].astype(str)
-            merged_df = pd.merge(
-                merged_df,
-                user_status_df,
-                left_on='taker_account_id_x',  # Use the column from users_df
-                right_on='id',
-                how='left',
-                suffixes=('', '_client')
-            )
-        except Exception as e:
-            st.warning(f"Could not merge user status: {e}")
-    
-    # Fill NaN values for users who haven't traded
-    trade_cols = ['total_trades', 'winning_trades', 'losing_trades', 'win_percentage', 
-                 'total_profit', 'total_loss', 'net_pnl', 'profit_share',
-                 'avg_leverage', 'max_leverage', 'avg_position_size', 'max_position_size',
-                 'liquidations', 'profit_factor', 'num_pairs']
-    
-    for col in trade_cols:
-        if col in merged_df.columns:
-            merged_df[col] = merged_df[col].fillna(0)
-    
-    # Display tabs
+# Check if we have data
+if trading_metrics_df is not None:
+    # Tab 1 - All Users
     with tab1:
         st.header("All Users")
         
@@ -311,49 +237,41 @@ if users_df is not None and trading_metrics_df is not None:
         with col2:
             trader_filter = st.selectbox(
                 "Filter by Trading Activity", 
-                ["All", "Has traded", "Never traded"]
+                ["All", "High Activity (>100 trades)", "Medium Activity (10-100 trades)", "Low Activity (<10 trades)"]
             )
         
         # Apply filters
-        filtered_df = merged_df.copy()
+        filtered_df = trading_metrics_df.copy()
         
         if search_id:
             filtered_df = filtered_df[filtered_df['user_id_str'].str.contains(search_id, na=False)]
         
         if trader_filter != "All":
-            if trader_filter == "Has traded":
-                filtered_df = filtered_df[filtered_df['total_trades'] > 0]
-            else:  # "Never traded"
-                filtered_df = filtered_df[filtered_df['total_trades'] == 0]
+            if trader_filter == "High Activity (>100 trades)":
+                filtered_df = filtered_df[filtered_df['total_trades'] > 100]
+            elif trader_filter == "Medium Activity (10-100 trades)":
+                filtered_df = filtered_df[(filtered_df['total_trades'] >= 10) & (filtered_df['total_trades'] <= 100)]
+            else:  # Low Activity
+                filtered_df = filtered_df[filtered_df['total_trades'] < 10]
         
         # Display users
         st.subheader(f"User List ({len(filtered_df)} users)")
         
-        # Select columns to display based on what's available
-        display_cols = ['user_id_str']
-        
-        # Add status columns if available
-        if 'is_enable' in filtered_df.columns:
-            display_cols.append('is_enable')
-        if 'can_order' in filtered_df.columns:
-            display_cols.append('can_order')
-        if 'created_at' in filtered_df.columns:
-            display_cols.append('created_at')
-        
-        # Add trading metrics
-        if 'total_trades' in filtered_df.columns:
-            display_cols.append('total_trades')
-        if 'net_pnl' in filtered_df.columns:
-            display_cols.append('net_pnl')
+        # Select columns to display
+        display_cols = ['user_id_str', 'total_trades', 'winning_trades', 'losing_trades', 
+                        'win_percentage', 'net_pnl', 'max_leverage', 'first_trade', 'last_trade']
         
         # Create display dataframe
         display_df = filtered_df[display_cols].copy()
         
-        # Format numeric columns
-        numeric_cols = ['total_trades', 'net_pnl']
-        for col in numeric_cols:
-            if col in display_df.columns:
-                display_df[col] = display_df[col].map(lambda x: f"{x:.2f}" if isinstance(x, float) else x)
+        # Format columns
+        display_df['net_pnl'] = display_df['net_pnl'].round(2)
+        display_df['win_percentage'] = display_df['win_percentage'].round(2)
+        display_df['max_leverage'] = display_df['max_leverage'].round(2)
+        
+        # Format dates
+        for col in ['first_trade', 'last_trade']:
+            display_df[col] = pd.to_datetime(display_df[col]).dt.strftime('%Y-%m-%d %H:%M:%S')
         
         # Show the dataframe
         st.dataframe(display_df, use_container_width=True)
@@ -373,31 +291,22 @@ if users_df is not None and trading_metrics_df is not None:
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
-            total_users = len(users_df)
+            total_users = len(trading_metrics_df)
             st.metric("Total Users", f"{total_users:,}")
         
         with col2:
-            if 'is_enable' in merged_df.columns and 'can_order' in merged_df.columns:
-                active_users = len(merged_df[(merged_df['is_enable'] == True) & (merged_df['can_order'] == True)])
-                st.metric("Active Users", f"{active_users:,}")
-            else:
-                st.metric("Users Found", f"{total_users:,}")
+            active_users = len(trading_metrics_df[trading_metrics_df['total_trades'] > 10])
+            st.metric("Active Users (>10 trades)", f"{active_users:,}")
         
         with col3:
-            if 'total_trades' in merged_df.columns:
-                trading_users = len(merged_df[merged_df['total_trades'] > 0])
-                st.metric("Users Who Have Traded", f"{trading_users:,}")
-            else:
-                st.metric("Users Who Have Traded", "N/A")
+            total_volume = trading_metrics_df['total_trades'].sum()
+            st.metric("Total Trades", f"{total_volume:,}")
         
         with col4:
-            if 'net_pnl' in merged_df.columns:
-                profitable_users = len(merged_df[merged_df['net_pnl'] > 0])
-                st.metric("Profitable Users", f"{profitable_users:,}")
-            else:
-                st.metric("Profitable Users", "N/A")
+            profitable_users = len(trading_metrics_df[trading_metrics_df['net_pnl'] > 0])
+            st.metric("Profitable Users", f"{profitable_users:,}")
         
-        # User registration chart
+        # User activity over time
         st.subheader("User Activity Over Time")
         
         if users_per_day_df is not None and len(users_per_day_df) > 0:
@@ -431,347 +340,329 @@ if users_df is not None and trading_metrics_df is not None:
         else:
             st.info("No user activity data available.")
     
+    # Tab 2 - Trading Metrics
     with tab2:
         st.header("Trading Metrics")
         
-        # Filter to only users who have traded
-        if 'total_trades' in merged_df.columns:
-            traders_df = merged_df[merged_df['total_trades'] > 0].copy()
+        # Add filters
+        st.subheader("Filter Trading Metrics")
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            min_trades = st.number_input("Min Trades", min_value=0, value=0)
+        
+        with col2:
+            sort_options = ["total_trades", "net_pnl", "win_percentage", "profit_factor", "max_leverage"]
+            sort_by = st.selectbox("Sort By", sort_options, index=0)
+        
+        with col3:
+            sort_order = st.selectbox("Sort Order", ["Descending", "Ascending"])
+        
+        # Apply filters
+        metrics_df = trading_metrics_df.copy()
+        
+        if min_trades > 0:
+            metrics_df = metrics_df[metrics_df['total_trades'] >= min_trades]
+        
+        # Sort the dataframe
+        is_ascending = sort_order == "Ascending"
+        metrics_df = metrics_df.sort_values(sort_by, ascending=is_ascending)
+        
+        # Display trading metrics table
+        st.subheader(f"Trading Metrics ({len(metrics_df)} users)")
+        
+        # Create clean display dataframe
+        metrics_cols = ['user_id_str', 'total_trades', 'winning_trades', 'losing_trades', 'win_percentage',
+                       'total_profit', 'total_loss', 'net_pnl', 'profit_factor', 'max_leverage', 
+                       'avg_position_size', 'liquidations']
+        
+        metrics_display = metrics_df[metrics_cols].copy()
+        
+        # Format numeric columns
+        for col in ['win_percentage', 'profit_factor', 'max_leverage', 'avg_position_size']:
+            metrics_display[col] = metrics_display[col].round(2)
+        
+        for col in ['total_profit', 'total_loss', 'net_pnl']:
+            metrics_display[col] = metrics_display[col].round(2)
+        
+        # Show the dataframe
+        st.dataframe(metrics_display, use_container_width=True)
+        
+        # Add download button
+        csv = metrics_df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="Download Metrics CSV",
+            data=csv,
+            file_name="trading_metrics.csv",
+            mime="text/csv"
+        )
+        
+        # Performance distribution
+        st.subheader("Performance Distribution")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            fig = px.histogram(
+                metrics_df,
+                x='win_percentage',
+                nbins=20,
+                title='Win Percentage Distribution',
+                labels={'win_percentage': 'Win Percentage (%)'}
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            # Limit to reasonable range for better visualization
+            filtered_pnl = metrics_df[metrics_df['net_pnl'].between(
+                metrics_df['net_pnl'].quantile(0.05),
+                metrics_df['net_pnl'].quantile(0.95)
+            )]
             
-            if len(traders_df) > 0:
-                # Add filters
-                st.subheader("Filter Trading Users")
-                col1, col2, col3 = st.columns(3)
-                
-                with col1:
-                    min_trades = st.number_input("Min Trades", min_value=0, value=0)
-                
-                with col2:
-                    sort_options = ["total_trades", "net_pnl", "win_percentage", "profit_factor", "max_leverage"]
-                    sort_options = [opt for opt in sort_options if opt in traders_df.columns]
-                    sort_by = st.selectbox("Sort By", sort_options, index=0)
-                
-                with col3:
-                    sort_order = st.selectbox("Sort Order", ["Descending", "Ascending"])
-                
-                # Apply filters
-                if min_trades > 0:
-                    traders_df = traders_df[traders_df['total_trades'] >= min_trades]
-                
-                # Sort the dataframe
-                is_ascending = sort_order == "Ascending"
-                traders_df = traders_df.sort_values(sort_by, ascending=is_ascending)
-                
-                # Display trading metrics table
-                st.subheader(f"Trading Metrics ({len(traders_df)} users)")
-                
-                # Create clean display dataframe
-                metrics_cols = ['user_id_str']
-                
-                # Add available trading metrics
-                for col in ['total_trades', 'winning_trades', 'losing_trades', 'win_percentage', 
-                            'total_profit', 'total_loss', 'net_pnl', 'profit_share',
-                            'avg_leverage', 'max_leverage', 'avg_position_size',
-                            'liquidations', 'profit_factor', 'num_pairs']:
-                    if col in traders_df.columns:
-                        metrics_cols.append(col)
-                
-                metrics_df = traders_df[metrics_cols].copy()
-                
-                # Format numeric columns
-                for col in metrics_cols:
-                    if col in ['win_percentage', 'avg_leverage', 'profit_factor']:
-                        metrics_df[col] = metrics_df[col].map(lambda x: f"{x:.2f}" if isinstance(x, float) else x)
-                    elif col in ['total_profit', 'total_loss', 'net_pnl', 'profit_share', 'avg_position_size']:
-                        metrics_df[col] = metrics_df[col].map(lambda x: f"{x:.2f}" if isinstance(x, float) else x)
-                
-                # Show the dataframe
-                st.dataframe(metrics_df, use_container_width=True)
-                
-                # Add download button
-                csv = traders_df.to_csv(index=False).encode('utf-8')
-                st.download_button(
-                    label="Download Trading Metrics CSV",
-                    data=csv,
-                    file_name="trading_metrics.csv",
-                    mime="text/csv"
-                )
-                
-                # Performance distribution
-                st.subheader("Performance Distribution")
-                
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    if 'win_percentage' in traders_df.columns:
-                        fig = px.histogram(
-                            traders_df,
-                            x='win_percentage',
-                            nbins=20,
-                            title='Win Percentage Distribution',
-                            labels={'win_percentage': 'Win Percentage (%)'}
-                        )
-                        st.plotly_chart(fig, use_container_width=True)
-                
-                with col2:
-                    if 'net_pnl' in traders_df.columns:
-                        fig = px.histogram(
-                            traders_df,
-                            x='net_pnl',
-                            nbins=20,
-                            title='Net PnL Distribution',
-                            labels={'net_pnl': 'Net PnL (USD)'}
-                        )
-                        st.plotly_chart(fig, use_container_width=True)
-                
-                # Scatter plot of trades vs performance
-                st.subheader("Trading Activity vs Performance")
-                
-                if all(col in traders_df.columns for col in ['total_trades', 'net_pnl']):
-                    scatter_fig = px.scatter(
-                        traders_df,
-                        x='total_trades',
-                        y='net_pnl',
-                        size='max_leverage' if 'max_leverage' in traders_df.columns else None,
-                        color='win_percentage' if 'win_percentage' in traders_df.columns else None,
-                        hover_name='user_id_str',
-                        hover_data=['total_trades', 'net_pnl', 'win_percentage', 'profit_factor'],
-                        title='Trading Activity vs Performance',
-                        labels={
-                            'total_trades': 'Total Trades',
-                            'net_pnl': 'Net PnL (USD)',
-                            'max_leverage': 'Max Leverage',
-                            'win_percentage': 'Win Percentage (%)'
-                        }
-                    )
-                    st.plotly_chart(scatter_fig, use_container_width=True)
-                
-                # Top users by net PnL
-                st.subheader("Top 10 Users by Net PnL")
-                
-                if 'net_pnl' in traders_df.columns:
-                    top_users = traders_df.nlargest(10, 'net_pnl')
-                    
-                    fig = px.bar(
-                        top_users,
-                        x='user_id_str',
-                        y='net_pnl',
-                        title='Top 10 Users by Net PnL',
-                        labels={'user_id_str': 'User ID', 'net_pnl': 'Net PnL (USD)'}
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.warning("No users with trading activity found.")
-        else:
-            st.warning("Trading metrics data is not available.")
+            fig = px.histogram(
+                filtered_pnl,
+                x='net_pnl',
+                nbins=20,
+                title='Net PnL Distribution (5-95 percentile)',
+                labels={'net_pnl': 'Net PnL (USD)'}
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        
+        # Scatter plot of trades vs performance
+        st.subheader("Trading Activity vs Performance")
+        
+        scatter_fig = px.scatter(
+            metrics_df,
+            x='total_trades',
+            y='net_pnl',
+            size='max_leverage',
+            color='win_percentage',
+            hover_name='user_id_str',
+            hover_data=['total_trades', 'net_pnl', 'win_percentage', 'profit_factor'],
+            title='Trading Activity vs Performance',
+            labels={
+                'total_trades': 'Total Trades',
+                'net_pnl': 'Net PnL (USD)',
+                'max_leverage': 'Max Leverage',
+                'win_percentage': 'Win Percentage (%)'
+            }
+        )
+        st.plotly_chart(scatter_fig, use_container_width=True)
+        
+        # Top users by net PnL
+        st.subheader("Top 10 Users by Net PnL")
+        
+        top_users = metrics_df.nlargest(10, 'net_pnl')
+        
+        fig = px.bar(
+            top_users,
+            x='user_id_str',
+            y='net_pnl',
+            title='Top 10 Users by Net PnL',
+            labels={'user_id_str': 'User ID', 'net_pnl': 'Net PnL (USD)'}
+        )
+        st.plotly_chart(fig, use_container_width=True)
     
+    # Tab 3 - User Analysis
     with tab3:
         st.header("User Analysis")
         
         # User selection
-        if 'total_trades' in merged_df.columns:
-            traders = merged_df[merged_df['total_trades'] > 0]
+        selected_user = st.selectbox(
+            "Select User for Analysis",
+            options=trading_metrics_df['user_id_str'].tolist(),
+            format_func=lambda x: f"User ID: {x}"
+        )
+        
+        # Get user data
+        user_data = trading_metrics_df[trading_metrics_df['user_id_str'] == selected_user].iloc[0]
+        
+        # Fetch detailed trade data
+        user_trades = fetch_user_trade_details(selected_user)
+        
+        # Display user summary
+        st.subheader(f"User Summary: {selected_user}")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("Total Trades", f"{user_data['total_trades']:.0f}")
+            st.metric("Win Percentage", f"{user_data['win_percentage']:.2f}%")
+        
+        with col2:
+            st.metric("Net PnL", f"${user_data['net_pnl']:.2f}")
+            st.metric("Profit Factor", f"{user_data['profit_factor']:.2f}")
+        
+        with col3:
+            st.metric("Max Leverage", f"{user_data['max_leverage']:.2f}x")
+            st.metric("Avg Position Size", f"{user_data['avg_position_size']:.2f}")
+        
+        with col4:
+            st.metric("Liquidations", f"{user_data['liquidations']:.0f}")
+            st.metric("Trading Pairs", f"{user_data['num_pairs']:.0f}")
+        
+        # Add user client status if available
+        if user_client_df is not None:
+            user_id_num = int(user_data['taker_account_id'])
+            client_data = user_client_df[user_client_df['id'] == user_id_num]
             
-            if len(traders) > 0:
-                selected_user = st.selectbox(
-                    "Select User for Analysis",
-                    options=traders['user_id_str'].unique(),
-                    format_func=lambda x: f"User ID: {x}"
+            if not client_data.empty:
+                with st.expander("User Client Status"):
+                    client_info = client_data.iloc[0]
+                    
+                    status_col1, status_col2 = st.columns(2)
+                    with status_col1:
+                        st.write(f"Account Enabled: {'Yes' if client_info.get('is_enable') else 'No'}")
+                        st.write(f"Can Place Orders: {'Yes' if client_info.get('can_order') else 'No'}")
+                    
+                    with status_col2:
+                        st.write(f"Can Withdraw: {'Yes' if client_info.get('can_withdraw') else 'No'}")
+                        if 'created_at' in client_info:
+                            st.write(f"Account Created: {client_info['created_at']}")
+        
+        if user_trades is not None and len(user_trades) > 0:
+            # Trade history
+            st.subheader("Trade History")
+            st.dataframe(user_trades, use_container_width=True)
+            
+            # PnL timeline
+            st.subheader("PnL Timeline")
+            
+            # Convert to datetime
+            user_trades['trade_time'] = pd.to_datetime(user_trades['trade_time'])
+            
+            # Sort chronologically
+            user_trades = user_trades.sort_values('trade_time')
+            
+            # Calculate cumulative PnL
+            user_trades['cumulative_pnl'] = user_trades['pnl_usd'].cumsum()
+            
+            # Create line chart
+            fig = px.line(
+                user_trades,
+                x='trade_time',
+                y='cumulative_pnl',
+                title='Cumulative PnL Over Time',
+                labels={'trade_time': 'Trade Time', 'cumulative_pnl': 'Cumulative PnL (USD)'}
+            )
+            
+            # Add markers at each trade
+            fig.update_traces(mode='lines+markers')
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Trade analysis
+            st.subheader("Trade Analysis")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # Trade type distribution
+                trade_types = user_trades['trade_type'].value_counts().reset_index()
+                trade_types.columns = ['Trade Type', 'Count']
+                
+                fig = px.pie(
+                    trade_types,
+                    values='Count',
+                    names='Trade Type',
+                    title='Trade Type Distribution'
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            
+            with col2:
+                # Order type distribution
+                order_types = user_trades['order_type'].value_counts().reset_index()
+                order_types.columns = ['Order Type', 'Count']
+                
+                fig = px.pie(
+                    order_types,
+                    values='Count',
+                    names='Order Type',
+                    title='Order Type Distribution'
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            
+            # Trading pairs analysis
+            st.subheader("Trading Pairs Analysis")
+            
+            # Get performance by pair
+            pair_performance = user_trades.groupby('pair_name').agg(
+                count=('pnl_usd', 'count'),
+                total_pnl=('pnl_usd', 'sum'),
+                avg_pnl=('pnl_usd', 'mean'),
+                win_rate=('pnl_usd', lambda x: (x > 0).mean() * 100),
+                avg_leverage=('leverage', 'mean')
+            ).reset_index()
+            
+            # Sort by trade count
+            pair_performance = pair_performance.sort_values('count', ascending=False)
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.write("Performance by Trading Pair")
+                st.dataframe(pair_performance, use_container_width=True)
+            
+            with col2:
+                # Create bar chart of PnL by pair
+                fig = px.bar(
+                    pair_performance,
+                    x='pair_name',
+                    y='total_pnl',
+                    title='PnL by Trading Pair',
+                    labels={'pair_name': 'Trading Pair', 'total_pnl': 'Total PnL (USD)'}
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            
+            # Leverage analysis
+            st.subheader("Leverage Analysis")
+            
+            # Group by leverage
+            try:
+                leverage_groups = pd.cut(user_trades['leverage'], bins=10)
+                leverage_analysis = user_trades.groupby(leverage_groups).agg(
+                    count=('leverage', 'count'),
+                    avg_pnl=('pnl_usd', 'mean'),
+                    total_pnl=('pnl_usd', 'sum')
+                ).reset_index()
+                
+                leverage_analysis['leverage'] = leverage_analysis['leverage'].astype(str)
+                
+                # Create dual axis chart
+                fig = make_subplots(specs=[[{"secondary_y": True}]])
+                
+                fig.add_trace(
+                    go.Bar(
+                        x=leverage_analysis['leverage'],
+                        y=leverage_analysis['count'],
+                        name='Number of Trades'
+                    ),
+                    secondary_y=False
                 )
                 
-                # Get user data
-                user_data = merged_df[merged_df['user_id_str'] == selected_user].iloc[0]
+                fig.add_trace(
+                    go.Scatter(
+                        x=leverage_analysis['leverage'],
+                        y=leverage_analysis['avg_pnl'],
+                        name='Average PnL',
+                        mode='lines+markers'
+                    ),
+                    secondary_y=True
+                )
                 
-                # Fetch detailed trade data
-                user_trades = fetch_user_trade_details(selected_user)
+                fig.update_layout(
+                    title='Leverage Analysis',
+                    xaxis_title='Leverage Range'
+                )
                 
-                # Display user summary
-                st.subheader(f"User Summary: {selected_user}")
+                fig.update_yaxes(title_text='Number of Trades', secondary_y=False)
+                fig.update_yaxes(title_text='Average PnL (USD)', secondary_y=True)
                 
-                col1, col2, col3, col4 = st.columns(4)
-                
-                with col1:
-                    if 'total_trades' in user_data:
-                        st.metric("Total Trades", f"{user_data['total_trades']:.0f}")
-                    if 'win_percentage' in user_data:
-                        st.metric("Win Percentage", f"{user_data['win_percentage']:.2f}%")
-                
-                with col2:
-                    if 'net_pnl' in user_data:
-                        st.metric("Net PnL", f"${user_data['net_pnl']:.2f}")
-                    if 'profit_factor' in user_data:
-                        st.metric("Profit Factor", f"{user_data['profit_factor']:.2f}")
-                
-                with col3:
-                    if 'max_leverage' in user_data:
-                        st.metric("Max Leverage", f"{user_data['max_leverage']:.2f}x")
-                    if 'avg_position_size' in user_data:
-                        st.metric("Avg Position Size", f"{user_data['avg_position_size']:.2f}")
-                
-                with col4:
-                    if 'liquidations' in user_data:
-                        st.metric("Liquidations", f"{user_data['liquidations']:.0f}")
-                    if 'num_pairs' in user_data:
-                        st.metric("Trading Pairs", f"{user_data['num_pairs']:.0f}")
-                
-                # Add user client status if available
-                with st.expander("User Status (if available)"):
-                    if 'is_enable' in user_data:
-                        st.write(f"Account Enabled: {'Yes' if user_data['is_enable'] else 'No'}")
-                    if 'can_order' in user_data:
-                        st.write(f"Can Place Orders: {'Yes' if user_data['can_order'] else 'No'}")
-                    if 'created_at' in user_data:
-                        st.write(f"Account Created: {user_data['created_at']}")
-                    else:
-                        st.write("No additional user status information available.")
-                
-                if user_trades is not None and len(user_trades) > 0:
-                    # Trade history
-                    st.subheader("Trade History")
-                    st.dataframe(user_trades, use_container_width=True)
-                    
-                    # PnL timeline
-                    st.subheader("PnL Timeline")
-                    
-                    # Convert to datetime
-                    user_trades['trade_time'] = pd.to_datetime(user_trades['trade_time'])
-                    
-                    # Sort chronologically
-                    user_trades = user_trades.sort_values('trade_time')
-                    
-                    # Calculate cumulative PnL
-                    user_trades['cumulative_pnl'] = user_trades['pnl_usd'].cumsum()
-                    
-                    # Create line chart
-                    fig = px.line(
-                        user_trades,
-                        x='trade_time',
-                        y='cumulative_pnl',
-                        title='Cumulative PnL Over Time',
-                        labels={'trade_time': 'Trade Time', 'cumulative_pnl': 'Cumulative PnL (USD)'}
-                    )
-                    
-                    # Add markers at each trade
-                    fig.update_traces(mode='lines+markers')
-                    
-                    st.plotly_chart(fig, use_container_width=True)
-                    
-                    # Trade analysis
-                    st.subheader("Trade Analysis")
-                    
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        # Trade type distribution
-                        trade_types = user_trades['trade_type'].value_counts().reset_index()
-                        trade_types.columns = ['Trade Type', 'Count']
-                        
-                        fig = px.pie(
-                            trade_types,
-                            values='Count',
-                            names='Trade Type',
-                            title='Trade Type Distribution'
-                        )
-                        st.plotly_chart(fig, use_container_width=True)
-                    
-                    with col2:
-                        # Order type distribution
-                        order_types = user_trades['order_type'].value_counts().reset_index()
-                        order_types.columns = ['Order Type', 'Count']
-                        
-                        fig = px.pie(
-                            order_types,
-                            values='Count',
-                            names='Order Type',
-                            title='Order Type Distribution'
-                        )
-                        st.plotly_chart(fig, use_container_width=True)
-                    
-                    # Trading pairs analysis
-                    st.subheader("Trading Pairs Analysis")
-                    
-                    # Get performance by pair
-                    pair_performance = user_trades.groupby('pair_name').agg(
-                        count=('pnl_usd', 'count'),
-                        total_pnl=('pnl_usd', 'sum'),
-                        avg_pnl=('pnl_usd', 'mean'),
-                        win_rate=('pnl_usd', lambda x: (x > 0).mean() * 100),
-                        avg_leverage=('leverage', 'mean')
-                    ).reset_index()
-                    
-                    # Sort by trade count
-                    pair_performance = pair_performance.sort_values('count', ascending=False)
-                    
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        st.write("Performance by Trading Pair")
-                        st.dataframe(pair_performance, use_container_width=True)
-                    
-                    with col2:
-                        # Create bar chart of PnL by pair
-                        fig = px.bar(
-                            pair_performance,
-                            x='pair_name',
-                            y='total_pnl',
-                            title='PnL by Trading Pair',
-                            labels={'pair_name': 'Trading Pair', 'total_pnl': 'Total PnL (USD)'}
-                        )
-                        st.plotly_chart(fig, use_container_width=True)
-                    
-                    # Leverage analysis
-                    st.subheader("Leverage Analysis")
-                    
-                    # Group by leverage
-                    try:
-                        leverage_groups = pd.cut(user_trades['leverage'], bins=10)
-                        leverage_analysis = user_trades.groupby(leverage_groups).agg(
-                            count=('leverage', 'count'),
-                            avg_pnl=('pnl_usd', 'mean'),
-                            total_pnl=('pnl_usd', 'sum')
-                        ).reset_index()
-                        
-                        leverage_analysis['leverage'] = leverage_analysis['leverage'].astype(str)
-                        
-                        # Create dual axis chart
-                        fig = make_subplots(specs=[[{"secondary_y": True}]])
-                        
-                        fig.add_trace(
-                            go.Bar(
-                                x=leverage_analysis['leverage'],
-                                y=leverage_analysis['count'],
-                                name='Number of Trades'
-                            ),
-                            secondary_y=False
-                        )
-                        
-                        fig.add_trace(
-                            go.Scatter(
-                                x=leverage_analysis['leverage'],
-                                y=leverage_analysis['avg_pnl'],
-                                name='Average PnL',
-                                mode='lines+markers'
-                            ),
-                            secondary_y=True
-                        )
-                        
-                        fig.update_layout(
-                            title='Leverage Analysis',
-                            xaxis_title='Leverage Range'
-                        )
-                        
-                        fig.update_yaxes(title_text='Number of Trades', secondary_y=False)
-                        fig.update_yaxes(title_text='Average PnL (USD)', secondary_y=True)
-                        
-                        st.plotly_chart(fig, use_container_width=True)
-                    except Exception as e:
-                        st.warning(f"Could not create leverage analysis: {e}")
-                else:
-                    st.warning("No trade data available for this user.")
-            else:
-                st.warning("No users with trading activity found.")
+                st.plotly_chart(fig, use_container_width=True)
+            except Exception as e:
+                st.warning(f"Could not create leverage analysis: {e}")
         else:
-            st.warning("User trading data is not available.")
+            st.warning("No trade data available for this user.")
 else:
     st.error("Failed to load user data.")
 
@@ -787,12 +678,12 @@ st.sidebar.info("""
 This dashboard provides comprehensive analysis of user behavior in the trading platform.
 
 **Features:**
-- View all users and their basic information
-- Analyze trading metrics and patterns
-- Detailed user-level analysis
+- View all users and their trading metrics
+- Analyze performance by win rate, PnL, and other metrics
+- Detailed user-level analysis with trading history
 - Interactive charts and visualizations
 
-Data is sourced from the trade_fill_fresh table in the replication_report database.
+Data is sourced from the trade_fill_fresh table in the database.
 """)
 
 # Show last update time
