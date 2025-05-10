@@ -49,7 +49,8 @@ def init_db_connection():
 conn, db_params = init_db_connection()
 
 # Main title
-st.title("User Behavior Analysis Dashboard")
+st.title("User Trading Behavior Analysis Dashboard")
+st.caption("This dashboard analyzes user behavior based on trading data from the trade_fill_fresh table.")
 
 # Set up the timezone
 singapore_timezone = pytz.timezone('Asia/Singapore')
@@ -64,19 +65,13 @@ tab1, tab2, tab3 = st.tabs(["All Users", "Trading Metrics", "User Analysis"])
 @st.cache_data(ttl=600)
 def fetch_all_users():
     query = """
-    SELECT
-      account_id,
-      total_points,
-      login_days,
-      referral_code,
-      referrer_id,
-      referral_num,
-      referral_size,
-      remark
+    SELECT DISTINCT
+      taker_account_id,
+      CONCAT(taker_account_id, '') AS user_id
     FROM
-      public.user_info
+      public.trade_fill_fresh
     ORDER BY
-      account_id;
+      user_id;
     """
     
     try:
@@ -91,27 +86,41 @@ def fetch_all_users():
 # Function to fetch user client status
 @st.cache_data(ttl=600)
 def fetch_user_client_status():
-    query = """
-    SELECT
-      id,
-      create_way,
-      created_at + INTERVAL '8 hour' AS created_at,
-      updated_at + INTERVAL '8 hour' AS updated_at,
-      is_enable,
-      can_order,
-      can_withdraw,
-      role_type
-    FROM
-      public.user_client
-    ORDER BY
-      id;
+    # First check if we have access to the user_client table
+    check_query = """
+    SELECT 1 
+    FROM information_schema.tables 
+    WHERE table_schema = 'public' 
+    AND table_name = 'user_client'
+    AND has_table_privilege(current_user, 'public.user_client', 'SELECT');
     """
     
     try:
+        check_df = pd.read_sql(check_query, conn)
+        if len(check_df) == 0:
+            st.warning("No access to user_client table. Skipping client status.")
+            return None
+            
+        query = """
+        SELECT
+          id,
+          create_way,
+          created_at + INTERVAL '8 hour' AS created_at,
+          updated_at + INTERVAL '8 hour' AS updated_at,
+          is_enable,
+          can_order,
+          can_withdraw,
+          role_type
+        FROM
+          public.user_client
+        ORDER BY
+          id;
+        """
+        
         df = pd.read_sql(query, conn)
         return df
     except Exception as e:
-        st.error(f"Error fetching user client status: {e}")
+        st.warning(f"Cannot access user_client table: {e}")
         return None
 
 # Function to fetch user trading metrics
@@ -120,6 +129,7 @@ def fetch_user_trading_metrics():
     query = """
     SELECT
       taker_account_id,
+      CONCAT(taker_account_id, '') AS user_id_str,
       COUNT(*) AS total_trades,
       COUNT(CASE WHEN taker_way IN (2, 4) AND taker_pnl > 0 THEN 1 END) AS winning_trades,
       COUNT(CASE WHEN taker_way IN (2, 4) AND taker_pnl < 0 THEN 1 END) AS losing_trades,
@@ -153,7 +163,7 @@ def fetch_user_trading_metrics():
     FROM
       public.trade_fill_fresh
     GROUP BY
-      taker_account_id
+      taker_account_id, user_id_str
     ORDER BY
       total_trades DESC;
     """
@@ -180,7 +190,7 @@ def fetch_user_trading_metrics():
 
 # Function to fetch detailed trade data for a specific user
 @st.cache_data(ttl=600)
-def fetch_user_trade_details(account_id):
+def fetch_user_trade_details(user_id):
     query = f"""
     SELECT
       pair_name,
@@ -207,7 +217,7 @@ def fetch_user_trade_details(account_id):
     FROM
       public.trade_fill_fresh
     WHERE
-      taker_account_id = {account_id}
+      CONCAT(taker_account_id, '') = '{user_id}'
     ORDER BY
       created_at DESC
     LIMIT 1000
@@ -217,27 +227,29 @@ def fetch_user_trade_details(account_id):
         df = pd.read_sql(query, conn)
         return df
     except Exception as e:
-        st.error(f"Error fetching trade details for user {account_id}: {e}")
+        st.error(f"Error fetching trade details for user {user_id}: {e}")
         return None
 
-# Function to count users per day
+# Function to count users per day (based on first trade date)
 @st.cache_data(ttl=600)
 def fetch_users_per_day():
     query = """
     SELECT
-      DATE(created_at + INTERVAL '8 hour') AS date,
-      COUNT(*) AS new_users
+      DATE(MIN(created_at) + INTERVAL '8 hour') AS date,
+      CONCAT(taker_account_id, '') AS user_id_str
     FROM
-      public.user_client
+      public.trade_fill_fresh
     GROUP BY
-      DATE(created_at + INTERVAL '8 hour')
+      user_id_str
     ORDER BY
       date;
     """
     
     try:
         df = pd.read_sql(query, conn)
-        return df
+        # Aggregate to count users per day
+        date_counts = df.groupby('date').size().reset_index(name='new_users')
+        return date_counts
     except Exception as e:
         st.error(f"Error fetching users per day: {e}")
         return None
@@ -292,19 +304,12 @@ if users_df is not None and trading_metrics_df is not None:
         
         # Add search and filter options
         st.subheader("Search and Filter")
-        col1, col2, col3 = st.columns(3)
+        col1, col2 = st.columns(2)
         
         with col1:
-            search_id = st.text_input("Search by Account ID")
+            search_id = st.text_input("Search by User ID")
         
         with col2:
-            if 'is_enable' in merged_df.columns:
-                status_options = ["All", "Active (can trade)", "Inactive"]
-                filter_status = st.selectbox("Filter by Status", status_options)
-            else:
-                filter_status = "All"
-        
-        with col3:
             trader_filter = st.selectbox(
                 "Filter by Trading Activity", 
                 ["All", "Has traded", "Never traded"]
@@ -314,13 +319,7 @@ if users_df is not None and trading_metrics_df is not None:
         filtered_df = merged_df.copy()
         
         if search_id:
-            filtered_df = filtered_df[filtered_df['account_id_str'].str.contains(search_id, na=False)]
-        
-        if filter_status != "All" and 'is_enable' in filtered_df.columns and 'can_order' in filtered_df.columns:
-            if filter_status == "Active (can trade)":
-                filtered_df = filtered_df[(filtered_df['is_enable'] == True) & (filtered_df['can_order'] == True)]
-            elif filter_status == "Inactive":
-                filtered_df = filtered_df[(filtered_df['is_enable'] == False) | (filtered_df['can_order'] == False)]
+            filtered_df = filtered_df[filtered_df['user_id'].str.contains(search_id, na=False)]
         
         if trader_filter != "All":
             if trader_filter == "Has traded":
@@ -332,15 +331,7 @@ if users_df is not None and trading_metrics_df is not None:
         st.subheader(f"User List ({len(filtered_df)} users)")
         
         # Select columns to display based on what's available
-        display_cols = ['account_id']
-        
-        # Add user info columns if available
-        if 'login_days' in filtered_df.columns:
-            display_cols.append('login_days')
-        if 'total_points' in filtered_df.columns:
-            display_cols.append('total_points')
-        if 'referral_code' in filtered_df.columns:
-            display_cols.append('referral_code')
+        display_cols = ['user_id']
         
         # Add status columns if available
         if 'is_enable' in filtered_df.columns:
@@ -391,7 +382,7 @@ if users_df is not None and trading_metrics_df is not None:
                 active_users = len(merged_df[(merged_df['is_enable'] == True) & (merged_df['can_order'] == True)])
                 st.metric("Active Users", f"{active_users:,}")
             else:
-                st.metric("Active Users", "N/A")
+                st.metric("Users Found", f"{total_users:,}")
         
         with col3:
             if 'total_trades' in merged_df.columns:
@@ -408,7 +399,7 @@ if users_df is not None and trading_metrics_df is not None:
                 st.metric("Profitable Users", "N/A")
         
         # User registration chart
-        st.subheader("User Registration Over Time")
+        st.subheader("User Activity Over Time")
         
         if users_per_day_df is not None and len(users_per_day_df) > 0:
             # Create line chart
@@ -417,7 +408,7 @@ if users_df is not None and trading_metrics_df is not None:
                 x='date', 
                 y='new_users',
                 labels={'new_users': 'New Users', 'date': 'Date'},
-                title='Daily New User Registrations'
+                title='Daily New User First Trades'
             )
             
             # Add markers to the line
@@ -434,12 +425,12 @@ if users_df is not None and trading_metrics_df is not None:
                 x='date', 
                 y='cumulative_users',
                 labels={'cumulative_users': 'Total Users', 'date': 'Date'},
-                title='Cumulative User Growth'
+                title='Cumulative User Growth (Based on First Trade)'
             )
             
             st.plotly_chart(fig2, use_container_width=True)
         else:
-            st.info("No user registration data available.")
+            st.info("No user activity data available.")
     
     with tab2:
         st.header("Trading Metrics")
@@ -585,12 +576,12 @@ if users_df is not None and trading_metrics_df is not None:
             if len(traders) > 0:
                 selected_user = st.selectbox(
                     "Select User for Analysis",
-                    options=traders['account_id'].unique(),
-                    format_func=lambda x: f"Account ID: {x}"
+                    options=traders['user_id'].unique(),
+                    format_func=lambda x: f"User ID: {x}"
                 )
                 
                 # Get user data
-                user_data = merged_df[merged_df['account_id'] == selected_user].iloc[0]
+                user_data = merged_df[merged_df['user_id'] == selected_user].iloc[0]
                 
                 # Fetch detailed trade data
                 user_trades = fetch_user_trade_details(selected_user)
@@ -624,22 +615,16 @@ if users_df is not None and trading_metrics_df is not None:
                     if 'num_pairs' in user_data:
                         st.metric("Trading Pairs", f"{user_data['num_pairs']:.0f}")
                 
-                # Add more user details
-                with st.expander("Additional User Details"):
-                    if 'login_days' in user_data:
-                        st.write(f"Login Days: {user_data['login_days']}")
-                    if 'total_points' in user_data:
-                        st.write(f"Total Points: {user_data['total_points']}")
-                    if 'referral_code' in user_data:
-                        st.write(f"Referral Code: {user_data['referral_code']}")
-                    if 'referral_num' in user_data:
-                        st.write(f"Referrals: {user_data['referral_num']}")
-                    if 'created_at' in user_data:
-                        st.write(f"Account Created: {user_data['created_at']}")
+                # Add user client status if available
+                with st.expander("User Status (if available)"):
                     if 'is_enable' in user_data:
                         st.write(f"Account Enabled: {'Yes' if user_data['is_enable'] else 'No'}")
                     if 'can_order' in user_data:
                         st.write(f"Can Place Orders: {'Yes' if user_data['can_order'] else 'No'}")
+                    if 'created_at' in user_data:
+                        st.write(f"Account Created: {user_data['created_at']}")
+                    else:
+                        st.write("No additional user status information available.")
                 
                 if user_trades is not None and len(user_trades) > 0:
                     # Trade history
