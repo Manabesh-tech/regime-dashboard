@@ -48,7 +48,7 @@ conn, db_params = init_db_connection()
 
 # Main title
 st.title("User Trading Behavior Analysis Dashboard")
-st.caption("This dashboard analyzes trading patterns for users")
+st.caption("This dashboard analyzes trading patterns and behaviors for users")
 
 # Set up the timezone
 singapore_timezone = pytz.timezone('Asia/Singapore')
@@ -59,7 +59,7 @@ st.write(f"Current Singapore Time: {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
 # Create tabs
 tab1, tab2, tab3 = st.tabs(["All Users", "Trading Metrics", "User Analysis"])
 
-# Function to fetch user trading metrics
+# Function to fetch user trading metrics with improved trade type breakdown
 @st.cache_data(ttl=600)
 def fetch_trading_metrics():
     query = """
@@ -69,6 +69,13 @@ def fetch_trading_metrics():
       COUNT(*) AS total_trades,
       COUNT(CASE WHEN taker_way IN (2, 4) AND taker_pnl > 0 THEN 1 END) AS winning_trades,
       COUNT(CASE WHEN taker_way IN (2, 4) AND taker_pnl < 0 THEN 1 END) AS losing_trades,
+      COUNT(CASE WHEN taker_way IN (2, 4) AND taker_pnl = 0 THEN 1 END) AS break_even_trades,
+      COUNT(CASE WHEN taker_way = 1 THEN 1 END) AS open_long_count,
+      COUNT(CASE WHEN taker_way = 2 THEN 1 END) AS close_short_count,
+      COUNT(CASE WHEN taker_way = 3 THEN 1 END) AS open_short_count,
+      COUNT(CASE WHEN taker_way = 4 THEN 1 END) AS close_long_count,
+      COUNT(CASE WHEN taker_way IN (1, 3) THEN 1 END) AS opening_positions,
+      COUNT(CASE WHEN taker_way IN (2, 4) THEN 1 END) AS closing_positions,
       CAST(
         COUNT(CASE WHEN taker_way IN (2, 4) AND taker_pnl > 0 THEN 1 END) AS FLOAT
       ) / NULLIF(
@@ -116,6 +123,10 @@ def fetch_trading_metrics():
         
         # Count number of different pairs traded
         df['num_pairs'] = df['traded_pairs'].apply(lambda x: len(x.split(',')) if isinstance(x, str) else 0)
+        
+        # Calculate trade reconciliation (to explain total_trades != winning + losing)
+        df['reconciled_trades'] = df['winning_trades'] + df['losing_trades'] + df['break_even_trades'] + df['opening_positions']
+        df['unreconciled_count'] = df['total_trades'] - df['reconciled_trades']
         
         return df
     except Exception as e:
@@ -257,9 +268,9 @@ if trading_metrics_df is not None:
         # Display users
         st.subheader(f"User List ({len(filtered_df)} users)")
         
-        # Select columns to display
+        # Select columns to display - now with trade type breakdown
         display_cols = ['user_id_str', 'total_trades', 'winning_trades', 'losing_trades', 
-                        'win_percentage', 'net_pnl', 'max_leverage', 'first_trade', 'last_trade']
+                        'opening_positions', 'closing_positions', 'win_percentage', 'net_pnl']
         
         # Create display dataframe
         display_df = filtered_df[display_cols].copy()
@@ -267,14 +278,21 @@ if trading_metrics_df is not None:
         # Format columns
         display_df['net_pnl'] = display_df['net_pnl'].round(2)
         display_df['win_percentage'] = display_df['win_percentage'].round(2)
-        display_df['max_leverage'] = display_df['max_leverage'].round(2)
-        
-        # Format dates
-        for col in ['first_trade', 'last_trade']:
-            display_df[col] = pd.to_datetime(display_df[col]).dt.strftime('%Y-%m-%d %H:%M:%S')
         
         # Show the dataframe
         st.dataframe(display_df, use_container_width=True)
+        
+        # Add explanation about trade types
+        st.info("""
+        **Understanding Trade Counts:**
+        - **Total Trades**: All transactions (opening + closing positions)
+        - **Winning Trades**: Only profitable position closes (taker_way 2 or 4 with positive PnL)
+        - **Losing Trades**: Only unprofitable position closes (taker_way 2 or 4 with negative PnL)
+        - **Opening Positions**: Trades that open new positions (taker_way 1 or 3)
+        - **Closing Positions**: Trades that close positions (taker_way 2 or 4)
+        
+        This explains why Total Trades ≠ Winning Trades + Losing Trades (the difference is opening positions).
+        """)
         
         # Add download button
         csv = filtered_df.to_csv(index=False).encode('utf-8')
@@ -352,7 +370,7 @@ if trading_metrics_df is not None:
             min_trades = st.number_input("Min Trades", min_value=0, value=0)
         
         with col2:
-            sort_options = ["total_trades", "net_pnl", "win_percentage", "profit_factor", "max_leverage"]
+            sort_options = ["total_trades", "net_pnl", "win_percentage", "profit_factor", "opening_positions"]
             sort_by = st.selectbox("Sort By", sort_options, index=0)
         
         with col3:
@@ -371,15 +389,15 @@ if trading_metrics_df is not None:
         # Display trading metrics table
         st.subheader(f"Trading Metrics ({len(metrics_df)} users)")
         
-        # Create clean display dataframe
-        metrics_cols = ['user_id_str', 'total_trades', 'winning_trades', 'losing_trades', 'win_percentage',
-                       'total_profit', 'total_loss', 'net_pnl', 'profit_factor', 'max_leverage', 
-                       'avg_position_size', 'liquidations']
+        # Create clean display dataframe with improved trade type breakdown
+        metrics_cols = ['user_id_str', 'total_trades', 'winning_trades', 'losing_trades',
+                        'opening_positions', 'closing_positions', 'win_percentage',
+                        'total_profit', 'total_loss', 'net_pnl', 'profit_factor']
         
         metrics_display = metrics_df[metrics_cols].copy()
         
         # Format numeric columns
-        for col in ['win_percentage', 'profit_factor', 'max_leverage', 'avg_position_size']:
+        for col in ['win_percentage', 'profit_factor']:
             metrics_display[col] = metrics_display[col].round(2)
         
         for col in ['total_profit', 'total_loss', 'net_pnl']:
@@ -387,6 +405,16 @@ if trading_metrics_df is not None:
         
         # Show the dataframe
         st.dataframe(metrics_display, use_container_width=True)
+        
+        # Add explanation about trade reconciliation
+        st.info("""
+        **Trade Type Breakdown:**
+        - Position Opens: taker_way = 1 (Open Long) or 3 (Open Short)
+        - Position Closes: taker_way = 2 (Close Short) or 4 (Close Long)
+        - Win/Loss only counts closed positions: winning_trades + losing_trades + break_even_trades = closing_positions
+        
+        Some users may show a pattern of all winning trades and no losing trades if they have only closed positions profitably.
+        """)
         
         # Add download button
         csv = metrics_df.to_csv(index=False).encode('utf-8')
@@ -438,7 +466,7 @@ if trading_metrics_df is not None:
             size='max_leverage',
             color='win_percentage',
             hover_name='user_id_str',
-            hover_data=['total_trades', 'net_pnl', 'win_percentage', 'profit_factor'],
+            hover_data=['winning_trades', 'losing_trades', 'opening_positions', 'profit_factor'],
             title='Trading Activity vs Performance',
             labels={
                 'total_trades': 'Total Trades',
@@ -462,17 +490,84 @@ if trading_metrics_df is not None:
             labels={'user_id_str': 'User ID', 'net_pnl': 'Net PnL (USD)'}
         )
         st.plotly_chart(fig, use_container_width=True)
+        
+        # Trade type analysis - NEW SECTION
+        st.subheader("Trade Type Analysis")
+        
+        # Calculate aggregated trade type metrics
+        total_metrics = {
+            'Opening Positions': metrics_df['opening_positions'].sum(),
+            'Winning Trades': metrics_df['winning_trades'].sum(),
+            'Losing Trades': metrics_df['losing_trades'].sum(),
+            'Break-even Trades': metrics_df['break_even_trades'].sum(),
+        }
+        
+        trade_type_df = pd.DataFrame({
+            'Trade Type': list(total_metrics.keys()),
+            'Count': list(total_metrics.values())
+        })
+        
+        # Create bar chart of trade types
+        fig = px.bar(
+            trade_type_df,
+            x='Trade Type',
+            y='Count',
+            title='Distribution of Trade Types Across All Users',
+            color='Trade Type'
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Calculate percentages
+        trade_type_pct = pd.DataFrame({
+            'Trade Type': list(total_metrics.keys()),
+            'Percentage': [v / sum(total_metrics.values()) * 100 for v in total_metrics.values()]
+        })
+        
+        # Create pie chart
+        fig = px.pie(
+            trade_type_pct,
+            values='Percentage',
+            names='Trade Type',
+            title='Trade Type Distribution (%)'
+        )
+        st.plotly_chart(fig, use_container_width=True)
     
     # Tab 3 - User Analysis
     with tab3:
         st.header("User Analysis")
         
-        # User selection
-        selected_user = st.selectbox(
-            "Select User for Analysis",
-            options=trading_metrics_df['user_id_str'].tolist(),
-            format_func=lambda x: f"User ID: {x}"
-        )
+        # Direct user search option
+        search_col1, search_col2 = st.columns([3, 1])
+        
+        with search_col1:
+            direct_user_search = st.text_input("Enter User ID to Analyze", 
+                                              placeholder="Enter exact user ID here...")
+        
+        with search_col2:
+            search_button = st.button("Search User", use_container_width=True)
+        
+        # Process direct search
+        if direct_user_search and search_button:
+            # Check if user exists
+            user_exists = direct_user_search in trading_metrics_df['user_id_str'].values
+            
+            if user_exists:
+                selected_user = direct_user_search
+            else:
+                st.error(f"User ID {direct_user_search} not found. Please check the ID and try again.")
+                # Fall back to dropdown selection
+                selected_user = st.selectbox(
+                    "Select User from Dropdown Instead",
+                    options=trading_metrics_df['user_id_str'].tolist(),
+                    format_func=lambda x: f"User ID: {x}"
+                )
+        else:
+            # Regular dropdown selection if no direct search
+            selected_user = st.selectbox(
+                "Or Select User from Dropdown",
+                options=trading_metrics_df['user_id_str'].tolist(),
+                format_func=lambda x: f"User ID: {x}"
+            )
         
         # Get user data
         user_data = trading_metrics_df[trading_metrics_df['user_id_str'] == selected_user].iloc[0]
@@ -501,24 +596,60 @@ if trading_metrics_df is not None:
             st.metric("Liquidations", f"{user_data['liquidations']:.0f}")
             st.metric("Trading Pairs", f"{user_data['num_pairs']:.0f}")
         
-        # Add user client status if available
-        if user_client_df is not None:
-            user_id_num = int(user_data['taker_account_id'])
-            client_data = user_client_df[user_client_df['id'] == user_id_num]
+        # Add trade type breakdown
+        st.subheader("Trade Type Breakdown")
+        
+        trade_types_col1, trade_types_col2 = st.columns([1, 1])
+        
+        with trade_types_col1:
+            # Create a small dataframe to explain the trade breakdown
+            trade_breakdown = pd.DataFrame({
+                'Trade Type': ['Open Long', 'Close Short', 'Open Short', 'Close Long', 'Total'],
+                'Count': [
+                    user_data.get('open_long_count', 0),
+                    user_data.get('close_short_count', 0),
+                    user_data.get('open_short_count', 0),
+                    user_data.get('close_long_count', 0),
+                    user_data.get('total_trades', 0)
+                ]
+            })
             
-            if not client_data.empty:
-                with st.expander("User Client Status"):
-                    client_info = client_data.iloc[0]
-                    
-                    status_col1, status_col2 = st.columns(2)
-                    with status_col1:
-                        st.write(f"Account Enabled: {'Yes' if client_info.get('is_enable') else 'No'}")
-                        st.write(f"Can Place Orders: {'Yes' if client_info.get('can_order') else 'No'}")
-                    
-                    with status_col2:
-                        st.write(f"Can Withdraw: {'Yes' if client_info.get('can_withdraw') else 'No'}")
-                        if 'created_at' in client_info:
-                            st.write(f"Account Created: {client_info['created_at']}")
+            st.dataframe(trade_breakdown, use_container_width=True)
+            
+            # Add explanation for win/loss count
+            win_loss_sum = user_data.get('winning_trades', 0) + user_data.get('losing_trades', 0) + user_data.get('break_even_trades', 0)
+            open_positions = user_data.get('opening_positions', 0)
+            
+            st.info(f"""
+            **Trade Count Breakdown:**
+            - Total trades: {user_data.get('total_trades', 0)}
+            - Position opens: {open_positions} ({100*open_positions/max(1, user_data.get('total_trades', 0)):.1f}% of total)
+            - Winning trades: {user_data.get('winning_trades', 0)}
+            - Losing trades: {user_data.get('losing_trades', 0)}
+            - Break-even trades: {user_data.get('break_even_trades', 0)}
+            
+            Position closes (wins + losses + break-even): {win_loss_sum}
+            """)
+        
+        with trade_types_col2:
+            # Create pie chart of trade types
+            trade_types_data = pd.DataFrame({
+                'Trade Type': ['Open Long', 'Close Short', 'Open Short', 'Close Long'],
+                'Count': [
+                    user_data.get('open_long_count', 0),
+                    user_data.get('close_short_count', 0),
+                    user_data.get('open_short_count', 0),
+                    user_data.get('close_long_count', 0)
+                ]
+            })
+            
+            fig = px.pie(
+                trade_types_data,
+                values='Count',
+                names='Trade Type',
+                title='Trade Types Distribution'
+            )
+            st.plotly_chart(fig, use_container_width=True)
         
         if user_trades is not None and len(user_trades) > 0:
             # Trade history
@@ -682,6 +813,11 @@ This dashboard provides comprehensive analysis of user behavior in the trading p
 - Analyze performance by win rate, PnL, and other metrics
 - Detailed user-level analysis with trading history
 - Interactive charts and visualizations
+- Direct user ID search
+
+**Understanding Trade Types:**
+- Total trades = opening positions + closing positions
+- Win/Loss percentages are only calculated on closed positions
 
 Data is sourced from the trade_fill_fresh table in the database.
 """)
