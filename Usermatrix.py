@@ -731,6 +731,10 @@ if trading_metrics_df is not None:
                 debug_df = user_trades[available_debug_cols].head(5)
                 st.dataframe(debug_df)
                 
+                # Show all available columns
+                st.write("All available columns in user_trades:")
+                st.write(list(user_trades.columns))
+                
                 # Show calculation verification
                 st.write("Calculation verification (first exit trade):")
                 exit_trades = user_trades[user_trades['position_action'] == 'Exit']
@@ -1014,6 +1018,9 @@ if trading_metrics_df is not None:
             # Get performance by pair using user_received_pnl for exits only
             exit_trades_analysis = user_trades[user_trades['position_action'] == 'Exit'].copy()
             
+            # Ensure PnL values are rounded to 2 decimals throughout
+            exit_trades_analysis['user_received_pnl'] = exit_trades_analysis['user_received_pnl'].round(2)
+            
             pair_performance = exit_trades_analysis.groupby('pair_name').agg(
                 count=('user_received_pnl', 'count'),
                 total_pnl=('user_received_pnl', 'sum'),
@@ -1021,6 +1028,12 @@ if trading_metrics_df is not None:
                 win_rate=('user_received_pnl', lambda x: (x > 0).mean() * 100),
                 avg_leverage=('leverage', 'mean')
             ).reset_index()
+            
+            # Round the aggregated values
+            pair_performance['total_pnl'] = pair_performance['total_pnl'].round(2)
+            pair_performance['avg_pnl'] = pair_performance['avg_pnl'].round(2)
+            pair_performance['win_rate'] = pair_performance['win_rate'].round(2)
+            pair_performance['avg_leverage'] = pair_performance['avg_leverage'].round(2)
             
             # Sort by trade count
             pair_performance = pair_performance.sort_values('count', ascending=False)
