@@ -168,12 +168,16 @@ def fetch_user_trade_details(user_id):
       collateral_price,
       taker_pnl,
       taker_share_pnl,
-      -- Use the same calculation as in the main metrics query
-      taker_pnl * collateral_price AS trade_pnl,
+      -- Calculate order PnL (including profit share)
+      (taker_pnl + taker_share_pnl) * collateral_price AS order_pnl,
+      -- Calculate profit share in USD
       taker_share_pnl * collateral_price AS profit_share_usd,
+      -- Calculate user received PnL (order PnL - profit share)
+      taker_pnl * collateral_price AS user_received_pnl,
+      -- Calculate profit share percentage
       CASE 
-        WHEN taker_pnl != 0 THEN 
-          (taker_share_pnl / taker_pnl) * 100
+        WHEN (taker_pnl + taker_share_pnl) != 0 THEN 
+          (taker_share_pnl / (taker_pnl + taker_share_pnl)) * 100
         ELSE 0
       END AS profit_share_percent,
       created_at + INTERVAL '8 hour' AS trade_time,
@@ -193,19 +197,13 @@ def fetch_user_trade_details(user_id):
         # Add post-processing calculations
         df['pre_profit_share_exit'] = None
         df['post_profit_share_exit'] = None
-        df['percent_move'] = None
+        df['percent_distance'] = None
         df['matched_entry_price'] = None
         
         # For exit trades, calculate pre/post profit share prices
         exit_mask = df['position_action'] == 'Exit'
         
-        # Make sure we're not dividing by zero for size
-        valid_exit_mask = exit_mask & (df['size'] != 0)
-        
-        df.loc[valid_exit_mask, 'pre_profit_share_exit'] = df.loc[valid_exit_mask, 'entry_exit_price'] - (df.loc[valid_exit_mask, 'profit_share_usd'] / df.loc[valid_exit_mask, 'size'])
-        df.loc[valid_exit_mask, 'post_profit_share_exit'] = df.loc[valid_exit_mask, 'entry_exit_price']
-        
-        # Match entry prices for exits and calculate % move
+        # Match entry prices for exits and calculate % distance
         for idx, row in df[exit_mask].iterrows():
             # Find the most recent entry for this pair
             entry_trades = df[(df['pair_name'] == row['pair_name']) & 
@@ -216,10 +214,18 @@ def fetch_user_trade_details(user_id):
                 entry_price = entry_trades.iloc[0]['entry_exit_price']
                 df.loc[idx, 'matched_entry_price'] = entry_price
                 
-                # Calculate % move: (pre_profit_share_exit - entry) / entry * 100
-                pre_exit = df.loc[idx, 'pre_profit_share_exit']
-                if entry_price != 0 and pd.notna(pre_exit):
-                    df.loc[idx, 'percent_move'] = ((pre_exit - entry_price) / entry_price) * 100
+                # Calculate % distance: (Pbefore - Pentry) / Pentry * 100
+                # Where Pbefore is the exit price before profit share
+                exit_price = row['entry_exit_price']
+                if entry_price != 0:
+                    # Calculate the pre-profit share price
+                    if row['size'] != 0:
+                        pre_profit_share_price = exit_price - (row['profit_share_usd'] / row['size'])
+                        df.loc[idx, 'pre_profit_share_exit'] = pre_profit_share_price
+                        df.loc[idx, 'post_profit_share_exit'] = exit_price
+                        df.loc[idx, 'percent_distance'] = ((pre_profit_share_price - entry_price) / entry_price) * 100
+                    else:
+                        df.loc[idx, 'percent_distance'] = ((exit_price - entry_price) / entry_price) * 100
         
         return df
     except Exception as e:
@@ -542,7 +548,7 @@ if trading_metrics_df is not None:
         )
         st.plotly_chart(fig, use_container_width=True)
         
-        # Trade type analysis - NEW SECTION
+        # Trade type analysis
         st.subheader("Trade Type Analysis")
         
         # Calculate aggregated trade type metrics
@@ -712,7 +718,8 @@ if trading_metrics_df is not None:
             if show_debug:
                 st.write("Raw Data Sample (first 5 trades):")
                 debug_cols = ['trade_time', 'pair_name', 'trade_type', 'taker_pnl', 'collateral_price', 
-                             'trade_pnl', 'taker_share_pnl', 'profit_share_usd', 'size', 'deal_price']
+                             'user_received_pnl', 'order_pnl', 'taker_share_pnl', 'profit_share_usd', 
+                             'profit_share_percent', 'size', 'entry_exit_price']
                 debug_df = user_trades[debug_cols].head(5)
                 st.dataframe(debug_df)
                 
@@ -721,11 +728,12 @@ if trading_metrics_df is not None:
                 if len(user_trades) > 0:
                     first_trade = user_trades.iloc[0]
                     st.write(f"taker_pnl: {first_trade['taker_pnl']}")
+                    st.write(f"taker_share_pnl: {first_trade['taker_share_pnl']}")
                     st.write(f"collateral_price: {first_trade['collateral_price']}")
-                    st.write(f"Calculated trade_pnl (taker_pnl * collateral_price): {first_trade['taker_pnl'] * first_trade['collateral_price']}")
-                    st.write(f"Actual trade_pnl from query: {first_trade['trade_pnl']}")
-                    st.write(f"Size: {first_trade['size']}")
-                    st.write(f"Deal price: {first_trade['entry_exit_price']}")
+                    st.write(f"Order PnL (taker_pnl + taker_share_pnl) * collateral_price: {(first_trade['taker_pnl'] + first_trade['taker_share_pnl']) * first_trade['collateral_price']}")
+                    st.write(f"Actual order_pnl from query: {first_trade['order_pnl']}")
+                    st.write(f"User received PnL (taker_pnl * collateral_price): {first_trade['taker_pnl'] * first_trade['collateral_price']}")
+                    st.write(f"Actual user_received_pnl from query: {first_trade['user_received_pnl']}")
             
             # Create two views - compact and detailed
             view_option = st.radio("Select View", ["Compact View", "Detailed View"], horizontal=True)
@@ -734,23 +742,49 @@ if trading_metrics_df is not None:
                 # Display enhanced compact view with renamed columns
                 compact_cols = ['trade_time', 'pair_name', 'trade_type', 'position_action', 
                                 'entry_exit_price', 'size', 'leverage_display', 
-                                'trade_pnl', 'profit_share_usd', 'profit_share_percent']
+                                'order_pnl', 'user_received_pnl', 'profit_share_usd', 
+                                'profit_share_percent', 'percent_distance']
+                
+                # Filter out columns that might not exist for non-exit trades
+                available_cols = [col for col in compact_cols if col in user_trades.columns]
                 
                 # Create display dataframe
-                display_df = user_trades[compact_cols].copy()
+                display_df = user_trades[available_cols].copy()
                 
-                # Rename columns for display
-                display_df.columns = ['Trade Time', 'Pair', 'Trade Type', 'Action',
-                                    'Entry/Exit Price', 'Size', 'Leverage',
-                                    'Trade PNL', 'Profit Share', 'Profit Share %']
+                # Create column mapping for renaming
+                col_mapping = {
+                    'trade_time': 'Trade Time',
+                    'pair_name': 'Pair',
+                    'trade_type': 'Trade Type',
+                    'position_action': 'Action',
+                    'entry_exit_price': 'Entry/Exit Price',
+                    'size': 'Size',
+                    'leverage_display': 'Leverage',
+                    'order_pnl': 'Order PNL',
+                    'user_received_pnl': 'User Received PNL',
+                    'profit_share_usd': 'Profit Share',
+                    'profit_share_percent': 'Profit Share %',
+                    'percent_distance': '% Distance'
+                }
                 
-                # Format numeric columns - let's not round PNL to see the actual values
-                display_df['Entry/Exit Price'] = display_df['Entry/Exit Price'].round(8)
-                display_df['Size'] = display_df['Size'].round(2)
-                # Don't round PNL values yet to see the actual numbers
-                #display_df['Trade PNL'] = display_df['Trade PNL'].round(2)
-                #display_df['Profit Share'] = display_df['Profit Share'].round(2)
-                display_df['Profit Share %'] = display_df['Profit Share %'].round(2)
+                # Rename columns
+                display_df.columns = [col_mapping.get(col, col) for col in display_df.columns]
+                
+                # Format numeric columns
+                if 'Entry/Exit Price' in display_df.columns:
+                    display_df['Entry/Exit Price'] = display_df['Entry/Exit Price'].round(8)
+                if 'Size' in display_df.columns:
+                    display_df['Size'] = display_df['Size'].round(2)
+                if 'Order PNL' in display_df.columns:
+                    display_df['Order PNL'] = display_df['Order PNL'].round(2)
+                if 'User Received PNL' in display_df.columns:
+                    display_df['User Received PNL'] = display_df['User Received PNL'].round(2)
+                if 'Profit Share' in display_df.columns:
+                    display_df['Profit Share'] = display_df['Profit Share'].round(2)
+                if 'Profit Share %' in display_df.columns:
+                    display_df['Profit Share %'] = display_df['Profit Share %'].round(2)
+                if '% Distance' in display_df.columns:
+                    display_df['% Distance'] = display_df['% Distance'].round(4)
                 
                 st.dataframe(display_df, use_container_width=True)
                 
@@ -759,7 +793,7 @@ if trading_metrics_df is not None:
                 if len(exit_trades) > 0:
                     st.subheader("Exit Trade Details")
                     exit_cols = ['trade_time', 'pair_name', 'pre_profit_share_exit', 
-                               'post_profit_share_exit', 'matched_entry_price', 'percent_move']
+                               'post_profit_share_exit', 'matched_entry_price', 'percent_distance']
                     
                     # Check if all columns exist
                     available_cols = [col for col in exit_cols if col in exit_trades.columns]
@@ -772,7 +806,7 @@ if trading_metrics_df is not None:
                         'pre_profit_share_exit': 'Pre Profit Share Exit',
                         'post_profit_share_exit': 'Post Profit Share Exit',
                         'matched_entry_price': 'Entry Price',
-                        'percent_move': '% Move'
+                        'percent_distance': '% Distance'
                     }
                     exit_display.columns = [col_mapping.get(col, col) for col in exit_display.columns]
                     
@@ -780,8 +814,8 @@ if trading_metrics_df is not None:
                     for col in ['Pre Profit Share Exit', 'Post Profit Share Exit', 'Entry Price']:
                         if col in exit_display.columns:
                             exit_display[col] = exit_display[col].round(8)
-                    if '% Move' in exit_display.columns:
-                        exit_display['% Move'] = exit_display['% Move'].round(4)
+                    if '% Distance' in exit_display.columns:
+                        exit_display['% Distance'] = exit_display['% Distance'].round(4)
                     
                     st.dataframe(exit_display, use_container_width=True)
                 
@@ -814,10 +848,10 @@ if trading_metrics_df is not None:
                             st.write(f"{trade['entry_exit_price']:.8f}")
                         
                         with col6:
-                            st.write("**Trade PNL**")
+                            st.write("**Order PNL**")
                             if trade['position_action'] == 'Exit':
-                                pnl_color = "green" if trade['trade_pnl'] > 0 else "red"
-                                st.write(f":{pnl_color}[{trade['trade_pnl']:+.2f}]")
+                                pnl_color = "green" if trade['order_pnl'] > 0 else "red"
+                                st.write(f":{pnl_color}[{trade['order_pnl']:+.2f}]")
                             else:
                                 st.write("-")
                         
@@ -831,9 +865,9 @@ if trading_metrics_df is not None:
                         with col2:
                             st.write(f"**Order Type**: {trade['order_type']}")
                             if trade['position_action'] == 'Exit':
-                                st.write(f"**% Move**: {trade['percent_move']:.4f}%" if pd.notna(trade['percent_move']) else "% Move: N/A")
+                                st.write(f"**% Distance**: {trade['percent_distance']:.4f}%" if pd.notna(trade['percent_distance']) else "% Distance: N/A")
                             else:
-                                st.write("**% Move**: N/A (Entry)")
+                                st.write("**% Distance**: N/A (Entry)")
                         
                         with col3:
                             if trade['position_action'] == 'Exit':
@@ -844,9 +878,11 @@ if trading_metrics_df is not None:
                         
                         with col4:
                             if trade['position_action'] == 'Exit':
+                                st.write(f"**User Received PNL**: ${trade['user_received_pnl']:,.2f}")
                                 st.write(f"**Profit Share**: ${trade['profit_share_usd']:,.2f}")
                                 st.write(f"**Share %**: {trade['profit_share_percent']:.2f}%")
                             else:
+                                st.write("**User Received PNL**: N/A")
                                 st.write("**Profit Share**: N/A")
                                 st.write("**Share %**: N/A")
                         
@@ -866,10 +902,12 @@ if trading_metrics_df is not None:
                               'order_type', 'leverage_display', 'size', 'collateral',
                               'entry_exit_price', 'matched_entry_price',
                               'pre_profit_share_exit', 'post_profit_share_exit',
-                              'percent_move', 'trade_pnl', 'profit_share_usd', 
-                              'profit_share_percent']
+                              'percent_distance', 'order_pnl', 'user_received_pnl', 
+                              'profit_share_usd', 'profit_share_percent']
                 
-                csv = export_df[export_cols].to_csv(index=False).encode('utf-8')
+                available_export_cols = [col for col in export_cols if col in export_df.columns]
+                csv = export_df[available_export_cols].to_csv(index=False).encode('utf-8')
+                
                 st.download_button(
                     label="Download Trade History",
                     data=csv,
@@ -886,8 +924,11 @@ if trading_metrics_df is not None:
             # Sort chronologically
             user_trades = user_trades.sort_values('trade_time')
             
-            # Calculate cumulative PnL
-            user_trades['cumulative_pnl'] = user_trades['trade_pnl'].cumsum()
+            # Calculate cumulative PnL using user_received_pnl for closed positions only
+            user_trades['trade_pnl_for_cumulative'] = 0
+            exit_mask = user_trades['position_action'] == 'Exit'
+            user_trades.loc[exit_mask, 'trade_pnl_for_cumulative'] = user_trades.loc[exit_mask, 'user_received_pnl']
+            user_trades['cumulative_pnl'] = user_trades['trade_pnl_for_cumulative'].cumsum()
             
             # Create line chart
             fig = px.line(
@@ -902,6 +943,20 @@ if trading_metrics_df is not None:
             fig.update_traces(mode='lines+markers')
             
             st.plotly_chart(fig, use_container_width=True)
+            
+            # Verify cumulative PnL matches net PnL
+            final_cumulative_pnl = user_trades['cumulative_pnl'].iloc[-1]
+            expected_net_pnl = user_data['net_pnl']
+            
+            st.info(f"""
+            **PnL Verification:**
+            - Final Cumulative PnL: ${final_cumulative_pnl:.2f}
+            - Expected Net PnL: ${expected_net_pnl:.2f}
+            - Difference: ${abs(final_cumulative_pnl - expected_net_pnl):.2f}
+            
+            The cumulative PnL is calculated only from exit trades using user_received_pnl 
+            (order_pnl - profit_share).
+            """)
             
             # Trade analysis
             st.subheader("Trade Analysis")
@@ -937,12 +992,14 @@ if trading_metrics_df is not None:
             # Trading pairs analysis
             st.subheader("Trading Pairs Analysis")
             
-            # Get performance by pair
-            pair_performance = user_trades.groupby('pair_name').agg(
-                count=('trade_pnl', 'count'),
-                total_pnl=('trade_pnl', 'sum'),
-                avg_pnl=('trade_pnl', 'mean'),
-                win_rate=('trade_pnl', lambda x: (x > 0).mean() * 100),
+            # Get performance by pair using user_received_pnl for exits only
+            exit_trades_analysis = user_trades[user_trades['position_action'] == 'Exit'].copy()
+            
+            pair_performance = exit_trades_analysis.groupby('pair_name').agg(
+                count=('user_received_pnl', 'count'),
+                total_pnl=('user_received_pnl', 'sum'),
+                avg_pnl=('user_received_pnl', 'mean'),
+                win_rate=('user_received_pnl', lambda x: (x > 0).mean() * 100),
                 avg_leverage=('leverage', 'mean')
             ).reset_index()
             
@@ -974,8 +1031,8 @@ if trading_metrics_df is not None:
                 leverage_groups = pd.cut(user_trades['leverage'], bins=10)
                 leverage_analysis = user_trades.groupby(leverage_groups).agg(
                     count=('leverage', 'count'),
-                    avg_pnl=('trade_pnl', 'mean'),
-                    total_pnl=('trade_pnl', 'sum')
+                    avg_pnl=('user_received_pnl', 'mean'),
+                    total_pnl=('user_received_pnl', 'sum')
                 ).reset_index()
                 
                 leverage_analysis['leverage'] = leverage_analysis['leverage'].astype(str)
@@ -1036,9 +1093,12 @@ This dashboard provides comprehensive analysis of user behavior in the trading p
 - Interactive charts and visualizations
 - Direct user ID search
 
-**Understanding Trade Types:**
-- Total trades = opening positions + closing positions
-- Win/Loss percentages are only calculated on closed positions
+**Understanding PnL Calculations:**
+- Order PnL = (taker_pnl + taker_share_pnl) * collateral_price
+- User Received PnL = taker_pnl * collateral_price
+- Profit Share = taker_share_pnl * collateral_price
+- % Profit Share = (profit_share / order_pnl) * 100
+- % Distance = (Pbefore - Pentry) / Pentry * 100
 
 Data is sourced from the trade_fill_fresh table in the database.
 """)
