@@ -857,7 +857,7 @@ if trading_metrics_df is not None:
             user_trades = user_trades.sort_values('trade_time')
             
             # Calculate cumulative PnL
-            user_trades['cumulative_pnl'] = user_trades['pnl_usd'].cumsum()
+            user_trades['cumulative_pnl'] = user_trades['trade_pnl'].cumsum()
             
             # Create line chart
             fig = px.line(
@@ -909,10 +909,10 @@ if trading_metrics_df is not None:
             
             # Get performance by pair
             pair_performance = user_trades.groupby('pair_name').agg(
-                count=('pnl_usd', 'count'),
-                total_pnl=('pnl_usd', 'sum'),
-                avg_pnl=('pnl_usd', 'mean'),
-                win_rate=('pnl_usd', lambda x: (x > 0).mean() * 100),
+                count=('trade_pnl', 'count'),
+                total_pnl=('trade_pnl', 'sum'),
+                avg_pnl=('trade_pnl', 'mean'),
+                win_rate=('trade_pnl', lambda x: (x > 0).mean() * 100),
                 avg_leverage=('leverage', 'mean')
             ).reset_index()
             
@@ -944,8 +944,8 @@ if trading_metrics_df is not None:
                 leverage_groups = pd.cut(user_trades['leverage'], bins=10)
                 leverage_analysis = user_trades.groupby(leverage_groups).agg(
                     count=('leverage', 'count'),
-                    avg_pnl=('pnl_usd', 'mean'),
-                    total_pnl=('pnl_usd', 'sum')
+                    avg_pnl=('trade_pnl', 'mean'),
+                    total_pnl=('trade_pnl', 'sum')
                 ).reset_index()
                 
                 leverage_analysis['leverage'] = leverage_analysis['leverage'].astype(str)
