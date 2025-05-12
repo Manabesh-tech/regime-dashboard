@@ -583,12 +583,7 @@ with tab1:
         
         # Apply color to PnL columns
         def style_pnl_value(val):
-         if isinstance(val, str) and val.startswith('$'):
-             # Extract numeric value from string
-             num_val = float(val.replace('$', '').replace(',', ''))
-             color = 'green' if num_val >= 0 else 'red'
-             return f'color: {color}'
-         return ''
+            if isinstance(val, str) and val.startswith('
         
         # Trade statistics
         st.subheader("Recent Trade Statistics")
@@ -929,7 +924,7 @@ This dashboard provides comprehensive analysis of user behavior and live platfor
 - % Distance = (Pbefore - Pentry) / Pentry * 100
 
 The cumulative PnL is the sum of user_received_pnl for exit trades only.
-""")):
+"""):
                 # Extract numeric value from string
                 num_val = float(val.replace('
         
