@@ -175,45 +175,17 @@ def fetch_user_trade_details(user_id):
       taker_sl_fee,
       maker_sl_fee,
       funding_fee,
-      -- Calculate order PnL (including profit share)
-      (taker_pnl + taker_share_pnl) * collateral_price AS order_pnl,
-      -- Calculate profit share in USD
-      taker_share_pnl * collateral_price AS profit_share_usd,
-      -- Calculate user received PnL (order PnL - profit share)
+      -- Calculate values to match Metabase exactly:
+      -- 用户实际到手PNL (User Received PNL)
       taker_pnl * collateral_price AS user_received_pnl,
-      -- Calculate fee costs
-      CASE 
-        WHEN taker_fee_mode = 1 AND taker_way IN (1, 3) 
-        THEN taker_fee * collateral_price
-        ELSE 0
-      END AS fee_cost_usd,
-      -- Calculate funding fee in USD
-      CASE 
-        WHEN taker_way = 0 
-        THEN funding_fee * collateral_price
-        ELSE 0
-      END AS funding_fee_usd,
-      -- Calculate social loss fees
-      (COALESCE(taker_sl_fee, 0) * collateral_price + COALESCE(maker_sl_fee, 0)) AS social_loss_fee_usd,
-      -- Calculate actual PnL contribution (matching the SQL you provided)
-      CASE WHEN taker_way IN (1, 2, 3, 4) 
-           THEN COALESCE(taker_pnl, 0) * COALESCE(collateral_price, 0) 
-           ELSE 0 
-      END
-      + CASE WHEN taker_way = 0 
-             THEN COALESCE(funding_fee, 0) * COALESCE(collateral_price, 0) 
-             ELSE 0 
-      END
-      - CASE WHEN taker_fee_mode = 1 AND taker_way IN (1, 3) 
-             THEN COALESCE(taker_fee, 0) * COALESCE(collateral_price, 0) 
-             ELSE 0 
-      END
-      - (COALESCE(taker_sl_fee, 0) * COALESCE(collateral_price, 0) + COALESCE(maker_sl_fee, 0))
-      AS pnl_contribution,
+      -- 平台收取Profit Share (Platform Profit Share)
+      taker_share_pnl * collateral_price AS profit_share,
+      -- 订单盈亏 (Order PnL/Trade PnL) = user_received_pnl + profit_share
+      (taker_pnl * collateral_price) + (taker_share_pnl * collateral_price) AS trade_pnl,
       -- Calculate profit share percentage
       CASE 
-        WHEN (taker_pnl + taker_share_pnl) != 0 THEN 
-          (taker_share_pnl / (taker_pnl + taker_share_pnl)) * 100
+        WHEN (taker_pnl * collateral_price + taker_share_pnl * collateral_price) != 0 THEN 
+          (taker_share_pnl * collateral_price) / (taker_pnl * collateral_price + taker_share_pnl * collateral_price) * 100
         ELSE 0
       END AS profit_share_percent,
       created_at + INTERVAL '8 hour' AS trade_time,
@@ -256,7 +228,7 @@ def fetch_user_trade_details(user_id):
                 if entry_price != 0:
                     # Calculate the pre-profit share price
                     if row['size'] != 0:
-                        pre_profit_share_price = exit_price - (row['profit_share_usd'] / row['size'])
+                        pre_profit_share_price = exit_price - (row['profit_share'] / row['size'])
                         df.loc[idx, 'pre_profit_share_exit'] = pre_profit_share_price
                         df.loc[idx, 'post_profit_share_exit'] = exit_price
                         df.loc[idx, 'percent_distance'] = ((pre_profit_share_price - entry_price) / entry_price) * 100
@@ -753,27 +725,33 @@ if trading_metrics_df is not None:
             
             if show_debug:
                 st.write("Raw Data Sample (first 5 trades):")
-                debug_cols = ['trade_time', 'pair_name', 'trade_type', 'taker_pnl', 'collateral_price', 
-                             'user_received_pnl', 'order_pnl', 'taker_share_pnl', 'profit_share_usd', 
-                             'profit_share_percent', 'size', 'entry_exit_price', 'fee_cost_usd',
-                             'social_loss_fee_usd', 'pnl_contribution']
+                debug_cols = ['trade_time', 'pair_name', 'trade_type', 'taker_pnl', 'taker_share_pnl',
+                             'collateral_price', 'user_received_pnl', 'trade_pnl', 'profit_share', 
+                             'profit_share_percent', 'size', 'entry_exit_price']
                 # Only include columns that exist in the dataframe
                 available_debug_cols = [col for col in debug_cols if col in user_trades.columns]
                 debug_df = user_trades[available_debug_cols].head(5)
                 st.dataframe(debug_df)
                 
                 # Show calculation verification
-                st.write("Calculation verification (first trade):")
-                if len(user_trades) > 0:
-                    first_trade = user_trades.iloc[0]
-                    st.write(f"taker_pnl: {first_trade['taker_pnl']}")
-                    st.write(f"taker_share_pnl: {first_trade['taker_share_pnl']}")
-                    st.write(f"collateral_price: {first_trade['collateral_price']}")
-                    st.write(f"Order PnL (taker_pnl + taker_share_pnl) * collateral_price: {(first_trade['taker_pnl'] + first_trade['taker_share_pnl']) * first_trade['collateral_price']}")
-                    st.write(f"Actual order_pnl from query: {first_trade['order_pnl']}")
-                    st.write(f"User received PnL (taker_pnl * collateral_price): {first_trade['taker_pnl'] * first_trade['collateral_price']}")
-                    st.write(f"Actual user_received_pnl from query: {first_trade['user_received_pnl']}")
-                    st.write(f"PnL contribution: {first_trade['pnl_contribution']}")
+                st.write("Calculation verification (first exit trade):")
+                exit_trades = user_trades[user_trades['position_action'] == 'Exit']
+                if len(exit_trades) > 0:
+                    first_trade = exit_trades.iloc[0]
+                    st.write(f"Raw values:")
+                    st.write(f"- taker_pnl: {first_trade['taker_pnl']}")
+                    st.write(f"- taker_share_pnl: {first_trade['taker_share_pnl']}")
+                    st.write(f"- collateral_price: {first_trade['collateral_price']}")
+                    st.write(f"")
+                    st.write(f"Calculated values:")
+                    st.write(f"- User Received PNL = taker_pnl * collateral_price = {first_trade['taker_pnl']} * {first_trade['collateral_price']} = {first_trade['taker_pnl'] * first_trade['collateral_price']}")
+                    st.write(f"- Profit Share = taker_share_pnl * collateral_price = {first_trade['taker_share_pnl']} * {first_trade['collateral_price']} = {first_trade['taker_share_pnl'] * first_trade['collateral_price']}")
+                    st.write(f"- Trade PNL = User Received + Profit Share = {first_trade['user_received_pnl']} + {first_trade['profit_share']} = {first_trade['trade_pnl']}")
+                    st.write(f"")
+                    st.write(f"Query results:")
+                    st.write(f"- user_received_pnl: {first_trade['user_received_pnl']}")
+                    st.write(f"- profit_share: {first_trade['profit_share']}")
+                    st.write(f"- trade_pnl: {first_trade['trade_pnl']}")
             
             # Create two views - compact and detailed
             view_option = st.radio("Select View", ["Compact View", "Detailed View"], horizontal=True)
@@ -782,8 +760,8 @@ if trading_metrics_df is not None:
                 # Display enhanced compact view with renamed columns
                 compact_cols = ['trade_time', 'pair_name', 'trade_type', 'position_action', 
                                 'entry_exit_price', 'size', 'leverage_display', 
-                                'order_pnl', 'user_received_pnl', 'profit_share_usd', 
-                                'profit_share_percent', 'pnl_contribution']
+                                'trade_pnl', 'user_received_pnl', 'profit_share', 
+                                'profit_share_percent']
                 
                 # Add percent_distance only if it exists (for exit trades)
                 if 'percent_distance' in user_trades.columns:
@@ -795,7 +773,7 @@ if trading_metrics_df is not None:
                 # Create display dataframe
                 display_df = user_trades[available_cols].copy()
                 
-                # Create column mapping for renaming
+                # Create column mapping to match Metabase exactly
                 col_mapping = {
                     'trade_time': 'Trade Time',
                     'pair_name': 'Pair',
@@ -804,11 +782,10 @@ if trading_metrics_df is not None:
                     'entry_exit_price': 'Entry/Exit Price',
                     'size': 'Size',
                     'leverage_display': 'Leverage',
-                    'order_pnl': 'Order PNL',
-                    'user_received_pnl': 'User Received PNL',
-                    'profit_share_usd': 'Profit Share',
+                    'trade_pnl': 'Trade PNL',  # Matches Metabase's "Trade PNL"
+                    'user_received_pnl': 'User Received PNL',  # Matches Metabase's 用户实际到手PNL
+                    'profit_share': 'Profit Share',  # Matches Metabase's "Profit Share"
                     'profit_share_percent': 'Profit Share %',
-                    'pnl_contribution': 'Net PnL Impact',
                     'percent_distance': '% Distance'
                 }
                 
@@ -895,10 +872,10 @@ if trading_metrics_df is not None:
                             st.write(f"{trade['entry_exit_price']:.8f}")
                         
                         with col6:
-                            st.write("**Order PNL**")
+                            st.write("**Trade PNL**")
                             if trade['position_action'] == 'Exit':
-                                pnl_color = "green" if trade['order_pnl'] > 0 else "red"
-                                st.write(f":{pnl_color}[{trade['order_pnl']:+.2f}]")
+                                pnl_color = "green" if trade['trade_pnl'] > 0 else "red"
+                                st.write(f":{pnl_color}[{trade['trade_pnl']:+.2f}]")
                             else:
                                 st.write("-")
                         
@@ -926,7 +903,7 @@ if trading_metrics_df is not None:
                         with col4:
                             if trade['position_action'] == 'Exit':
                                 st.write(f"**User Received PNL**: ${trade['user_received_pnl']:,.2f}")
-                                st.write(f"**Profit Share**: ${trade['profit_share_usd']:,.2f}")
+                                st.write(f"**Profit Share**: ${trade['profit_share']:,.2f}")
                                 st.write(f"**Share %**: {trade['profit_share_percent']:.2f}%")
                             else:
                                 st.write("**User Received PNL**: N/A")
