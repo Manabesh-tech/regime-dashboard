@@ -136,8 +136,9 @@ def fetch_trading_metrics():
         return None
 
 # Function to fetch detailed trade data for a specific user
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=600, show_spinner=False)
 def fetch_user_trade_details(user_id):
+    # Clear any existing cache by changing the function signature slightly
     query = f"""
     SELECT
       pair_name,
@@ -176,14 +177,14 @@ def fetch_user_trade_details(user_id):
       maker_sl_fee,
       funding_fee,
       -- Calculate values to match Metabase exactly:
-      -- 用户实际到手PNL (User Received PNL)
-      taker_pnl * collateral_price AS user_received_pnl,
-      -- 平台收取Profit Share (Platform Profit Share)
-      taker_share_pnl * collateral_price AS profit_share,
+      -- User Received PNL (no trade_pnl column!)
+      ROUND(taker_pnl * collateral_price, 2) AS user_received_pnl,
+      -- Platform Profit Share
+      ROUND(taker_share_pnl * collateral_price, 2) AS profit_share,
       -- Calculate profit share percentage: profit_share / (user_received_pnl + profit_share)
       CASE 
         WHEN (taker_pnl * collateral_price + taker_share_pnl * collateral_price) != 0 THEN 
-          (taker_share_pnl * collateral_price) / (taker_pnl * collateral_price + taker_share_pnl * collateral_price) * 100
+          ROUND((taker_share_pnl * collateral_price) / (taker_pnl * collateral_price + taker_share_pnl * collateral_price) * 100, 2)
         ELSE 0
       END AS profit_share_percent,
       created_at + INTERVAL '8 hour' AS trade_time,
@@ -229,9 +230,9 @@ def fetch_user_trade_details(user_id):
                         pre_profit_share_price = exit_price - (row['profit_share'] / row['size'])
                         df.loc[idx, 'pre_profit_share_exit'] = pre_profit_share_price
                         df.loc[idx, 'post_profit_share_exit'] = exit_price
-                        df.loc[idx, 'percent_distance'] = ((pre_profit_share_price - entry_price) / entry_price) * 100
+                        df.loc[idx, 'percent_distance'] = round(((pre_profit_share_price - entry_price) / entry_price) * 100, 2)
                     else:
-                        df.loc[idx, 'percent_distance'] = ((exit_price - entry_price) / entry_price) * 100
+                        df.loc[idx, 'percent_distance'] = round(((exit_price - entry_price) / entry_price) * 100, 2)
         
         return df
     except Exception as e:
@@ -723,17 +724,26 @@ if trading_metrics_df is not None:
             
             if show_debug:
                 st.write("Raw Data Sample (first 5 trades):")
+                
+                # Show all available columns first
+                st.write("Available columns in user_trades:")
+                st.write(list(user_trades.columns))
+                
+                # Define columns we want to show (some might not exist)
                 debug_cols = ['trade_time', 'pair_name', 'trade_type', 'taker_pnl', 'taker_share_pnl',
                              'collateral_price', 'user_received_pnl', 'profit_share', 
                              'profit_share_percent', 'size', 'entry_exit_price']
-                # Only include columns that exist in the dataframe
-                available_debug_cols = [col for col in debug_cols if col in user_trades.columns]
-                debug_df = user_trades[available_debug_cols].head(5)
-                st.dataframe(debug_df)
                 
-                # Show all available columns
-                st.write("All available columns in user_trades:")
-                st.write(list(user_trades.columns))
+                # Only include columns that actually exist
+                available_debug_cols = [col for col in debug_cols if col in user_trades.columns]
+                
+                if available_debug_cols:
+                    debug_df = user_trades[available_debug_cols].head(5)
+                    st.dataframe(debug_df)
+                
+                # Show if trade_pnl still exists (it shouldn't!)
+                if 'trade_pnl' in user_trades.columns:
+                    st.warning("⚠️ Old column 'trade_pnl' still exists in cached data. Please refresh the page and clear cache.")
                 
                 # Show calculation verification
                 st.write("Calculation verification (first exit trade):")
@@ -748,12 +758,16 @@ if trading_metrics_df is not None:
                     st.write(f"Calculated values:")
                     st.write(f"- User Received PNL = taker_pnl * collateral_price = {first_trade['taker_pnl']} * {first_trade['collateral_price']} = {(first_trade['taker_pnl'] * first_trade['collateral_price']):.2f}")
                     st.write(f"- Profit Share = taker_share_pnl * collateral_price = {first_trade['taker_share_pnl']} * {first_trade['collateral_price']} = {(first_trade['taker_share_pnl'] * first_trade['collateral_price']):.2f}")
-                    st.write(f"- Profit Share % = profit_share / (user_received_pnl + profit_share) * 100 = {first_trade['profit_share']:.2f} / ({first_trade['user_received_pnl']:.2f} + {first_trade['profit_share']:.2f}) * 100 = {first_trade['profit_share_percent']:.2f}%")
+                    if 'profit_share' in first_trade and 'user_received_pnl' in first_trade:
+                        st.write(f"- Profit Share % = profit_share / (user_received_pnl + profit_share) * 100 = {first_trade['profit_share']:.2f} / ({first_trade['user_received_pnl']:.2f} + {first_trade['profit_share']:.2f}) * 100 = {first_trade['profit_share_percent']:.2f}%")
                     st.write(f"")
                     st.write(f"Query results:")
-                    st.write(f"- user_received_pnl: {first_trade['user_received_pnl']:.2f}")
-                    st.write(f"- profit_share: {first_trade['profit_share']:.2f}")
-                    st.write(f"- profit_share_percent: {first_trade['profit_share_percent']:.2f}%")
+                    if 'user_received_pnl' in first_trade:
+                        st.write(f"- user_received_pnl: {first_trade['user_received_pnl']:.2f}")
+                    if 'profit_share' in first_trade:
+                        st.write(f"- profit_share: {first_trade['profit_share']:.2f}")
+                    if 'profit_share_percent' in first_trade:
+                        st.write(f"- profit_share_percent: {first_trade['profit_share_percent']:.2f}%")
             
             # Create two views - compact and detailed
             view_option = st.radio("Select View", ["Compact View", "Detailed View"], horizontal=True)
@@ -1109,9 +1123,17 @@ else:
 
 # Add refresh button in sidebar
 st.sidebar.title("Dashboard Controls")
-if st.sidebar.button("Refresh Data"):
-    st.cache_data.clear()
-    st.experimental_rerun()
+col1, col2 = st.sidebar.columns(2)
+with col1:
+    if st.button("Refresh Data"):
+        st.cache_data.clear()
+        st.rerun()
+with col2:
+    if st.button("Force Clear Cache"):
+        st.cache_data.clear()
+        st.cache_resource.clear()
+        st.success("Cache cleared!")
+        st.rerun()
 
 # Add dashboard info
 st.sidebar.title("About This Dashboard")
