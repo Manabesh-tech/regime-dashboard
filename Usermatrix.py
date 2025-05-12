@@ -211,6 +211,9 @@ def fetch_live_trades():
       trigger_price,
       taker_share_pnl,
       collateral_amount,
+      taker_sl_fee,
+      maker_sl_fee,
+      funding_fee,
       -- User ID string
       CONCAT(taker_account_id, '') AS user_id_str,
       -- UTC+8 time
@@ -219,8 +222,18 @@ def fetch_live_trades():
       ROUND(taker_pnl * collateral_price, 2) AS user_received_pnl,
       -- Platform Profit Share
       ROUND(taker_share_pnl * collateral_price, 2) AS platform_profit_share,
-      -- Order PnL (user_received_pnl + platform_profit_share)
-      ROUND((taker_pnl * collateral_price) + (taker_share_pnl * collateral_price), 2) AS order_pnl,
+      -- CORRECTED Order PnL Calculation
+      CASE
+        -- For Flat Fee Mode: Base PnL - Trading Fee - Funding Fee
+        WHEN taker_fee_mode = 1 THEN 
+          ROUND((taker_pnl * collateral_price) - (taker_fee * collateral_price) - (funding_fee * collateral_price), 2)
+        -- For Stop Loss Orders: Base PnL - Stop Loss Fee
+        WHEN taker_mode = 3 THEN 
+          ROUND((taker_pnl * collateral_price) - (taker_sl_fee * collateral_price) - maker_sl_fee, 2)
+        -- For other modes: Just the base PnL
+        ELSE 
+          ROUND(taker_pnl * collateral_price, 2)
+      END AS order_pnl,
       -- Flat Fee
       taker_fee * collateral_price AS flat_fee,
       -- Volume in USD
@@ -377,10 +390,25 @@ def fetch_user_trade_details_v4(user_id):
       taker_pnl,
       taker_share_pnl,
       taker_fee,
+      taker_sl_fee,
+      maker_sl_fee,
+      funding_fee,
       -- User Received PNL (what user actually gets)
       ROUND(taker_pnl * collateral_price, 2) AS user_received_pnl,
       -- Platform Profit Share
       ROUND(taker_share_pnl * collateral_price, 2) AS profit_share,
+      -- CORRECTED Order PnL Calculation based on discussion
+      CASE
+        -- For Flat Fee Mode: Base PnL - Trading Fee - Funding Fee
+        WHEN taker_fee_mode = 1 THEN 
+          ROUND((taker_pnl * collateral_price) - (taker_fee * collateral_price) - (funding_fee * collateral_price), 2)
+        -- For Stop Loss Orders: Base PnL - Stop Loss Fee
+        WHEN taker_mode = 3 THEN 
+          ROUND((taker_pnl * collateral_price) - (taker_sl_fee * collateral_price) - maker_sl_fee, 2)
+        -- For other modes: Just the base PnL
+        ELSE 
+          ROUND(taker_pnl * collateral_price, 2)
+      END AS order_pnl,
       -- Calculate profit share percentage
       CASE 
         WHEN (taker_pnl * collateral_price + taker_share_pnl * collateral_price) != 0 THEN 
@@ -814,10 +842,10 @@ if trading_metrics_df is not None:
             # Trade history
             st.subheader("Trade History")
             
-            # Compact view
+            # Compact view - Including order_pnl
             compact_cols = ['trade_time', 'pair_name', 'trade_type', 'position_action', 
                             'entry_exit_price', 'size', 'leverage_display', 
-                            'user_received_pnl', 'profit_share', 'profit_share_percent']
+                            'order_pnl', 'user_received_pnl', 'profit_share', 'profit_share_percent']
             
             if 'percent_distance' in user_trades.columns:
                 compact_cols.append('percent_distance')
@@ -834,6 +862,7 @@ if trading_metrics_df is not None:
                 'entry_exit_price': 'Entry/Exit Price',
                 'size': 'Size',
                 'leverage_display': 'Leverage',
+                'order_pnl': 'Order PnL',
                 'user_received_pnl': 'User Received PNL',
                 'profit_share': 'Profit Share',
                 'profit_share_percent': 'Profit Share %',
@@ -847,6 +876,8 @@ if trading_metrics_df is not None:
                 display_df['Entry/Exit Price'] = display_df['Entry/Exit Price'].round(4)
             if 'Size' in display_df.columns:
                 display_df['Size'] = display_df['Size'].round(2)
+            if 'Order PnL' in display_df.columns:
+                display_df['Order PnL'] = display_df['Order PnL'].round(2)
             if 'User Received PNL' in display_df.columns:
                 display_df['User Received PNL'] = display_df['User Received PNL'].round(2)
             if 'Profit Share' in display_df.columns:
@@ -865,27 +896,21 @@ if trading_metrics_df is not None:
             chart_df = pd.DataFrame()
             chart_df['trade_time'] = pd.to_datetime(user_trades['trade_time'])
             chart_df['position_action'] = user_trades['position_action']
-            chart_df['user_received_pnl'] = user_trades['user_received_pnl']
+            chart_df['order_pnl'] = user_trades['order_pnl']
             
             # Sort by time
             chart_df = chart_df.sort_values('trade_time')
             
-            # Calculate PnL contribution (only for exit trades)
-            chart_df['pnl_contribution'] = chart_df.apply(
-                lambda row: row['user_received_pnl'] if row['position_action'] == 'Exit' else 0, 
-                axis=1
-            )
-            
-            # Calculate cumulative PnL
-            chart_df['cumulative_pnl'] = chart_df['pnl_contribution'].cumsum()
+            # Calculate cumulative PnL (sum of all order PnLs as per discussion)
+            chart_df['cumulative_pnl'] = chart_df['order_pnl'].cumsum()
             
             # Create the chart
             fig = px.line(
                 chart_df,
                 x='trade_time',
                 y='cumulative_pnl',
-                title='Cumulative PnL Over Time',
-                labels={'trade_time': 'Trade Time', 'cumulative_pnl': 'Cumulative PnL (USD)'}
+                title='Cumulative Order PnL Over Time',
+                labels={'trade_time': 'Trade Time', 'cumulative_pnl': 'Cumulative Order PnL (USD)'}
             )
             
             # Add markers
@@ -895,18 +920,18 @@ if trading_metrics_df is not None:
             
             # Verify cumulative PnL
             final_cumulative_pnl = chart_df['cumulative_pnl'].iloc[-1]
-            expected_net_pnl = user_data['net_pnl']
-            exit_mask = chart_df['position_action'] == 'Exit'
-            sum_user_received_pnl = chart_df[exit_mask]['user_received_pnl'].sum()
+            sum_order_pnl = chart_df['order_pnl'].sum()
             
             st.info(f"""
             **PnL Verification:**
-            - Sum of User Received PnL (Exit trades only): ${sum_user_received_pnl:.2f}
+            - Sum of All Order PnLs: ${sum_order_pnl:.2f}
             - Final Cumulative PnL: ${final_cumulative_pnl:.2f}
-            - Expected Net PnL (from metrics): ${expected_net_pnl:.2f}
-            - Difference: ${abs(final_cumulative_pnl - expected_net_pnl):.2f}
             
-            The cumulative PnL is the sum of user_received_pnl for exit trades only.
+            Based on the discussion:
+            - Order PnL = Base PnL - Fees (based on mode)
+            - For Flat Fee Mode: Base PnL - Trading Fee - Funding Fee
+            - For Stop Loss Orders: Base PnL - Stop Loss Fee
+            - Cumulative PnL = Sum of all Order PnLs
             """)
             
         else:
@@ -932,9 +957,12 @@ This dashboard provides comprehensive analysis of user behavior and live platfor
 - Excludes specified test accounts
 
 **PnL Calculations:**
+- Order PnL:
+  - For Flat Fee Mode: Base PnL - Trading Fee - Funding Fee
+  - For Stop Loss Orders: Base PnL - Stop Loss Fee
+  - For other modes: Base PnL only
 - User Received PNL = taker_pnl * collateral_price
 - Profit Share = taker_share_pnl * collateral_price
+- Cumulative PnL = Sum of all Order PnLs for a user
 - % Distance = (Pbefore - Pentry) / Pentry * 100
-
-The cumulative PnL is the sum of user_received_pnl for exit trades only.
 """)
