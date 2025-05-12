@@ -168,11 +168,12 @@ def fetch_user_trade_details(user_id):
       collateral_price,
       taker_pnl,
       taker_share_pnl,
+      -- Use the same calculation as in the main metrics query
       taker_pnl * collateral_price AS trade_pnl,
       taker_share_pnl * collateral_price AS profit_share_usd,
       CASE 
-        WHEN taker_pnl * collateral_price != 0 THEN 
-          (taker_share_pnl * collateral_price) / (taker_pnl * collateral_price) * 100
+        WHEN taker_pnl != 0 THEN 
+          (taker_share_pnl / taker_pnl) * 100
         ELSE 0
       END AS profit_share_percent,
       created_at + INTERVAL '8 hour' AS trade_time,
@@ -197,8 +198,12 @@ def fetch_user_trade_details(user_id):
         
         # For exit trades, calculate pre/post profit share prices
         exit_mask = df['position_action'] == 'Exit'
-        df.loc[exit_mask, 'pre_profit_share_exit'] = df.loc[exit_mask, 'entry_exit_price'] - (df.loc[exit_mask, 'profit_share_usd'] / df.loc[exit_mask, 'size'])
-        df.loc[exit_mask, 'post_profit_share_exit'] = df.loc[exit_mask, 'entry_exit_price']
+        
+        # Make sure we're not dividing by zero for size
+        valid_exit_mask = exit_mask & (df['size'] != 0)
+        
+        df.loc[valid_exit_mask, 'pre_profit_share_exit'] = df.loc[valid_exit_mask, 'entry_exit_price'] - (df.loc[valid_exit_mask, 'profit_share_usd'] / df.loc[valid_exit_mask, 'size'])
+        df.loc[valid_exit_mask, 'post_profit_share_exit'] = df.loc[valid_exit_mask, 'entry_exit_price']
         
         # Match entry prices for exits and calculate % move
         for idx, row in df[exit_mask].iterrows():
@@ -213,7 +218,7 @@ def fetch_user_trade_details(user_id):
                 
                 # Calculate % move: (pre_profit_share_exit - entry) / entry * 100
                 pre_exit = df.loc[idx, 'pre_profit_share_exit']
-                if entry_price != 0:
+                if entry_price != 0 and pd.notna(pre_exit):
                     df.loc[idx, 'percent_move'] = ((pre_exit - entry_price) / entry_price) * 100
         
         return df
@@ -705,10 +710,22 @@ if trading_metrics_df is not None:
             show_debug = st.checkbox("Show Debug Info", value=False)
             
             if show_debug:
-                st.write("Raw Data Sample:")
+                st.write("Raw Data Sample (first 5 trades):")
                 debug_cols = ['trade_time', 'pair_name', 'trade_type', 'taker_pnl', 'collateral_price', 
-                             'trade_pnl', 'taker_share_pnl', 'profit_share_usd']
-                st.dataframe(user_trades[debug_cols].head(5))
+                             'trade_pnl', 'taker_share_pnl', 'profit_share_usd', 'size', 'deal_price']
+                debug_df = user_trades[debug_cols].head(5)
+                st.dataframe(debug_df)
+                
+                # Show calculation verification
+                st.write("Calculation verification (first trade):")
+                if len(user_trades) > 0:
+                    first_trade = user_trades.iloc[0]
+                    st.write(f"taker_pnl: {first_trade['taker_pnl']}")
+                    st.write(f"collateral_price: {first_trade['collateral_price']}")
+                    st.write(f"Calculated trade_pnl (taker_pnl * collateral_price): {first_trade['taker_pnl'] * first_trade['collateral_price']}")
+                    st.write(f"Actual trade_pnl from query: {first_trade['trade_pnl']}")
+                    st.write(f"Size: {first_trade['size']}")
+                    st.write(f"Deal price: {first_trade['entry_exit_price']}")
             
             # Create two views - compact and detailed
             view_option = st.radio("Select View", ["Compact View", "Detailed View"], horizontal=True)
@@ -727,11 +744,12 @@ if trading_metrics_df is not None:
                                     'Entry/Exit Price', 'Size', 'Leverage',
                                     'Trade PNL', 'Profit Share', 'Profit Share %']
                 
-                # Format numeric columns
+                # Format numeric columns - let's not round PNL to see the actual values
                 display_df['Entry/Exit Price'] = display_df['Entry/Exit Price'].round(8)
                 display_df['Size'] = display_df['Size'].round(2)
-                display_df['Trade PNL'] = display_df['Trade PNL'].round(2)
-                display_df['Profit Share'] = display_df['Profit Share'].round(2)
+                # Don't round PNL values yet to see the actual numbers
+                #display_df['Trade PNL'] = display_df['Trade PNL'].round(2)
+                #display_df['Profit Share'] = display_df['Profit Share'].round(2)
                 display_df['Profit Share %'] = display_df['Profit Share %'].round(2)
                 
                 st.dataframe(display_df, use_container_width=True)
