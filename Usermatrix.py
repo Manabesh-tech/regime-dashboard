@@ -148,7 +148,7 @@ def fetch_live_trades():
       deal_vol,
       deal_size,
       leverage,
-      coin_name,
+      coin_code,
       taker_type,
       taker_way,
       taker_mode,
