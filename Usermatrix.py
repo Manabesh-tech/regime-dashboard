@@ -393,33 +393,49 @@ if trading_metrics_df is not None:
         st.subheader("User Activity Over Time")
         
         if users_per_day_df is not None and len(users_per_day_df) > 0:
-            # Create line chart
-            fig = px.line(
-                users_per_day_df, 
-                x='date', 
-                y='new_users',
-                labels={'new_users': 'New Users', 'date': 'Date'},
-                title='Daily New User First Trades'
-            )
+            try:
+                # Create line chart
+                fig = px.line(
+                    users_per_day_df, 
+                    x='date', 
+                    y='new_users',
+                    labels={'new_users': 'New Users', 'date': 'Date'},
+                    title='Daily New User First Trades'
+                )
+                
+                # Add markers to the line
+                fig.update_traces(mode='lines+markers')
+                
+                # Display the chart
+                st.plotly_chart(fig, use_container_width=True)
+            except Exception as e:
+                st.error(f"Error creating user activity chart: {e}")
+                st.write("Debug info:")
+                st.write(f"Available columns: {list(users_per_day_df.columns)}")
+                st.write(f"Data types: {users_per_day_df.dtypes}")
+                st.write("First few rows:")
+                st.dataframe(users_per_day_df.head())
             
-            # Add markers to the line
-            fig.update_traces(mode='lines+markers')
-            
-            # Display the chart
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Create cumulative chart
-            users_per_day_df['cumulative_users'] = users_per_day_df['new_users'].cumsum()
-            
-            fig2 = px.line(
-                users_per_day_df, 
-                x='date', 
-                y='cumulative_users',
-                labels={'cumulative_users': 'Total Users', 'date': 'Date'},
-                title='Cumulative User Growth (Based on First Trade)'
-            )
-            
-            st.plotly_chart(fig2, use_container_width=True)
+            try:
+                # Create cumulative chart
+                users_per_day_df['cumulative_users'] = users_per_day_df['new_users'].cumsum()
+                
+                fig2 = px.line(
+                    users_per_day_df, 
+                    x='date', 
+                    y='cumulative_users',
+                    labels={'cumulative_users': 'Total Users', 'date': 'Date'},
+                    title='Cumulative User Growth (Based on First Trade)'
+                )
+                
+                st.plotly_chart(fig2, use_container_width=True)
+            except Exception as e:
+                st.error(f"Error creating cumulative users chart: {e}")
+                st.write("Debug info:")
+                st.write(f"Available columns: {list(users_per_day_df.columns)}")
+                st.write(f"Data types: {users_per_day_df.dtypes}")
+                st.write("First few rows:")
+                st.dataframe(users_per_day_df.head())
         else:
             st.info("No user activity data available.")
     
