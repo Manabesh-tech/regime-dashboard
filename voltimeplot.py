@@ -417,13 +417,13 @@ if vol_data is not None and not vol_data.empty and historical_vol_data is not No
             row=1, col=1
         )
         
-        # Add notes if no Rollbit data
+        # Add notes if no Rollbit data - 修复字体设置
         fig.add_annotation(
             x=vol_data_pct.index[len(vol_data_pct)//2],
             y=0.5,
             text="No Rollbit buffer rate data available",
             showarrow=False,
-            font=dict(size=12, color="gray"),
+            font=dict(size=12, color="gray", family="Arial"),
             row=2, col=1
         )
         
@@ -432,7 +432,7 @@ if vol_data is not None and not vol_data.empty and historical_vol_data is not No
             y=0.5,
             text="No Rollbit position multiplier data available",
             showarrow=False,
-            font=dict(size=12, color="gray"),
+            font=dict(size=12, color="gray", family="Arial"),
             row=3, col=1
         )
     
@@ -481,7 +481,6 @@ if vol_data is not None and not vol_data.empty and historical_vol_data is not No
     visible_range = y_max - y_min
     
     for i, (key, color, label) in enumerate(percentile_lines):
-        # Only show percentiles that are within visible range and make sense
         if y_min <= percentiles[key] <= y_max and percentiles[key] > 0:
             fig.add_shape(
                 type="line",
@@ -489,17 +488,17 @@ if vol_data is not None and not vol_data.empty and historical_vol_data is not No
                 x1=vol_data_pct.index.max(),
                 y0=percentiles[key],
                 y1=percentiles[key],
-                line=dict(color=color, width=3, dash="dash"),  # Thicker lines
+                line=dict(color=color, width=3, dash="dash"),
                 row=1, col=1
             )
             
-            # Place label at the start of the line
+            # 修复字体设置
             fig.add_annotation(
-                x=vol_data_pct.index[10],  # Place near the start
+                x=vol_data_pct.index[10],
                 y=percentiles[key],
                 text=f"{label}: {percentiles[key]:.1f}%",
                 showarrow=False,
-                font=dict(size=9, color=color),
+                font=dict(size=9, color=color, weight="bold", family="Arial"),
                 xanchor="left",
                 yanchor="middle",
                 bgcolor="rgba(255,255,255,0.9)",
@@ -508,13 +507,12 @@ if vol_data is not None and not vol_data.empty and historical_vol_data is not No
                 row=1, col=1
             )
             
-            # Also place label at the end of the line (right side)
             fig.add_annotation(
-                x=vol_data_pct.index[-10],  # Place near the end
+                x=vol_data_pct.index[-10],
                 y=percentiles[key],
                 text=f"{label}: {percentiles[key]:.1f}%",
                 showarrow=False,
-                font=dict(size=9, color=color),
+                font=dict(size=9, color=color, weight="bold", family="Arial"),
                 xanchor="right",
                 yanchor="middle",
                 bgcolor="rgba(255,255,255,0.9)",
