@@ -137,6 +137,69 @@ def fetch_daily_pnl():
         st.error(f"Error fetching daily PnL: {e}")
         return 0
 
+# Function to fetch live trades
+@st.cache_data(ttl=30)  # Cache for 30 seconds for live data
+def fetch_live_trades():
+    query = """
+    SELECT
+      "public"."surfv2_trade"."id" AS "id",
+      "public"."surfv2_trade"."pair_name" AS "pair_name",
+      "public"."surfv2_trade"."deal_price" AS "deal_price",
+      "public"."surfv2_trade"."deal_vol" AS "deal_vol",
+      "public"."surfv2_trade"."deal_size" AS "deal_size",
+      "public"."surfv2_trade"."leverage" AS "leverage",
+      "public"."surfv2_trade"."coin_name" AS "coin_name",
+      "public"."surfv2_trade"."taker_type" AS "taker_type",
+      "public"."surfv2_trade"."taker_way" AS "taker_way",
+      "public"."surfv2_trade"."taker_mode" AS "taker_mode",
+      "public"."surfv2_trade"."collateral_price" AS "collateral_price",
+      "public"."surfv2_trade"."taker_fee_mode" AS "taker_fee_mode",
+      "public"."surfv2_trade"."taker_fee" AS "taker_fee",
+      "public"."surfv2_trade"."taker_pnl" AS "taker_pnl",
+      "public"."surfv2_trade"."trigger_price" AS "trigger_price",
+      "public"."surfv2_trade"."taker_share_pnl" AS "taker_share_pnl",
+      CONCAT("public"."surfv2_trade"."taker_account_id", '') AS "user_id_str",
+      ("public"."surfv2_trade"."created_at" + INTERVAL '8 hour') AS "trade_time",
+      -- Calculated fields
+      CASE
+        WHEN "public"."surfv2_trade"."taker_mode" = 1 THEN '主动 (Active)'
+        WHEN "public"."surfv2_trade"."taker_mode" = 2 THEN '止盈 (Take Profit)'
+        WHEN "public"."surfv2_trade"."taker_mode" = 3 THEN '止损 (Stop Loss)'
+        WHEN "public"."surfv2_trade"."taker_mode" = 4 THEN '爆仓 (Liq)'
+      END AS "taker_mode_display",
+      CASE
+        WHEN "public"."surfv2_trade"."taker_way" = 1 THEN '开多 (Open Long)'
+        WHEN "public"."surfv2_trade"."taker_way" = 2 THEN '平空 (Close Short)'
+        WHEN "public"."surfv2_trade"."taker_way" = 3 THEN '开空 (Open Short)'
+        WHEN "public"."surfv2_trade"."taker_way" = 4 THEN '平多 (Close Long)'
+      END AS "taker_way_display",
+      CASE
+        WHEN "public"."surfv2_trade"."taker_fee_mode" = 1 THEN 'Flat'
+        WHEN "public"."surfv2_trade"."taker_fee_mode" = 2 THEN 'Profit Share'
+      END AS "fee_mode_display",
+      "public"."surfv2_trade"."taker_pnl" * "public"."surfv2_trade"."collateral_price" AS "user_pnl_usd",
+      "public"."surfv2_trade"."taker_share_pnl" * "public"."surfv2_trade"."collateral_price" AS "platform_profit_share",
+      ("public"."surfv2_trade"."taker_pnl" * "public"."surfv2_trade"."collateral_price") + 
+      ("public"."surfv2_trade"."taker_share_pnl" * "public"."surfv2_trade"."collateral_price") AS "total_pnl",
+      "public"."surfv2_trade"."taker_fee" * "public"."surfv2_trade"."collateral_price" AS "flat_fee_usd",
+      "public"."surfv2_trade"."deal_vol" * "public"."surfv2_trade"."collateral_price" AS "volume_usd"
+    FROM
+      "public"."surfv2_trade"
+    WHERE
+      ("public"."surfv2_trade"."taker_way" IN (1, 2, 3, 4))
+      AND ("public"."surfv2_trade"."taker_mode" IN (1, 2, 3, 4))
+    ORDER BY
+      "public"."surfv2_trade"."created_at" DESC
+    LIMIT 100
+    """
+    
+    try:
+        df = pd.read_sql(query, conn)
+        return df
+    except Exception as e:
+        st.error(f"Error fetching live trades: {e}")
+        return None
+
 # Function to fetch all-time PnL
 @st.cache_data(ttl=60)  # Cache for 1 minute for live data
 def fetch_all_time_pnl():
@@ -385,10 +448,11 @@ now_utc = datetime.now(pytz.utc)
 now_sg = now_utc.astimezone(singapore_timezone)
 st.write(f"Current Singapore Time: {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
 
-# Load PnL data
-with st.spinner("Loading live PnL data..."):
+# Load live data
+with st.spinner("Loading live data..."):
     st.session_state.daily_pnl = fetch_daily_pnl()
     st.session_state.all_time_pnl = fetch_all_time_pnl()
+    live_trades_df = fetch_live_trades()
 
 # Create tabs with PnL display in Live Trades tab title
 daily_pnl_display = f"${st.session_state.daily_pnl:,.2f}" if st.session_state.daily_pnl else "$0.00"
@@ -403,7 +467,7 @@ tab1, tab2, tab3, tab4 = st.tabs([
 
 # Tab 1 - Live Trades
 with tab1:
-    st.header("Live Platform PnL")
+    st.header("Live Trading Activity & Platform PnL")
     
     # Refresh button
     col1, col2, col3 = st.columns([1, 1, 8])
@@ -412,63 +476,180 @@ with tab1:
             st.cache_data.clear()
             st.rerun()
     
-    # Daily PnL display
-    st.subheader("Today's Platform PnL (Excluding Rebates)")
+    # PnL metrics row
+    pnl_col1, pnl_col2 = st.columns(2)
     
-    # Big, bold display for daily PnL
-    daily_color = "green" if st.session_state.daily_pnl >= 0 else "red"
-    st.markdown(f"""
-    <div style="text-align: center; padding: 20px; background-color: rgba(0,0,0,0.05); border-radius: 10px; margin: 10px 0;">
-        <h1 style="color: {daily_color}; font-size: 48px; font-weight: bold; margin: 0;">
-            ${st.session_state.daily_pnl:,.2f}
-        </h1>
-        <p style="font-size: 16px; color: #666; margin-top: 10px;">Since 00:00 SGT</p>
-    </div>
-    """, unsafe_allow_html=True)
+    with pnl_col1:
+        # Daily PnL display
+        st.subheader("Today's Platform PnL")
+        daily_color = "green" if st.session_state.daily_pnl >= 0 else "red"
+        st.markdown(f"""
+        <div style="text-align: center; padding: 20px; background-color: rgba(0,0,0,0.05); border-radius: 10px; margin: 10px 0;">
+            <h1 style="color: {daily_color}; font-size: 36px; font-weight: bold; margin: 0;">
+                ${st.session_state.daily_pnl:,.2f}
+            </h1>
+            <p style="font-size: 14px; color: #666; margin-top: 5px;">Since 00:00 SGT</p>
+        </div>
+        """, unsafe_allow_html=True)
     
-    # All-time PnL display
-    st.subheader("All-Time Platform PnL (Excluding Rebates)")
+    with pnl_col2:
+        # All-time PnL display
+        st.subheader("All-Time Platform PnL")
+        all_time_color = "green" if st.session_state.all_time_pnl >= 0 else "red"
+        st.markdown(f"""
+        <div style="text-align: center; padding: 20px; background-color: rgba(0,0,0,0.05); border-radius: 10px; margin: 10px 0;">
+            <h1 style="color: {all_time_color}; font-size: 36px; font-weight: bold; margin: 0;">
+                ${st.session_state.all_time_pnl:,.2f}
+            </h1>
+            <p style="font-size: 14px; color: #666; margin-top: 5px;">Since Platform Launch</p>
+        </div>
+        """, unsafe_allow_html=True)
     
-    # Big, bold display for all-time PnL
-    all_time_color = "green" if st.session_state.all_time_pnl >= 0 else "red"
-    st.markdown(f"""
-    <div style="text-align: center; padding: 20px; background-color: rgba(0,0,0,0.05); border-radius: 10px; margin: 10px 0;">
-        <h1 style="color: {all_time_color}; font-size: 48px; font-weight: bold; margin: 0;">
-            ${st.session_state.all_time_pnl:,.2f}
-        </h1>
-        <p style="font-size: 16px; color: #666; margin-top: 10px;">Since Platform Launch</p>
-    </div>
-    """, unsafe_allow_html=True)
+    # Live Trades section
+    st.subheader("Live Trades (Latest 100)")
     
-    # PnL Calculation Breakdown
-    st.subheader("PnL Calculation Components")
+    # Fetch live trades
+    live_trades_df = fetch_live_trades()
     
-    components_col1, components_col2 = st.columns(2)
+    if live_trades_df is not None and not live_trades_df.empty:
+        # Create display dataframe with selected columns
+        display_columns = [
+            'trade_time',
+            'user_id_str',
+            'pair_name',
+            'taker_way_display',
+            'taker_mode_display',
+            'deal_price',
+            'deal_size',
+            'leverage',
+            'user_pnl_usd',
+            'platform_profit_share',
+            'flat_fee_usd',
+            'fee_mode_display'
+        ]
+        
+        # Rename columns for better display
+        column_mapping = {
+            'trade_time': 'Time',
+            'user_id_str': 'User ID',
+            'pair_name': 'Pair',
+            'taker_way_display': 'Action',
+            'taker_mode_display': 'Order Type',
+            'deal_price': 'Price',
+            'deal_size': 'Size',
+            'leverage': 'Leverage',
+            'user_pnl_usd': 'User PnL ($)',
+            'platform_profit_share': 'Platform Share ($)',
+            'flat_fee_usd': 'Flat Fee ($)',
+            'fee_mode_display': 'Fee Mode'
+        }
+        
+        live_display_df = live_trades_df[display_columns].copy()
+        live_display_df.columns = [column_mapping.get(col, col) for col in live_display_df.columns]
+        
+        # Format numeric columns
+        live_display_df['Price'] = live_display_df['Price'].round(4)
+        live_display_df['Size'] = live_display_df['Size'].round(4)
+        live_display_df['User PnL ($)'] = live_display_df['User PnL ($)'].round(2)
+        live_display_df['Platform Share ($)'] = live_display_df['Platform Share ($)'].round(2)
+        live_display_df['Flat Fee ($)'] = live_display_df['Flat Fee ($)'].round(2)
+        live_display_df['Leverage'] = live_display_df['Leverage'].apply(lambda x: f"{x:.0f}x")
+        
+        # Format time to be more readable
+        live_display_df['Time'] = pd.to_datetime(live_display_df['Time']).dt.strftime('%Y-%m-%d %H:%M:%S')
+        
+        # Apply color to PnL columns
+        def color_pnl(val):
+            if isinstance(val, (int, float)):
+                color = 'green' if val >= 0 else 'red'
+                return f'color: {color}'
+            return ''
+        
+        styled_df = live_display_df.style.applymap(
+            color_pnl, 
+            subset=['User PnL ($)']
+        )
+        
+        # Display the dataframe
+        st.dataframe(styled_df, use_container_width=True, height=600)
+        
+        # Trade statistics
+        st.subheader("Recent Trade Statistics")
+        
+        stats_col1, stats_col2, stats_col3, stats_col4 = st.columns(4)
+        
+        with stats_col1:
+            total_trades = len(live_trades_df)
+            st.metric("Total Trades (Last 100)", f"{total_trades:,}")
+        
+        with stats_col2:
+            total_volume = live_trades_df['volume_usd'].sum()
+            st.metric("Total Volume ($)", f"${total_volume:,.2f}")
+        
+        with stats_col3:
+            avg_leverage = live_trades_df['leverage'].mean()
+            st.metric("Average Leverage", f"{avg_leverage:.1f}x")
+        
+        with stats_col4:
+            unique_users = live_trades_df['user_id_str'].nunique()
+            st.metric("Active Users", f"{unique_users:,}")
+        
+        # Trade type breakdown
+        st.subheader("Trade Type Breakdown")
+        
+        type_col1, type_col2 = st.columns(2)
+        
+        with type_col1:
+            # Trade action breakdown
+            action_counts = live_trades_df['taker_way_display'].value_counts()
+            fig_action = px.pie(
+                values=action_counts.values,
+                names=action_counts.index,
+                title="Trade Actions"
+            )
+            st.plotly_chart(fig_action, use_container_width=True)
+        
+        with type_col2:
+            # Order type breakdown
+            order_counts = live_trades_df['taker_mode_display'].value_counts()
+            fig_order = px.pie(
+                values=order_counts.values,
+                names=order_counts.index,
+                title="Order Types"
+            )
+            st.plotly_chart(fig_order, use_container_width=True)
     
-    with components_col1:
-        st.info("""
-        **Platform PnL Components:**
-        - User Trading PnL (Inverse)
-        - Flat Fee Revenue
-        - Funding Fee PnL
-        - Stop Loss Fees
-        - Minus: All Rebates
-        """)
+    else:
+        st.warning("No live trade data available.")
     
-    with components_col2:
-        st.info("""
-        **Excluded Users:**
-        - 383645340185311232
-        - 383645323663947776
-        - 384014230417035264
-        - 384014656596699136
-        - 384015011585812480
-        - 384015271796238336
-        - 384015526326947840
-        """)
+    # PnL Calculation Info
+    with st.expander("PnL Calculation Details"):
+        components_col1, components_col2 = st.columns(2)
+        
+        with components_col1:
+            st.info("""
+            **Platform PnL Components:**
+            - User Trading PnL (Inverse)
+            - Flat Fee Revenue
+            - Funding Fee PnL
+            - Stop Loss Fees
+            - Minus: All Rebates
+            """)
+        
+        with components_col2:
+            st.info("""
+            **Excluded Users:**
+            - 383645340185311232
+            - 383645323663947776
+            - 384014230417035264
+            - 384014656596699136
+            - 384015011585812480
+            - 384015271796238336
+            - 384015526326947840
+            """)
     
     # Auto-refresh note
-    st.caption("Data refreshes every 60 seconds. Click the refresh button for immediate update.")
+    st.caption("Live trades refresh every 30 seconds. PnL data refreshes every 60 seconds.")
 
 # Load trading metrics and user data
 with st.spinner("Loading user data..."):
