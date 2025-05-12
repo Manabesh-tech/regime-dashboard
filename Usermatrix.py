@@ -136,8 +136,9 @@ def fetch_trading_metrics():
         return None
 
 # Function to fetch detailed trade data for a specific user
+# Added v2 to force cache refresh
 @st.cache_data(ttl=600, show_spinner=False)
-def fetch_user_trade_details(user_id):
+def fetch_user_trade_details_v2(user_id):
     # Clear any existing cache by changing the function signature slightly
     query = f"""
     SELECT
@@ -636,8 +637,8 @@ if trading_metrics_df is not None:
         # Get user data
         user_data = trading_metrics_df[trading_metrics_df['user_id_str'] == selected_user].iloc[0]
         
-        # Fetch detailed trade data
-        user_trades = fetch_user_trade_details(selected_user)
+        # Fetch detailed trade data with new function name to bust cache
+        user_trades = fetch_user_trade_details_v2(selected_user)
         
         # Display user summary
         st.subheader(f"User Summary: {selected_user}")
