@@ -149,6 +149,8 @@ def fetch_live_trades():
       deal_size,
       leverage,
       coin_code,
+      dual_side,
+      taker_account_id,
       taker_type,
       taker_way,
       taker_mode,
@@ -156,32 +158,53 @@ def fetch_live_trades():
       taker_fee_mode,
       taker_fee,
       taker_pnl,
+      taker_position,
+      created_at,
       trigger_price,
       taker_share_pnl,
+      collateral_amount,
+      -- User ID string
       CONCAT(taker_account_id, '') AS user_id_str,
+      -- UTC+8 time
       (created_at + INTERVAL '8 hour') AS trade_time,
-      -- Calculated fields
+      -- User Received PNL (what user actually gets)
+      ROUND(taker_pnl * collateral_price, 2) AS user_received_pnl,
+      -- Platform Profit Share
+      ROUND(taker_share_pnl * collateral_price, 2) AS platform_profit_share,
+      -- Order PnL (user_received_pnl + platform_profit_share)
+      ROUND((taker_pnl * collateral_price) + (taker_share_pnl * collateral_price), 2) AS order_pnl,
+      -- Flat Fee
+      taker_fee * collateral_price AS flat_fee,
+      -- Volume in USD
+      deal_vol * collateral_price AS volume_usd,
+      -- Taker Mode mapping
       CASE
         WHEN taker_mode = 1 THEN '主动 (Active)'
         WHEN taker_mode = 2 THEN '止盈 (Take Profit)'
         WHEN taker_mode = 3 THEN '止损 (Stop Loss)'
         WHEN taker_mode = 4 THEN '爆仓 (Liq)'
       END AS taker_mode_display,
+      -- Taker Way mapping
       CASE
         WHEN taker_way = 1 THEN '开多 (Open Long)'
         WHEN taker_way = 2 THEN '平空 (Close Short)'
         WHEN taker_way = 3 THEN '开空 (Open Short)'
         WHEN taker_way = 4 THEN '平多 (Close Long)'
       END AS taker_way_display,
+      -- Taker Fee Mode mapping
       CASE
         WHEN taker_fee_mode = 1 THEN 'Flat'
         WHEN taker_fee_mode = 2 THEN 'Profit Share'
       END AS fee_mode_display,
-      taker_pnl * collateral_price AS user_pnl_usd,
-      taker_share_pnl * collateral_price AS platform_profit_share,
-      (taker_pnl * collateral_price) + (taker_share_pnl * collateral_price) AS total_pnl,
-      taker_fee * collateral_price AS flat_fee_usd,
-      deal_vol * collateral_price AS volume_usd
+      -- Dual Side mapping
+      CASE
+        WHEN dual_side = FALSE THEN '单向持仓 (One-way)'
+        WHEN dual_side = TRUE THEN '双向持仓 (Two-way)'
+      END AS dual_side_display,
+      -- Collateral Type (always USDT for this table)
+      'USDT' AS collateral_type,
+      -- Formatted time string
+      TO_CHAR(created_at + INTERVAL '8 hour', 'YYYY-MM-DD HH24:MI:SS') AS formatted_time
     FROM
       public.trade_fill_fresh
     WHERE
@@ -511,62 +534,747 @@ with tab1:
     live_trades_df = fetch_live_trades()
     
     if live_trades_df is not None and not live_trades_df.empty:
-        # Create display dataframe with selected columns
+        # Create display dataframe with all columns you requested
         display_columns = [
-            'trade_time',
+            'formatted_time',
             'user_id_str',
             'pair_name',
+            'fee_mode_display',
+            'flat_fee',
             'taker_way_display',
-            'taker_mode_display',
             'deal_price',
-            'deal_size',
             'leverage',
-            'user_pnl_usd',
+            'collateral_type',
+            'taker_mode_display',
+            'order_pnl',
+            'user_received_pnl',
             'platform_profit_share',
-            'flat_fee_usd',
-            'fee_mode_display'
+            'dual_side_display'
         ]
         
         # Rename columns for better display
         column_mapping = {
-            'trade_time': 'Time',
-            'user_id_str': 'User ID',
-            'pair_name': 'Pair',
+            'formatted_time': 'Time',
+            'user_id_str': '用户ID (User ID)',
+            'pair_name': '币种名字 (Pair Name)',
+            'fee_mode_display': '费用模式 (Fee Mode)',
+            'flat_fee': 'Flat Fee',
             'taker_way_display': 'Action',
-            'taker_mode_display': 'Order Type',
-            'deal_price': 'Price',
-            'deal_size': 'Size',
-            'leverage': 'Leverage',
-            'user_pnl_usd': 'User PnL ($)',
-            'platform_profit_share': 'Platform Share ($)',
-            'flat_fee_usd': 'Flat Fee ($)',
-            'fee_mode_display': 'Fee Mode'
+            'deal_price': '开平仓方向 (Open/Close)',
+            'leverage': '杠杆 (Leverage)',
+            'collateral_type': 'Collateral Type',
+            'taker_mode_display': '订单类型 (Order Type)',
+            'order_pnl': 'Order PNL',
+            'user_received_pnl': 'User Received PNL',
+            'platform_profit_share': 'Profit Share',
+            'dual_side_display': '仓向/双向持仓 (One-way/Two-way持仓)'
         }
         
         live_display_df = live_trades_df[display_columns].copy()
         live_display_df.columns = [column_mapping.get(col, col) for col in live_display_df.columns]
         
         # Format numeric columns
-        live_display_df['Price'] = live_display_df['Price'].round(4)
-        live_display_df['Size'] = live_display_df['Size'].round(4)
-        live_display_df['User PnL ($)'] = live_display_df['User PnL ($)'].round(2)
-        live_display_df['Platform Share ($)'] = live_display_df['Platform Share ($)'].round(2)
-        live_display_df['Flat Fee ($)'] = live_display_df['Flat Fee ($)'].round(2)
-        live_display_df['Leverage'] = live_display_df['Leverage'].apply(lambda x: f"{x:.0f}x")
-        
-        # Format time to be more readable
-        live_display_df['Time'] = pd.to_datetime(live_display_df['Time']).dt.strftime('%Y-%m-%d %H:%M:%S')
+        live_display_df['开平仓方向 (Open/Close)'] = live_display_df['开平仓方向 (Open/Close)'].round(4)
+        live_display_df['Order PNL'] = live_display_df['Order PNL'].apply(lambda x: f"${x:.2f}")
+        live_display_df['User Received PNL'] = live_display_df['User Received PNL'].apply(lambda x: f"${x:.2f}")
+        live_display_df['Profit Share'] = live_display_df['Profit Share'].apply(lambda x: f"${x:.2f}")
+        live_display_df['Flat Fee'] = live_display_df['Flat Fee'].apply(lambda x: f"${x:.2f}")
+        live_display_df['杠杆 (Leverage)'] = live_display_df['杠杆 (Leverage)'].apply(lambda x: f"{x:.0f}x")
         
         # Apply color to PnL columns
-        def color_pnl(val):
-            if isinstance(val, (int, float)):
-                color = 'green' if val >= 0 else 'red'
+        def style_pnl_value(val):
+            if isinstance(val, str) and val.startswith('
+        
+        # Trade statistics
+        st.subheader("Recent Trade Statistics")
+        
+        stats_col1, stats_col2, stats_col3, stats_col4 = st.columns(4)
+        
+        with stats_col1:
+            total_trades = len(live_trades_df)
+            st.metric("Total Trades (Last 100)", f"{total_trades:,}")
+        
+        with stats_col2:
+            total_volume = live_trades_df['volume_usd'].sum()
+            st.metric("Total Volume ($)", f"${total_volume:,.2f}")
+        
+        with stats_col3:
+            avg_leverage = live_trades_df['leverage'].mean()
+            st.metric("Average Leverage", f"{avg_leverage:.1f}x")
+        
+        with stats_col4:
+            unique_users = live_trades_df['user_id_str'].nunique()
+            st.metric("Active Users", f"{unique_users:,}")
+        
+        # Trade type breakdown
+        st.subheader("Trade Type Breakdown")
+        
+        type_col1, type_col2 = st.columns(2)
+        
+        with type_col1:
+            # Trade action breakdown
+            action_counts = live_trades_df['taker_way_display'].value_counts()
+            fig_action = px.pie(
+                values=action_counts.values,
+                names=action_counts.index,
+                title="Trade Actions"
+            )
+            st.plotly_chart(fig_action, use_container_width=True)
+        
+        with type_col2:
+            # Order type breakdown
+            order_counts = live_trades_df['taker_mode_display'].value_counts()
+            fig_order = px.pie(
+                values=order_counts.values,
+                names=order_counts.index,
+                title="Order Types"
+            )
+            st.plotly_chart(fig_order, use_container_width=True)
+    
+    else:
+        st.warning("No live trade data available.")
+    
+    # PnL Calculation Info
+    with st.expander("PnL Calculation Details"):
+        components_col1, components_col2 = st.columns(2)
+        
+        with components_col1:
+            st.info("""
+            **Platform PnL Components:**
+            - User Trading PnL (Inverse)
+            - Flat Fee Revenue
+            - Funding Fee PnL
+            - Stop Loss Fees
+            - Minus: All Rebates
+            """)
+        
+        with components_col2:
+            st.info("""
+            **Excluded Users:**
+            - 383645340185311232
+            - 383645323663947776
+            - 384014230417035264
+            - 384014656596699136
+            - 384015011585812480
+            - 384015271796238336
+            - 384015526326947840
+            """)
+    
+    # Auto-refresh note
+    st.caption("Live trades refresh every 30 seconds. PnL data refreshes every 60 seconds.")
+
+# Load trading metrics and user data
+with st.spinner("Loading user data..."):
+    trading_metrics_df = fetch_trading_metrics()
+    users_per_day_df = fetch_users_per_day()
+
+# Check if we have data
+if trading_metrics_df is not None:
+    # Tab 2 - All Users
+    with tab2:
+        st.header("All Users")
+        
+        # Add search and filter options
+        st.subheader("Search and Filter")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            search_id = st.text_input("Search by User ID")
+        
+        with col2:
+            trader_filter = st.selectbox(
+                "Filter by Trading Activity", 
+                ["All", "High Activity (>100 trades)", "Medium Activity (10-100 trades)", "Low Activity (<10 trades)"]
+            )
+        
+        # Apply filters
+        filtered_df = trading_metrics_df.copy()
+        
+        if search_id:
+            filtered_df = filtered_df[filtered_df['user_id_str'].str.contains(search_id, na=False)]
+        
+        if trader_filter != "All":
+            if trader_filter == "High Activity (>100 trades)":
+                filtered_df = filtered_df[filtered_df['total_trades'] > 100]
+            elif trader_filter == "Medium Activity (10-100 trades)":
+                filtered_df = filtered_df[(filtered_df['total_trades'] >= 10) & (filtered_df['total_trades'] <= 100)]
+            else:  # Low Activity
+                filtered_df = filtered_df[filtered_df['total_trades'] < 10]
+        
+        # Display users
+        st.subheader(f"User List ({len(filtered_df)} users)")
+        
+        display_cols = ['user_id_str', 'total_trades', 'winning_trades', 'losing_trades', 
+                        'opening_positions', 'closing_positions', 'win_percentage', 'net_pnl']
+        
+        display_df = filtered_df[display_cols].copy()
+        display_df['net_pnl'] = display_df['net_pnl'].round(2)
+        display_df['win_percentage'] = display_df['win_percentage'].round(2)
+        
+        st.dataframe(display_df, use_container_width=True)
+        
+        # User statistics
+        st.subheader("User Statistics")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            total_users = len(trading_metrics_df)
+            st.metric("Total Users", f"{total_users:,}")
+        
+        with col2:
+            active_users = len(trading_metrics_df[trading_metrics_df['total_trades'] > 10])
+            st.metric("Active Users (>10 trades)", f"{active_users:,}")
+        
+        with col3:
+            total_volume = trading_metrics_df['total_trades'].sum()
+            st.metric("Total Trades", f"{total_volume:,}")
+        
+        with col4:
+            profitable_users = len(trading_metrics_df[trading_metrics_df['net_pnl'] > 0])
+            st.metric("Profitable Users", f"{profitable_users:,}")
+    
+    # Tab 3 - Trading Metrics
+    with tab3:
+        st.header("Trading Metrics")
+        
+        # Add filters and display metrics
+        metrics_df = trading_metrics_df.copy()
+        
+        # Display trading metrics table
+        st.subheader(f"Trading Metrics ({len(metrics_df)} users)")
+        
+        metrics_cols = ['user_id_str', 'total_trades', 'winning_trades', 'losing_trades',
+                        'opening_positions', 'closing_positions', 'win_percentage',
+                        'total_profit', 'total_loss', 'net_pnl', 'profit_factor']
+        
+        metrics_display = metrics_df[metrics_cols].copy()
+        
+        # Format columns
+        for col in ['win_percentage', 'profit_factor']:
+            metrics_display[col] = metrics_display[col].round(2)
+        
+        for col in ['total_profit', 'total_loss', 'net_pnl']:
+            metrics_display[col] = metrics_display[col].round(2)
+        
+        st.dataframe(metrics_display, use_container_width=True)
+    
+    # Tab 4 - User Analysis
+    with tab4:
+        st.header("User Analysis")
+        
+        # User selection
+        selected_user = st.selectbox(
+            "Select User",
+            options=trading_metrics_df['user_id_str'].tolist(),
+            format_func=lambda x: f"User ID: {x}"
+        )
+        
+        # Get user data
+        user_data = trading_metrics_df[trading_metrics_df['user_id_str'] == selected_user].iloc[0]
+        
+        # Fetch detailed trade data
+        user_trades = fetch_user_trade_details_v4(selected_user)
+        
+        # Display user summary
+        st.subheader(f"User Summary: {selected_user}")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("Total Trades", f"{user_data['total_trades']:.0f}")
+            st.metric("Win Percentage", f"{user_data['win_percentage']:.2f}%")
+        
+        with col2:
+            st.metric("Net PnL", f"${user_data['net_pnl']:.2f}")
+            st.metric("Profit Factor", f"{user_data['profit_factor']:.2f}")
+        
+        with col3:
+            st.metric("Max Leverage", f"{user_data['max_leverage']:.2f}x")
+            st.metric("Avg Position Size", f"{user_data['avg_position_size']:.2f}")
+        
+        with col4:
+            st.metric("Liquidations", f"{user_data['liquidations']:.0f}")
+            st.metric("Trading Pairs", f"{user_data['num_pairs']:.0f}")
+        
+        if user_trades is not None and len(user_trades) > 0:
+            # Trade history
+            st.subheader("Trade History")
+            
+            # Compact view
+            compact_cols = ['trade_time', 'pair_name', 'trade_type', 'position_action', 
+                            'entry_exit_price', 'size', 'leverage_display', 
+                            'user_received_pnl', 'profit_share', 'profit_share_percent']
+            
+            if 'percent_distance' in user_trades.columns:
+                compact_cols.append('percent_distance')
+            
+            available_cols = [col for col in compact_cols if col in user_trades.columns]
+            display_df = user_trades[available_cols].copy()
+            
+            # Format columns
+            col_mapping = {
+                'trade_time': 'Trade Time',
+                'pair_name': 'Pair',
+                'trade_type': 'Trade Type',
+                'position_action': 'Action',
+                'entry_exit_price': 'Entry/Exit Price',
+                'size': 'Size',
+                'leverage_display': 'Leverage',
+                'user_received_pnl': 'User Received PNL',
+                'profit_share': 'Profit Share',
+                'profit_share_percent': 'Profit Share %',
+                'percent_distance': '% Distance'
+            }
+            
+            display_df.columns = [col_mapping.get(col, col) for col in display_df.columns]
+            
+            # Format numeric columns
+            if 'Entry/Exit Price' in display_df.columns:
+                display_df['Entry/Exit Price'] = display_df['Entry/Exit Price'].round(4)
+            if 'Size' in display_df.columns:
+                display_df['Size'] = display_df['Size'].round(2)
+            if 'User Received PNL' in display_df.columns:
+                display_df['User Received PNL'] = display_df['User Received PNL'].round(2)
+            if 'Profit Share' in display_df.columns:
+                display_df['Profit Share'] = display_df['Profit Share'].round(2)
+            if 'Profit Share %' in display_df.columns:
+                display_df['Profit Share %'] = display_df['Profit Share %'].round(2)
+            if '% Distance' in display_df.columns:
+                display_df['% Distance'] = display_df['% Distance'].round(2)
+            
+            st.dataframe(display_df, use_container_width=True)
+            
+            # PnL timeline - FIXED VERSION
+            st.subheader("PnL Timeline")
+            
+            # Create a dataframe for the chart
+            chart_df = pd.DataFrame()
+            chart_df['trade_time'] = pd.to_datetime(user_trades['trade_time'])
+            chart_df['position_action'] = user_trades['position_action']
+            chart_df['user_received_pnl'] = user_trades['user_received_pnl']
+            
+            # Sort by time
+            chart_df = chart_df.sort_values('trade_time')
+            
+            # Calculate PnL contribution (only for exit trades)
+            chart_df['pnl_contribution'] = chart_df.apply(
+                lambda row: row['user_received_pnl'] if row['position_action'] == 'Exit' else 0, 
+                axis=1
+            )
+            
+            # Calculate cumulative PnL
+            chart_df['cumulative_pnl'] = chart_df['pnl_contribution'].cumsum()
+            
+            # Create the chart
+            fig = px.line(
+                chart_df,
+                x='trade_time',
+                y='cumulative_pnl',
+                title='Cumulative PnL Over Time',
+                labels={'trade_time': 'Trade Time', 'cumulative_pnl': 'Cumulative PnL (USD)'}
+            )
+            
+            # Add markers
+            fig.update_traces(mode='lines+markers')
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Verify cumulative PnL
+            final_cumulative_pnl = chart_df['cumulative_pnl'].iloc[-1]
+            expected_net_pnl = user_data['net_pnl']
+            exit_mask = chart_df['position_action'] == 'Exit'
+            sum_user_received_pnl = chart_df[exit_mask]['user_received_pnl'].sum()
+            
+            st.info(f"""
+            **PnL Verification:**
+            - Sum of User Received PnL (Exit trades only): ${sum_user_received_pnl:.2f}
+            - Final Cumulative PnL: ${final_cumulative_pnl:.2f}
+            - Expected Net PnL (from metrics): ${expected_net_pnl:.2f}
+            - Difference: ${abs(final_cumulative_pnl - expected_net_pnl):.2f}
+            
+            The cumulative PnL is the sum of user_received_pnl for exit trades only.
+            """)
+            
+        else:
+            st.warning("No trade data available for this user.")
+else:
+    st.error("Failed to load user data.")
+
+# Add refresh button in sidebar
+st.sidebar.title("Dashboard Controls")
+if st.sidebar.button("Refresh Data"):
+    st.cache_data.clear()
+    st.rerun()
+
+# Add dashboard info
+st.sidebar.title("About This Dashboard")
+st.sidebar.info("""
+This dashboard provides comprehensive analysis of user behavior and live platform PnL.
+
+**Live Trades:**
+- Shows real-time platform PnL
+- Daily PnL reset at 00:00 SGT
+- All-time PnL since launch
+- Excludes specified test accounts
+
+**PnL Calculations:**
+- User Received PNL = taker_pnl * collateral_price
+- Profit Share = taker_share_pnl * collateral_price
+- % Distance = (Pbefore - Pentry) / Pentry * 100
+
+The cumulative PnL is the sum of user_received_pnl for exit trades only.
+""")):
+                # Extract numeric value from string
+                num_val = float(val.replace('
+        
+        # Trade statistics
+        st.subheader("Recent Trade Statistics")
+        
+        stats_col1, stats_col2, stats_col3, stats_col4 = st.columns(4)
+        
+        with stats_col1:
+            total_trades = len(live_trades_df)
+            st.metric("Total Trades (Last 100)", f"{total_trades:,}")
+        
+        with stats_col2:
+            total_volume = live_trades_df['volume_usd'].sum()
+            st.metric("Total Volume ($)", f"${total_volume:,.2f}")
+        
+        with stats_col3:
+            avg_leverage = live_trades_df['leverage'].mean()
+            st.metric("Average Leverage", f"{avg_leverage:.1f}x")
+        
+        with stats_col4:
+            unique_users = live_trades_df['user_id_str'].nunique()
+            st.metric("Active Users", f"{unique_users:,}")
+        
+        # Trade type breakdown
+        st.subheader("Trade Type Breakdown")
+        
+        type_col1, type_col2 = st.columns(2)
+        
+        with type_col1:
+            # Trade action breakdown
+            action_counts = live_trades_df['taker_way_display'].value_counts()
+            fig_action = px.pie(
+                values=action_counts.values,
+                names=action_counts.index,
+                title="Trade Actions"
+            )
+            st.plotly_chart(fig_action, use_container_width=True)
+        
+        with type_col2:
+            # Order type breakdown
+            order_counts = live_trades_df['taker_mode_display'].value_counts()
+            fig_order = px.pie(
+                values=order_counts.values,
+                names=order_counts.index,
+                title="Order Types"
+            )
+            st.plotly_chart(fig_order, use_container_width=True)
+    
+    else:
+        st.warning("No live trade data available.")
+    
+    # PnL Calculation Info
+    with st.expander("PnL Calculation Details"):
+        components_col1, components_col2 = st.columns(2)
+        
+        with components_col1:
+            st.info("""
+            **Platform PnL Components:**
+            - User Trading PnL (Inverse)
+            - Flat Fee Revenue
+            - Funding Fee PnL
+            - Stop Loss Fees
+            - Minus: All Rebates
+            """)
+        
+        with components_col2:
+            st.info("""
+            **Excluded Users:**
+            - 383645340185311232
+            - 383645323663947776
+            - 384014230417035264
+            - 384014656596699136
+            - 384015011585812480
+            - 384015271796238336
+            - 384015526326947840
+            """)
+    
+    # Auto-refresh note
+    st.caption("Live trades refresh every 30 seconds. PnL data refreshes every 60 seconds.")
+
+# Load trading metrics and user data
+with st.spinner("Loading user data..."):
+    trading_metrics_df = fetch_trading_metrics()
+    users_per_day_df = fetch_users_per_day()
+
+# Check if we have data
+if trading_metrics_df is not None:
+    # Tab 2 - All Users
+    with tab2:
+        st.header("All Users")
+        
+        # Add search and filter options
+        st.subheader("Search and Filter")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            search_id = st.text_input("Search by User ID")
+        
+        with col2:
+            trader_filter = st.selectbox(
+                "Filter by Trading Activity", 
+                ["All", "High Activity (>100 trades)", "Medium Activity (10-100 trades)", "Low Activity (<10 trades)"]
+            )
+        
+        # Apply filters
+        filtered_df = trading_metrics_df.copy()
+        
+        if search_id:
+            filtered_df = filtered_df[filtered_df['user_id_str'].str.contains(search_id, na=False)]
+        
+        if trader_filter != "All":
+            if trader_filter == "High Activity (>100 trades)":
+                filtered_df = filtered_df[filtered_df['total_trades'] > 100]
+            elif trader_filter == "Medium Activity (10-100 trades)":
+                filtered_df = filtered_df[(filtered_df['total_trades'] >= 10) & (filtered_df['total_trades'] <= 100)]
+            else:  # Low Activity
+                filtered_df = filtered_df[filtered_df['total_trades'] < 10]
+        
+        # Display users
+        st.subheader(f"User List ({len(filtered_df)} users)")
+        
+        display_cols = ['user_id_str', 'total_trades', 'winning_trades', 'losing_trades', 
+                        'opening_positions', 'closing_positions', 'win_percentage', 'net_pnl']
+        
+        display_df = filtered_df[display_cols].copy()
+        display_df['net_pnl'] = display_df['net_pnl'].round(2)
+        display_df['win_percentage'] = display_df['win_percentage'].round(2)
+        
+        st.dataframe(display_df, use_container_width=True)
+        
+        # User statistics
+        st.subheader("User Statistics")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            total_users = len(trading_metrics_df)
+            st.metric("Total Users", f"{total_users:,}")
+        
+        with col2:
+            active_users = len(trading_metrics_df[trading_metrics_df['total_trades'] > 10])
+            st.metric("Active Users (>10 trades)", f"{active_users:,}")
+        
+        with col3:
+            total_volume = trading_metrics_df['total_trades'].sum()
+            st.metric("Total Trades", f"{total_volume:,}")
+        
+        with col4:
+            profitable_users = len(trading_metrics_df[trading_metrics_df['net_pnl'] > 0])
+            st.metric("Profitable Users", f"{profitable_users:,}")
+    
+    # Tab 3 - Trading Metrics
+    with tab3:
+        st.header("Trading Metrics")
+        
+        # Add filters and display metrics
+        metrics_df = trading_metrics_df.copy()
+        
+        # Display trading metrics table
+        st.subheader(f"Trading Metrics ({len(metrics_df)} users)")
+        
+        metrics_cols = ['user_id_str', 'total_trades', 'winning_trades', 'losing_trades',
+                        'opening_positions', 'closing_positions', 'win_percentage',
+                        'total_profit', 'total_loss', 'net_pnl', 'profit_factor']
+        
+        metrics_display = metrics_df[metrics_cols].copy()
+        
+        # Format columns
+        for col in ['win_percentage', 'profit_factor']:
+            metrics_display[col] = metrics_display[col].round(2)
+        
+        for col in ['total_profit', 'total_loss', 'net_pnl']:
+            metrics_display[col] = metrics_display[col].round(2)
+        
+        st.dataframe(metrics_display, use_container_width=True)
+    
+    # Tab 4 - User Analysis
+    with tab4:
+        st.header("User Analysis")
+        
+        # User selection
+        selected_user = st.selectbox(
+            "Select User",
+            options=trading_metrics_df['user_id_str'].tolist(),
+            format_func=lambda x: f"User ID: {x}"
+        )
+        
+        # Get user data
+        user_data = trading_metrics_df[trading_metrics_df['user_id_str'] == selected_user].iloc[0]
+        
+        # Fetch detailed trade data
+        user_trades = fetch_user_trade_details_v4(selected_user)
+        
+        # Display user summary
+        st.subheader(f"User Summary: {selected_user}")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("Total Trades", f"{user_data['total_trades']:.0f}")
+            st.metric("Win Percentage", f"{user_data['win_percentage']:.2f}%")
+        
+        with col2:
+            st.metric("Net PnL", f"${user_data['net_pnl']:.2f}")
+            st.metric("Profit Factor", f"{user_data['profit_factor']:.2f}")
+        
+        with col3:
+            st.metric("Max Leverage", f"{user_data['max_leverage']:.2f}x")
+            st.metric("Avg Position Size", f"{user_data['avg_position_size']:.2f}")
+        
+        with col4:
+            st.metric("Liquidations", f"{user_data['liquidations']:.0f}")
+            st.metric("Trading Pairs", f"{user_data['num_pairs']:.0f}")
+        
+        if user_trades is not None and len(user_trades) > 0:
+            # Trade history
+            st.subheader("Trade History")
+            
+            # Compact view
+            compact_cols = ['trade_time', 'pair_name', 'trade_type', 'position_action', 
+                            'entry_exit_price', 'size', 'leverage_display', 
+                            'user_received_pnl', 'profit_share', 'profit_share_percent']
+            
+            if 'percent_distance' in user_trades.columns:
+                compact_cols.append('percent_distance')
+            
+            available_cols = [col for col in compact_cols if col in user_trades.columns]
+            display_df = user_trades[available_cols].copy()
+            
+            # Format columns
+            col_mapping = {
+                'trade_time': 'Trade Time',
+                'pair_name': 'Pair',
+                'trade_type': 'Trade Type',
+                'position_action': 'Action',
+                'entry_exit_price': 'Entry/Exit Price',
+                'size': 'Size',
+                'leverage_display': 'Leverage',
+                'user_received_pnl': 'User Received PNL',
+                'profit_share': 'Profit Share',
+                'profit_share_percent': 'Profit Share %',
+                'percent_distance': '% Distance'
+            }
+            
+            display_df.columns = [col_mapping.get(col, col) for col in display_df.columns]
+            
+            # Format numeric columns
+            if 'Entry/Exit Price' in display_df.columns:
+                display_df['Entry/Exit Price'] = display_df['Entry/Exit Price'].round(4)
+            if 'Size' in display_df.columns:
+                display_df['Size'] = display_df['Size'].round(2)
+            if 'User Received PNL' in display_df.columns:
+                display_df['User Received PNL'] = display_df['User Received PNL'].round(2)
+            if 'Profit Share' in display_df.columns:
+                display_df['Profit Share'] = display_df['Profit Share'].round(2)
+            if 'Profit Share %' in display_df.columns:
+                display_df['Profit Share %'] = display_df['Profit Share %'].round(2)
+            if '% Distance' in display_df.columns:
+                display_df['% Distance'] = display_df['% Distance'].round(2)
+            
+            st.dataframe(display_df, use_container_width=True)
+            
+            # PnL timeline - FIXED VERSION
+            st.subheader("PnL Timeline")
+            
+            # Create a dataframe for the chart
+            chart_df = pd.DataFrame()
+            chart_df['trade_time'] = pd.to_datetime(user_trades['trade_time'])
+            chart_df['position_action'] = user_trades['position_action']
+            chart_df['user_received_pnl'] = user_trades['user_received_pnl']
+            
+            # Sort by time
+            chart_df = chart_df.sort_values('trade_time')
+            
+            # Calculate PnL contribution (only for exit trades)
+            chart_df['pnl_contribution'] = chart_df.apply(
+                lambda row: row['user_received_pnl'] if row['position_action'] == 'Exit' else 0, 
+                axis=1
+            )
+            
+            # Calculate cumulative PnL
+            chart_df['cumulative_pnl'] = chart_df['pnl_contribution'].cumsum()
+            
+            # Create the chart
+            fig = px.line(
+                chart_df,
+                x='trade_time',
+                y='cumulative_pnl',
+                title='Cumulative PnL Over Time',
+                labels={'trade_time': 'Trade Time', 'cumulative_pnl': 'Cumulative PnL (USD)'}
+            )
+            
+            # Add markers
+            fig.update_traces(mode='lines+markers')
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Verify cumulative PnL
+            final_cumulative_pnl = chart_df['cumulative_pnl'].iloc[-1]
+            expected_net_pnl = user_data['net_pnl']
+            exit_mask = chart_df['position_action'] == 'Exit'
+            sum_user_received_pnl = chart_df[exit_mask]['user_received_pnl'].sum()
+            
+            st.info(f"""
+            **PnL Verification:**
+            - Sum of User Received PnL (Exit trades only): ${sum_user_received_pnl:.2f}
+            - Final Cumulative PnL: ${final_cumulative_pnl:.2f}
+            - Expected Net PnL (from metrics): ${expected_net_pnl:.2f}
+            - Difference: ${abs(final_cumulative_pnl - expected_net_pnl):.2f}
+            
+            The cumulative PnL is the sum of user_received_pnl for exit trades only.
+            """)
+            
+        else:
+            st.warning("No trade data available for this user.")
+else:
+    st.error("Failed to load user data.")
+
+# Add refresh button in sidebar
+st.sidebar.title("Dashboard Controls")
+if st.sidebar.button("Refresh Data"):
+    st.cache_data.clear()
+    st.rerun()
+
+# Add dashboard info
+st.sidebar.title("About This Dashboard")
+st.sidebar.info("""
+This dashboard provides comprehensive analysis of user behavior and live platform PnL.
+
+**Live Trades:**
+- Shows real-time platform PnL
+- Daily PnL reset at 00:00 SGT
+- All-time PnL since launch
+- Excludes specified test accounts
+
+**PnL Calculations:**
+- User Received PNL = taker_pnl * collateral_price
+- Profit Share = taker_share_pnl * collateral_price
+- % Distance = (Pbefore - Pentry) / Pentry * 100
+
+The cumulative PnL is the sum of user_received_pnl for exit trades only.
+"""), '').replace(',', ''))
+                color = 'green' if num_val >= 0 else 'red'
                 return f'color: {color}'
             return ''
         
         styled_df = live_display_df.style.applymap(
-            color_pnl, 
-            subset=['User PnL ($)']
+            style_pnl_value, 
+            subset=['Order PNL', 'User Received PNL']
         )
         
         # Display the dataframe
