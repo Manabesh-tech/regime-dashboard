@@ -100,7 +100,7 @@ def get_partition_tables(start_date, end_date):
     
     return existing_tables
 
-# Build query for partition tables
+# Build query for partition tables - Modified for 500ms data
 def build_query(tables, token, start_time, end_time):
     if not tables:
         return ""
@@ -120,10 +120,11 @@ def build_query(tables, token, start_time, end_time):
             AND created_at <= '{end_time}'::timestamp - INTERVAL '8 hour'
             AND source_type = 0
             AND pair_name = '{token}'
+        ORDER BY created_at
         """
         union_parts.append(query)
     
-    return " UNION ".join(union_parts) + " ORDER BY timestamp"
+    return " UNION ALL ".join(union_parts) + " ORDER BY timestamp"
 
 # Calculate volatility
 @st.cache_data(ttl=60)  # Short cache to ensure fresh data
@@ -156,7 +157,10 @@ def get_volatility_data(token, hours=24):
     # Process timestamps
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df = df.set_index('timestamp').sort_index()
-    price_data = df['final_price'].dropna()
+    
+    # Resample to 500ms intervals
+    # Method 1: Forward fill to ensure we have data at 500ms intervals
+    price_data = df['final_price'].resample('500ms').ffill().dropna()
     
     # Create 5-minute windows
     result = []
@@ -178,12 +182,13 @@ def get_volatility_data(token, hours=24):
             window_low = window_data.min()
             window_close = window_data.iloc[-1]
             
-            # Calculate volatility using 1-second data points
+            # Calculate volatility using 500ms data points
             # Log returns
             log_returns = np.diff(np.log(window_data.values))
             
-            # Annualize: seconds in year / seconds in 5 minutes
-            annualization_factor = np.sqrt(31536000 / 300)
+            # Annualize: 500ms intervals in year / 500ms intervals in 5 minutes
+            # There are 63,072,000 half-seconds in a year and 600 half-seconds in 5 minutes
+            annualization_factor = np.sqrt(63072000 / 600)
             volatility = np.std(log_returns) * annualization_factor
             
             result.append({
@@ -192,7 +197,9 @@ def get_volatility_data(token, hours=24):
                 'high': window_high, 
                 'low': window_low,
                 'close': window_close,
-                'realized_vol': volatility
+                'realized_vol': volatility,
+                'data_points': len(window_data),  # Track how many 500ms points we have
+                'actual_data_interval': 0.5  # 500ms
             })
     
     # Create dataframe and get last 24 hours of data
@@ -220,6 +227,7 @@ if vol_data is not None and not vol_data.empty:
     avg_vol = vol_data_pct['realized_vol'].mean()
     max_vol = vol_data_pct['realized_vol'].max()
     current_vol = vol_data_pct['realized_vol'].iloc[-1]
+    avg_data_points = vol_data_pct['data_points'].mean()
     
     # Set y-axis limits to ensure visibility
     y_max = max(20, max_vol * 1.2)
@@ -227,8 +235,8 @@ if vol_data is not None and not vol_data.empty:
     # Create figure
     fig = go.Figure()
     
-    # Title
-    title = f"{selected_token} Annualized Volatility (5min)<br>Current: {current_vol:.1f}%, Avg: {avg_vol:.1f}%, Max: {max_vol:.1f}%"
+    # Title - now showing it's using 500ms data
+    title = f"{selected_token} Annualized Volatility (5min windows, 500ms data)<br>Current: {current_vol:.1f}%, Avg: {avg_vol:.1f}%, Max: {max_vol:.1f}%<br>Avg data points per window: {avg_data_points:.0f}"
     
     # Color coding
     colors = []
@@ -244,7 +252,7 @@ if vol_data is not None and not vol_data.empty:
         else:
             colors.append('red')
     
-    # Add volatility line
+    # Add volatility line with enhanced hover info
     fig.add_trace(
         go.Scatter(
             x=vol_data_pct.index,
@@ -253,7 +261,8 @@ if vol_data is not None and not vol_data.empty:
             line=dict(color='blue', width=2),
             marker=dict(color=colors, size=7),
             name="Volatility",
-            hovertemplate="<b>%{x}</b><br>Vol: %{y:.1f}%<extra></extra>"
+            customdata=vol_data_pct['data_points'],
+            hovertemplate="<b>%{x}</b><br>Vol: %{y:.1f}%<br>Data points: %{customdata}<extra></extra>"
         )
     )
     
@@ -303,14 +312,16 @@ if vol_data is not None and not vol_data.empty:
     st.markdown(f"- First data point: {vol_data.index[0].strftime('%Y-%m-%d %H:%M')}")
     st.markdown(f"- Last data point: {vol_data.index[-1].strftime('%Y-%m-%d %H:%M')}")
     st.markdown(f"- Most recent: {(now_sg - vol_data.index[-1]).total_seconds() / 60:.1f} minutes ago")
+    st.markdown(f"- Data granularity: 500ms")
     
     # Display highest volatility periods
     st.subheader("Highest Volatility Periods")
     top_periods = vol_data_pct.sort_values(by='realized_vol', ascending=False).head(5)
     top_periods['Time'] = top_periods.index.strftime('%Y-%m-%d %H:%M')
     top_periods['Volatility (%)'] = top_periods['realized_vol'].round(1)
+    top_periods['Data Points'] = top_periods['data_points'].astype(int)
     
-    st.table(top_periods[['Time', 'Volatility (%)']])
+    st.table(top_periods[['Time', 'Volatility (%)', 'Data Points']])
     
 else:
     st.error("No volatility data available for the selected token")
