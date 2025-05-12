@@ -143,6 +143,7 @@ def fetch_user_trade_details(user_id):
       pair_name,
       taker_way,
       CASE
+        WHEN taker_way = 0 THEN 'Funding Fee'
         WHEN taker_way = 1 THEN 'Open Long'
         WHEN taker_way = 2 THEN 'Close Short'
         WHEN taker_way = 3 THEN 'Open Short'
@@ -150,9 +151,11 @@ def fetch_user_trade_details(user_id):
       END AS trade_type,
       CASE
         WHEN taker_way IN (1, 3) THEN 'Entry'
-        ELSE 'Exit'
+        WHEN taker_way IN (2, 4) THEN 'Exit'
+        ELSE 'Fee'
       END AS position_action,
       taker_mode,
+      taker_fee_mode,
       CASE
         WHEN taker_mode = 1 THEN 'Active'
         WHEN taker_mode = 2 THEN 'Take Profit'
@@ -168,12 +171,45 @@ def fetch_user_trade_details(user_id):
       collateral_price,
       taker_pnl,
       taker_share_pnl,
+      taker_fee,
+      taker_sl_fee,
+      maker_sl_fee,
+      funding_fee,
       -- Calculate order PnL (including profit share)
       (taker_pnl + taker_share_pnl) * collateral_price AS order_pnl,
       -- Calculate profit share in USD
       taker_share_pnl * collateral_price AS profit_share_usd,
       -- Calculate user received PnL (order PnL - profit share)
       taker_pnl * collateral_price AS user_received_pnl,
+      -- Calculate fee costs
+      CASE 
+        WHEN taker_fee_mode = 1 AND taker_way IN (1, 3) 
+        THEN taker_fee * collateral_price
+        ELSE 0
+      END AS fee_cost_usd,
+      -- Calculate funding fee in USD
+      CASE 
+        WHEN taker_way = 0 
+        THEN funding_fee * collateral_price
+        ELSE 0
+      END AS funding_fee_usd,
+      -- Calculate social loss fees
+      (COALESCE(taker_sl_fee, 0) * collateral_price + COALESCE(maker_sl_fee, 0)) AS social_loss_fee_usd,
+      -- Calculate actual PnL contribution (matching the SQL you provided)
+      CASE WHEN taker_way IN (1, 2, 3, 4) 
+           THEN COALESCE(taker_pnl, 0) * COALESCE(collateral_price, 0) 
+           ELSE 0 
+      END
+      + CASE WHEN taker_way = 0 
+             THEN COALESCE(funding_fee, 0) * COALESCE(collateral_price, 0) 
+             ELSE 0 
+      END
+      - CASE WHEN taker_fee_mode = 1 AND taker_way IN (1, 3) 
+             THEN COALESCE(taker_fee, 0) * COALESCE(collateral_price, 0) 
+             ELSE 0 
+      END
+      - (COALESCE(taker_sl_fee, 0) * COALESCE(collateral_price, 0) + COALESCE(maker_sl_fee, 0))
+      AS pnl_contribution,
       -- Calculate profit share percentage
       CASE 
         WHEN (taker_pnl + taker_share_pnl) != 0 THEN 
@@ -719,7 +755,8 @@ if trading_metrics_df is not None:
                 st.write("Raw Data Sample (first 5 trades):")
                 debug_cols = ['trade_time', 'pair_name', 'trade_type', 'taker_pnl', 'collateral_price', 
                              'user_received_pnl', 'order_pnl', 'taker_share_pnl', 'profit_share_usd', 
-                             'profit_share_percent', 'size', 'entry_exit_price']
+                             'profit_share_percent', 'size', 'entry_exit_price', 'fee_cost_usd',
+                             'social_loss_fee_usd', 'pnl_contribution']
                 # Only include columns that exist in the dataframe
                 available_debug_cols = [col for col in debug_cols if col in user_trades.columns]
                 debug_df = user_trades[available_debug_cols].head(5)
@@ -736,6 +773,7 @@ if trading_metrics_df is not None:
                     st.write(f"Actual order_pnl from query: {first_trade['order_pnl']}")
                     st.write(f"User received PnL (taker_pnl * collateral_price): {first_trade['taker_pnl'] * first_trade['collateral_price']}")
                     st.write(f"Actual user_received_pnl from query: {first_trade['user_received_pnl']}")
+                    st.write(f"PnL contribution: {first_trade['pnl_contribution']}")
             
             # Create two views - compact and detailed
             view_option = st.radio("Select View", ["Compact View", "Detailed View"], horizontal=True)
@@ -745,7 +783,7 @@ if trading_metrics_df is not None:
                 compact_cols = ['trade_time', 'pair_name', 'trade_type', 'position_action', 
                                 'entry_exit_price', 'size', 'leverage_display', 
                                 'order_pnl', 'user_received_pnl', 'profit_share_usd', 
-                                'profit_share_percent']
+                                'profit_share_percent', 'pnl_contribution']
                 
                 # Add percent_distance only if it exists (for exit trades)
                 if 'percent_distance' in user_trades.columns:
@@ -770,6 +808,7 @@ if trading_metrics_df is not None:
                     'user_received_pnl': 'User Received PNL',
                     'profit_share_usd': 'Profit Share',
                     'profit_share_percent': 'Profit Share %',
+                    'pnl_contribution': 'Net PnL Impact',
                     'percent_distance': '% Distance'
                 }
                 
@@ -789,6 +828,8 @@ if trading_metrics_df is not None:
                     display_df['Profit Share'] = display_df['Profit Share'].round(2)
                 if 'Profit Share %' in display_df.columns:
                     display_df['Profit Share %'] = display_df['Profit Share %'].round(2)
+                if 'Net PnL Impact' in display_df.columns:
+                    display_df['Net PnL Impact'] = display_df['Net PnL Impact'].round(2)
                 if '% Distance' in display_df.columns:
                     display_df['% Distance'] = display_df['% Distance'].round(4)
                 
@@ -930,11 +971,8 @@ if trading_metrics_df is not None:
             # Sort chronologically
             user_trades = user_trades.sort_values('trade_time')
             
-            # Calculate cumulative PnL using user_received_pnl for closed positions only
-            user_trades['trade_pnl_for_cumulative'] = 0
-            exit_mask = user_trades['position_action'] == 'Exit'
-            user_trades.loc[exit_mask, 'trade_pnl_for_cumulative'] = user_trades.loc[exit_mask, 'user_received_pnl']
-            user_trades['cumulative_pnl'] = user_trades['trade_pnl_for_cumulative'].cumsum()
+            # Calculate cumulative PnL using user_received_pnl (taker_pnl * collateral_price)
+            # This should match the net_p
             
             # Create line chart
             fig = px.line(
@@ -1105,6 +1143,12 @@ This dashboard provides comprehensive analysis of user behavior in the trading p
 - Profit Share = taker_share_pnl * collateral_price
 - % Profit Share = (profit_share / order_pnl) * 100
 - % Distance = (Pbefore - Pentry) / Pentry * 100
+
+**Net PnL Contribution includes:**
+- Position PnL (for trades)
+- Trading fees (for opening positions)
+- Social loss fees (all trades)
+- Funding fees (when applicable)
 
 Data is sourced from the trade_fill_fresh table in the database.
 """)
