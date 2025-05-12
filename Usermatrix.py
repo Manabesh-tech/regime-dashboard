@@ -139,101 +139,88 @@ def fetch_trading_metrics():
 @st.cache_data(ttl=600)
 def fetch_user_trade_details(user_id):
     query = f"""
-    WITH trade_data AS (
-      SELECT
-        pair_name,
-        taker_way,
-        CASE
-          WHEN taker_way = 1 THEN 'Open Long'
-          WHEN taker_way = 2 THEN 'Close Short'
-          WHEN taker_way = 3 THEN 'Open Short'
-          WHEN taker_way = 4 THEN 'Close Long'
-        END AS trade_type,
-        CASE
-          WHEN taker_way IN (1, 3) THEN 'Entry'
-          ELSE 'Exit'
-        END AS position_action,
-        taker_mode,
-        CASE
-          WHEN taker_mode = 1 THEN 'Active'
-          WHEN taker_mode = 2 THEN 'Take Profit'
-          WHEN taker_mode = 3 THEN 'Stop Loss'
-          WHEN taker_mode = 4 THEN 'Liquidation'
-        END AS order_type,
-        deal_price AS entry_exit_price,
-        leverage,
-        leverage || 'x' AS leverage_display,
-        deal_size AS size,
-        collateral_amount AS collateral,
-        taker_pnl * collateral_price AS trade_pnl,
-        taker_share_pnl * collateral_price AS profit_share_usd,
-        CASE 
-          WHEN taker_pnl * collateral_price != 0 THEN 
-            (taker_share_pnl * collateral_price) / (taker_pnl * collateral_price) * 100
-          ELSE 0
-        END AS profit_share_percent,
-        created_at + INTERVAL '8 hour' AS trade_time,
-        created_at,
-        taker_account_id
-      FROM
-        public.trade_fill_fresh
-      WHERE
-        CONCAT(taker_account_id, '') = '{user_id}'
-    ),
-    entry_prices AS (
-      SELECT
-        taker_account_id,
-        pair_name,
-        created_at as entry_time,
-        deal_price as entry_price,
-        ROW_NUMBER() OVER (PARTITION BY taker_account_id, pair_name ORDER BY created_at DESC) as rn
-      FROM
-        public.trade_fill_fresh
-      WHERE
-        CONCAT(taker_account_id, '') = '{user_id}'
-        AND taker_way IN (1, 3)
-    )
     SELECT
-      t.*,
+      pair_name,
+      taker_way,
+      CASE
+        WHEN taker_way = 1 THEN 'Open Long'
+        WHEN taker_way = 2 THEN 'Close Short'
+        WHEN taker_way = 3 THEN 'Open Short'
+        WHEN taker_way = 4 THEN 'Close Long'
+      END AS trade_type,
+      CASE
+        WHEN taker_way IN (1, 3) THEN 'Entry'
+        ELSE 'Exit'
+      END AS position_action,
+      taker_mode,
+      CASE
+        WHEN taker_mode = 1 THEN 'Active'
+        WHEN taker_mode = 2 THEN 'Take Profit'
+        WHEN taker_mode = 3 THEN 'Stop Loss'
+        WHEN taker_mode = 4 THEN 'Liquidation'
+      END AS order_type,
+      deal_price AS entry_exit_price,
+      leverage,
+      leverage || 'x' AS leverage_display,
+      deal_size AS size,
+      deal_vol AS volume,
+      collateral_amount AS collateral,
+      collateral_price,
+      taker_pnl,
+      taker_share_pnl,
+      taker_pnl * collateral_price AS trade_pnl,
+      taker_share_pnl * collateral_price AS profit_share_usd,
       CASE 
-        WHEN t.position_action = 'Exit' AND t.profit_share_usd > 0 THEN 
-          t.entry_exit_price - (t.profit_share_usd / t.size)
-        WHEN t.position_action = 'Exit' AND t.profit_share_usd < 0 THEN 
-          t.entry_exit_price - (t.profit_share_usd / t.size)
-        ELSE NULL
-      END AS pre_profit_share_exit,
-      CASE 
-        WHEN t.position_action = 'Exit' THEN 
-          t.entry_exit_price
-        ELSE NULL
-      END AS post_profit_share_exit,
-      CASE 
-        WHEN t.position_action = 'Exit' AND e.entry_price IS NOT NULL THEN 
-          ((t.entry_exit_price - (t.profit_share_usd / t.size) - e.entry_price) / e.entry_price) * 100
-        ELSE NULL
-      END AS percent_move,
-      e.entry_price AS matched_entry_price
+        WHEN taker_pnl * collateral_price != 0 THEN 
+          (taker_share_pnl * collateral_price) / (taker_pnl * collateral_price) * 100
+        ELSE 0
+      END AS profit_share_percent,
+      created_at + INTERVAL '8 hour' AS trade_time,
+      created_at
     FROM
-      trade_data t
-    LEFT JOIN LATERAL (
-      SELECT entry_price
-      FROM entry_prices e
-      WHERE e.taker_account_id = t.taker_account_id
-        AND e.pair_name = t.pair_name
-        AND e.entry_time < t.created_at
-      ORDER BY e.entry_time DESC
-      LIMIT 1
-    ) e ON true
+      public.trade_fill_fresh
+    WHERE
+      CONCAT(taker_account_id, '') = '{user_id}'
     ORDER BY
-      t.created_at DESC
+      created_at DESC
     LIMIT 1000
     """
     
     try:
         df = pd.read_sql(query, conn)
+        
+        # Add post-processing calculations
+        df['pre_profit_share_exit'] = None
+        df['post_profit_share_exit'] = None
+        df['percent_move'] = None
+        df['matched_entry_price'] = None
+        
+        # For exit trades, calculate pre/post profit share prices
+        exit_mask = df['position_action'] == 'Exit'
+        df.loc[exit_mask, 'pre_profit_share_exit'] = df.loc[exit_mask, 'entry_exit_price'] - (df.loc[exit_mask, 'profit_share_usd'] / df.loc[exit_mask, 'size'])
+        df.loc[exit_mask, 'post_profit_share_exit'] = df.loc[exit_mask, 'entry_exit_price']
+        
+        # Match entry prices for exits and calculate % move
+        for idx, row in df[exit_mask].iterrows():
+            # Find the most recent entry for this pair
+            entry_trades = df[(df['pair_name'] == row['pair_name']) & 
+                            (df['position_action'] == 'Entry') & 
+                            (df['created_at'] < row['created_at'])]
+            
+            if not entry_trades.empty:
+                entry_price = entry_trades.iloc[0]['entry_exit_price']
+                df.loc[idx, 'matched_entry_price'] = entry_price
+                
+                # Calculate % move: (pre_profit_share_exit - entry) / entry * 100
+                pre_exit = df.loc[idx, 'pre_profit_share_exit']
+                if entry_price != 0:
+                    df.loc[idx, 'percent_move'] = ((pre_exit - entry_price) / entry_price) * 100
+        
         return df
     except Exception as e:
         st.error(f"Error fetching trade details for user {user_id}: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 # Function to count users per day (based on first trade date)
@@ -714,6 +701,15 @@ if trading_metrics_df is not None:
             # Trade history
             st.subheader("Trade History")
             
+            # Debug mode checkbox
+            show_debug = st.checkbox("Show Debug Info", value=False)
+            
+            if show_debug:
+                st.write("Raw Data Sample:")
+                debug_cols = ['trade_time', 'pair_name', 'trade_type', 'taker_pnl', 'collateral_price', 
+                             'trade_pnl', 'taker_share_pnl', 'profit_share_usd']
+                st.dataframe(user_trades[debug_cols].head(5))
+            
             # Create two views - compact and detailed
             view_option = st.radio("Select View", ["Compact View", "Detailed View"], horizontal=True)
             
@@ -723,8 +719,10 @@ if trading_metrics_df is not None:
                                 'entry_exit_price', 'size', 'leverage_display', 
                                 'trade_pnl', 'profit_share_usd', 'profit_share_percent']
                 
-                # Rename columns for display
+                # Create display dataframe
                 display_df = user_trades[compact_cols].copy()
+                
+                # Rename columns for display
                 display_df.columns = ['Trade Time', 'Pair', 'Trade Type', 'Action',
                                     'Entry/Exit Price', 'Size', 'Leverage',
                                     'Trade PNL', 'Profit Share', 'Profit Share %']
@@ -744,14 +742,28 @@ if trading_metrics_df is not None:
                     st.subheader("Exit Trade Details")
                     exit_cols = ['trade_time', 'pair_name', 'pre_profit_share_exit', 
                                'post_profit_share_exit', 'matched_entry_price', 'percent_move']
-                    exit_display = exit_trades[exit_cols].copy()
-                    exit_display.columns = ['Trade Time', 'Pair', 'Pre Profit Share Exit',
-                                          'Post Profit Share Exit', 'Entry Price', '% Move']
+                    
+                    # Check if all columns exist
+                    available_cols = [col for col in exit_cols if col in exit_trades.columns]
+                    exit_display = exit_trades[available_cols].copy()
+                    
+                    # Rename columns
+                    col_mapping = {
+                        'trade_time': 'Trade Time',
+                        'pair_name': 'Pair',
+                        'pre_profit_share_exit': 'Pre Profit Share Exit',
+                        'post_profit_share_exit': 'Post Profit Share Exit',
+                        'matched_entry_price': 'Entry Price',
+                        'percent_move': '% Move'
+                    }
+                    exit_display.columns = [col_mapping.get(col, col) for col in exit_display.columns]
                     
                     # Format columns
                     for col in ['Pre Profit Share Exit', 'Post Profit Share Exit', 'Entry Price']:
-                        exit_display[col] = exit_display[col].round(8)
-                    exit_display['% Move'] = exit_display['% Move'].round(4)
+                        if col in exit_display.columns:
+                            exit_display[col] = exit_display[col].round(8)
+                    if '% Move' in exit_display.columns:
+                        exit_display['% Move'] = exit_display['% Move'].round(4)
                     
                     st.dataframe(exit_display, use_container_width=True)
                 
