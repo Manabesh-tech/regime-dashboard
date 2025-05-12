@@ -142,54 +142,53 @@ def fetch_daily_pnl():
 def fetch_live_trades():
     query = """
     SELECT
-      "public"."surfv2_trade"."id" AS "id",
-      "public"."surfv2_trade"."pair_name" AS "pair_name",
-      "public"."surfv2_trade"."deal_price" AS "deal_price",
-      "public"."surfv2_trade"."deal_vol" AS "deal_vol",
-      "public"."surfv2_trade"."deal_size" AS "deal_size",
-      "public"."surfv2_trade"."leverage" AS "leverage",
-      "public"."surfv2_trade"."coin_name" AS "coin_name",
-      "public"."surfv2_trade"."taker_type" AS "taker_type",
-      "public"."surfv2_trade"."taker_way" AS "taker_way",
-      "public"."surfv2_trade"."taker_mode" AS "taker_mode",
-      "public"."surfv2_trade"."collateral_price" AS "collateral_price",
-      "public"."surfv2_trade"."taker_fee_mode" AS "taker_fee_mode",
-      "public"."surfv2_trade"."taker_fee" AS "taker_fee",
-      "public"."surfv2_trade"."taker_pnl" AS "taker_pnl",
-      "public"."surfv2_trade"."trigger_price" AS "trigger_price",
-      "public"."surfv2_trade"."taker_share_pnl" AS "taker_share_pnl",
-      CONCAT("public"."surfv2_trade"."taker_account_id", '') AS "user_id_str",
-      ("public"."surfv2_trade"."created_at" + INTERVAL '8 hour') AS "trade_time",
+      id,
+      pair_name,
+      deal_price,
+      deal_vol,
+      deal_size,
+      leverage,
+      coin_name,
+      taker_type,
+      taker_way,
+      taker_mode,
+      collateral_price,
+      taker_fee_mode,
+      taker_fee,
+      taker_pnl,
+      trigger_price,
+      taker_share_pnl,
+      CONCAT(taker_account_id, '') AS user_id_str,
+      (created_at + INTERVAL '8 hour') AS trade_time,
       -- Calculated fields
       CASE
-        WHEN "public"."surfv2_trade"."taker_mode" = 1 THEN '主动 (Active)'
-        WHEN "public"."surfv2_trade"."taker_mode" = 2 THEN '止盈 (Take Profit)'
-        WHEN "public"."surfv2_trade"."taker_mode" = 3 THEN '止损 (Stop Loss)'
-        WHEN "public"."surfv2_trade"."taker_mode" = 4 THEN '爆仓 (Liq)'
-      END AS "taker_mode_display",
+        WHEN taker_mode = 1 THEN '主动 (Active)'
+        WHEN taker_mode = 2 THEN '止盈 (Take Profit)'
+        WHEN taker_mode = 3 THEN '止损 (Stop Loss)'
+        WHEN taker_mode = 4 THEN '爆仓 (Liq)'
+      END AS taker_mode_display,
       CASE
-        WHEN "public"."surfv2_trade"."taker_way" = 1 THEN '开多 (Open Long)'
-        WHEN "public"."surfv2_trade"."taker_way" = 2 THEN '平空 (Close Short)'
-        WHEN "public"."surfv2_trade"."taker_way" = 3 THEN '开空 (Open Short)'
-        WHEN "public"."surfv2_trade"."taker_way" = 4 THEN '平多 (Close Long)'
-      END AS "taker_way_display",
+        WHEN taker_way = 1 THEN '开多 (Open Long)'
+        WHEN taker_way = 2 THEN '平空 (Close Short)'
+        WHEN taker_way = 3 THEN '开空 (Open Short)'
+        WHEN taker_way = 4 THEN '平多 (Close Long)'
+      END AS taker_way_display,
       CASE
-        WHEN "public"."surfv2_trade"."taker_fee_mode" = 1 THEN 'Flat'
-        WHEN "public"."surfv2_trade"."taker_fee_mode" = 2 THEN 'Profit Share'
-      END AS "fee_mode_display",
-      "public"."surfv2_trade"."taker_pnl" * "public"."surfv2_trade"."collateral_price" AS "user_pnl_usd",
-      "public"."surfv2_trade"."taker_share_pnl" * "public"."surfv2_trade"."collateral_price" AS "platform_profit_share",
-      ("public"."surfv2_trade"."taker_pnl" * "public"."surfv2_trade"."collateral_price") + 
-      ("public"."surfv2_trade"."taker_share_pnl" * "public"."surfv2_trade"."collateral_price") AS "total_pnl",
-      "public"."surfv2_trade"."taker_fee" * "public"."surfv2_trade"."collateral_price" AS "flat_fee_usd",
-      "public"."surfv2_trade"."deal_vol" * "public"."surfv2_trade"."collateral_price" AS "volume_usd"
+        WHEN taker_fee_mode = 1 THEN 'Flat'
+        WHEN taker_fee_mode = 2 THEN 'Profit Share'
+      END AS fee_mode_display,
+      taker_pnl * collateral_price AS user_pnl_usd,
+      taker_share_pnl * collateral_price AS platform_profit_share,
+      (taker_pnl * collateral_price) + (taker_share_pnl * collateral_price) AS total_pnl,
+      taker_fee * collateral_price AS flat_fee_usd,
+      deal_vol * collateral_price AS volume_usd
     FROM
-      "public"."surfv2_trade"
+      public.trade_fill_fresh
     WHERE
-      ("public"."surfv2_trade"."taker_way" IN (1, 2, 3, 4))
-      AND ("public"."surfv2_trade"."taker_mode" IN (1, 2, 3, 4))
+      taker_way IN (1, 2, 3, 4)
+      AND taker_mode IN (1, 2, 3, 4)
     ORDER BY
-      "public"."surfv2_trade"."created_at" DESC
+      created_at DESC
     LIMIT 100
     """
     
