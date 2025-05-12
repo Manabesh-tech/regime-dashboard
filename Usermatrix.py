@@ -148,6 +148,10 @@ def fetch_user_trade_details(user_id):
         WHEN taker_way = 3 THEN 'Open Short'
         WHEN taker_way = 4 THEN 'Close Long'
       END AS trade_type,
+      CASE
+        WHEN taker_way IN (1, 3) THEN 'Entry'
+        ELSE 'Exit'
+      END AS position_action,
       taker_mode,
       CASE
         WHEN taker_mode = 1 THEN 'Active'
@@ -155,11 +159,24 @@ def fetch_user_trade_details(user_id):
         WHEN taker_mode = 3 THEN 'Stop Loss'
         WHEN taker_mode = 4 THEN 'Liquidation'
       END AS order_type,
-      deal_price,
-      deal_size,
+      deal_price AS entry_exit_price,
       leverage,
+      leverage || 'x' AS leverage_display,
+      deal_size AS size,
+      deal_price * deal_size AS notional_value,
+      collateral_amount AS collateral,
       taker_pnl * collateral_price AS pnl_usd,
       taker_share_pnl * collateral_price AS profit_share_usd,
+      CASE 
+        WHEN taker_way IN (2, 4) THEN 
+          deal_price - (taker_share_pnl / deal_size)
+        ELSE NULL
+      END AS exit_price_before_share,
+      CASE 
+        WHEN taker_way IN (2, 4) THEN 
+          deal_price
+        ELSE NULL
+      END AS exit_price_after_share,
       created_at + INTERVAL '8 hour' AS trade_time
     FROM
       public.trade_fill_fresh
@@ -654,7 +671,104 @@ if trading_metrics_df is not None:
         if user_trades is not None and len(user_trades) > 0:
             # Trade history
             st.subheader("Trade History")
-            st.dataframe(user_trades, use_container_width=True)
+            
+            # Create two views - compact and detailed
+            view_option = st.radio("Select View", ["Compact View", "Detailed View"], horizontal=True)
+            
+            if view_option == "Compact View":
+                # Display original compact view
+                compact_cols = ['trade_time', 'pair_name', 'trade_type', 'position_action', 
+                                'entry_exit_price', 'size', 'leverage_display', 
+                                'pnl_usd', 'profit_share_usd']
+                st.dataframe(user_trades[compact_cols], use_container_width=True)
+            else:
+                # Display detailed view in the format requested
+                for idx, trade in user_trades.iterrows():
+                    # Create a styled container for each trade
+                    with st.container():
+                        # Header row with pair info
+                        col1, col2, col3, col4, col5, col6 = st.columns([1, 1, 1, 1, 1, 1])
+                        
+                        with col1:
+                            st.write("**Pair**")
+                            st.write(f"🪙 {trade['pair_name']}")
+                        
+                        with col2:
+                            st.write("**Leverage**")
+                            st.write(trade['leverage_display'])
+                        
+                        with col3:
+                            st.write("**Size**")
+                            st.write(f"${trade['size']:,.2f}")
+                        
+                        with col4:
+                            st.write("**Collateral**")
+                            st.write(f"💎 {trade['collateral']:,.4f}")
+                        
+                        with col5:
+                            st.write("**Entry/Exit Price**")
+                            st.write(f"{trade['entry_exit_price']:,.5f}")
+                        
+                        with col6:
+                            st.write("**PNL**")
+                            if trade['position_action'] == 'Exit':
+                                pnl_color = "green" if trade['pnl_usd'] > 0 else "red"
+                                st.write(f":{pnl_color}[{trade['pnl_usd']:+.2f}]")
+                            else:
+                                st.write("-")
+                        
+                        # Additional details row
+                        col1, col2, col3, col4 = st.columns([2, 2, 2, 2])
+                        
+                        with col1:
+                            st.write(f"**Action**: {trade['trade_type']}")
+                            st.write(f"**Time**: {trade['trade_time'].strftime('%Y-%m-%d %H:%M:%S')}")
+                        
+                        with col2:
+                            st.write(f"**Order Type**: {trade['order_type']}")
+                            st.write(f"**Notional**: ${trade['notional_value']:,.2f}")
+                        
+                        with col3:
+                            if trade['position_action'] == 'Exit' and trade['profit_share_usd'] != 0:
+                                st.write(f"**Exit Before Share**: {trade['exit_price_before_share']:.5f}" if trade['exit_price_before_share'] else "Exit Before Share: N/A")
+                                st.write(f"**Exit After Share**: {trade['exit_price_after_share']:.5f}" if trade['exit_price_after_share'] else "Exit After Share: N/A")
+                            else:
+                                st.write("**Exit Prices**: N/A (Entry)")
+                        
+                        with col4:
+                            if trade['position_action'] == 'Exit':
+                                st.write(f"**Profit Share**: ${trade['profit_share_usd']:,.2f}")
+                                net_pnl = trade['pnl_usd'] - trade['profit_share_usd']
+                                st.write(f"**Net PNL**: ${net_pnl:,.2f}")
+                            else:
+                                st.write("**Profit Share**: N/A")
+                                st.write("**Net PNL**: N/A")
+                        
+                        st.divider()
+            
+            # Add export functionality
+            if st.button("Export Trade History to CSV"):
+                # Prepare export data with all details
+                export_df = user_trades.copy()
+                
+                # Add calculated fields
+                export_df['net_pnl'] = export_df['pnl_usd'] - export_df['profit_share_usd']
+                export_df['notional_value'] = export_df['entry_exit_price'] * export_df['size']
+                
+                # Rearrange columns for export
+                export_cols = ['trade_time', 'pair_name', 'trade_type', 'position_action',
+                              'order_type', 'leverage_display', 'size', 'collateral',
+                              'entry_exit_price', 'notional_value',
+                              'exit_price_before_share', 'exit_price_after_share',
+                              'pnl_usd', 'profit_share_usd', 'net_pnl']
+                
+                csv = export_df[export_cols].to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="Download Trade History",
+                    data=csv,
+                    file_name=f"trade_history_{selected_user}.csv",
+                    mime="text/csv"
+                )
             
             # PnL timeline
             st.subheader("PnL Timeline")
