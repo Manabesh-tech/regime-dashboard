@@ -46,20 +46,146 @@ def init_db_connection():
 # Initialize connection
 conn, db_params = init_db_connection()
 
-# Main title
-st.title("User Trading Behavior Analysis Dashboard")
-st.caption("This dashboard analyzes trading patterns and behaviors for users")
+# Initialize session state for PnL values
+if 'daily_pnl' not in st.session_state:
+    st.session_state.daily_pnl = 0
+if 'all_time_pnl' not in st.session_state:
+    st.session_state.all_time_pnl = 0
 
-# Set up the timezone
-singapore_timezone = pytz.timezone('Asia/Singapore')
-now_utc = datetime.now(pytz.utc)
-now_sg = now_utc.astimezone(singapore_timezone)
-st.write(f"Current Singapore Time: {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
+# Function to fetch daily PnL
+@st.cache_data(ttl=60)  # Cache for 1 minute for live data
+def fetch_daily_pnl():
+    query = """
+    WITH DailyTradeData AS (
+        SELECT
+            DATE("public"."trade_fill_fresh"."created_at" + INTERVAL '+8 hours') AS "日期",
+            
+            -- 计算 "总和"，加上止损费用部分
+            SUM(
+                CASE
+                    WHEN "public"."trade_fill_fresh"."taker_way" IN (1, 2, 3, 4) 
+                         AND CONCAT("public"."trade_fill_fresh"."taker_account_id", '') NOT IN ('383645340185311232', '383645323663947776', '384014230417035264', '384014656596699136','384015011585812480','384015271796238336','384015526326947840')
+                    THEN "public"."trade_fill_fresh"."taker_pnl" * "public"."trade_fill_fresh"."collateral_price"
+                    ELSE 0
+                END
+            ) 
+            + SUM(
+                CASE
+                    WHEN "public"."trade_fill_fresh"."taker_fee_mode" = 1 
+                         AND "public"."trade_fill_fresh"."taker_way" IN (1, 3)
+                         AND CONCAT("public"."trade_fill_fresh"."taker_account_id", '') NOT IN ('383645340185311232', '383645323663947776', '384014230417035264', '384014656596699136','384015011585812480','384015271796238336','384015526326947840')
+                    THEN -1 * "public"."trade_fill_fresh"."taker_fee" * "public"."trade_fill_fresh"."collateral_price"
+                    ELSE 0
+                END
+            ) 
+            + SUM(
+                CASE
+                    WHEN "public"."trade_fill_fresh"."taker_way" = 0
+                         AND CONCAT("public"."trade_fill_fresh"."taker_account_id", '') NOT IN ('383645340185311232', '383645323663947776', '384014230417035264', '384014656596699136','384015011585812480','384015271796238336','384015526326947840')
+                    THEN "public"."trade_fill_fresh"."funding_fee" * "public"."trade_fill_fresh"."collateral_price"
+                    ELSE 0
+                END
+            )
+            + COALESCE(SUM(
+                CASE
+                    WHEN CONCAT("public"."trade_fill_fresh"."taker_account_id", '') NOT IN ('383645340185311232', '383645323663947776', '384014230417035264', '384014656596699136','384015011585812480','384015271796238336','384015526326947840')
+                    THEN -1 * "public"."trade_fill_fresh"."taker_sl_fee" * "public"."trade_fill_fresh"."collateral_price" - "public"."trade_fill_fresh"."maker_sl_fee"
+                    ELSE 0
+                END
+            ), 0) AS "总和"
+        FROM
+            "public"."trade_fill_fresh"
+        WHERE
+            "public"."trade_fill_fresh"."created_at" + INTERVAL '+8 hours' >= DATE_TRUNC('day', NOW() + INTERVAL '8 hours')
+            AND "public"."trade_fill_fresh"."created_at" + INTERVAL '+8 hours' < DATE_TRUNC('day', NOW() + INTERVAL '8 hours') + INTERVAL '1 day'
+        GROUP BY
+            DATE("public"."trade_fill_fresh"."created_at" + INTERVAL '+8 hours')
+    ),
 
-# Create tabs
-tab1, tab2, tab3 = st.tabs(["All Users", "Trading Metrics", "User Analysis"])
+    DailyCashbookData AS (
+        SELECT
+            DATE("public"."user_cashbooks"."created_at" + INTERVAL '+8 hours') AS "日期",
+            SUM("public"."user_cashbooks"."amount" * "public"."user_cashbooks"."coin_price") AS "总返佣"
+        FROM
+            "public"."user_cashbooks"
+        WHERE
+            "public"."user_cashbooks"."remark" = '给邀请人返佣'
+            AND CONCAT("public"."user_cashbooks"."account_id", '') NOT IN ('383645340185311232', '383645323663947776', '384014230417035264', '384014656596699136','384015011585812480','384015271796238336','384015526326947840')
+            AND "public"."user_cashbooks"."created_at" + INTERVAL '+8 hours' >= DATE_TRUNC('day', NOW() + INTERVAL '8 hours')
+            AND "public"."user_cashbooks"."created_at" + INTERVAL '+8 hours' < DATE_TRUNC('day', NOW() + INTERVAL '8 hours') + INTERVAL '1 day'
+        GROUP BY
+            DATE("public"."user_cashbooks"."created_at" + INTERVAL '+8 hours')
+    )
 
-# Function to fetch user trading metrics
+    SELECT
+        COALESCE(-1 * t."总和" - COALESCE(c."总返佣", 0), 0) AS "总平台盈亏扣除返佣"
+    FROM
+        DailyTradeData t
+    LEFT JOIN
+        DailyCashbookData c ON t."日期" = c."日期"
+    ORDER BY
+        t."日期" DESC
+    LIMIT 1
+    """
+    
+    try:
+        result = pd.read_sql(query, conn)
+        if not result.empty:
+            return result.iloc[0]['总平台盈亏扣除返佣']
+        return 0
+    except Exception as e:
+        st.error(f"Error fetching daily PnL: {e}")
+        return 0
+
+# Function to fetch all-time PnL
+@st.cache_data(ttl=60)  # Cache for 1 minute for live data
+def fetch_all_time_pnl():
+    query = """
+    SELECT
+      -- Sum of (Platform PnL + Flat Fee Revenue + Funding Fee PnL + SL Fees) - Profit Share Rebates
+      (
+        -- Platform PnL from user trading
+        (SELECT SUM(-1 * st.taker_pnl * st.collateral_price)
+         FROM public.trade_fill_fresh st
+         WHERE st.taker_way IN (1, 2, 3, 4)
+           AND CONCAT(st.taker_account_id, '') NOT IN ('383645340185311232', '383645323663947776', '384014230417035264', '384014656596699136','384015011585812480','384015271796238336','384015526326947840'))
+        +
+        -- Taker Fee
+        (SELECT SUM(st.taker_fee * st.collateral_price)
+         FROM public.trade_fill_fresh st
+         WHERE st.taker_fee_mode = 1
+           AND st.taker_way IN (1, 3)
+           AND CONCAT(st.taker_account_id, '') NOT IN ('383645340185311232', '383645323663947776', '384014230417035264', '384014656596699136','384015011585812480','384015271796238336','384015526326947840'))
+        +
+        -- Platform funding fee PnL
+        (SELECT SUM(-1 * st.funding_fee * st.collateral_price)
+         FROM public.trade_fill_fresh st
+         WHERE st.taker_way = 0
+           AND CONCAT(st.taker_account_id, '') NOT IN ('383645340185311232', '383645323663947776', '384014230417035264', '384014656596699136','384015011585812480','384015271796238336','384015526326947840'))
+        +
+        -- SL Fees (taker_sl_fee * collateral_price + maker_sl_fee)
+        (SELECT SUM(st.taker_sl_fee * st.collateral_price + st.maker_sl_fee)
+         FROM public.trade_fill_fresh st
+         WHERE CONCAT(st.taker_account_id, '') NOT IN ('383645340185311232', '383645323663947776', '384014230417035264', '384014656596699136','384015011585812480','384015271796238336','384015526326947840'))
+      )
+      -
+      -- 返佣（包含了Flat和Profit)
+      (SELECT SUM(st.amount * coin_price)
+       FROM public.user_cashbooks st
+       WHERE st."remark" = '给邀请人返佣'
+         AND CONCAT(st.account_id, '') NOT IN ('383645340185311232', '383645323663947776', '384014230417035264', '384014656596699136','384015011585812480','384015271796238336','384015526326947840')) AS "总平台盈亏扣除返佣"
+    """
+    
+    try:
+        result = pd.read_sql(query, conn)
+        if not result.empty:
+            return result.iloc[0]['总平台盈亏扣除返佣']
+        return 0
+    except Exception as e:
+        st.error(f"Error fetching all-time PnL: {e}")
+        return 0
+
+# Function to fetch trading metrics
 @st.cache_data(ttl=600)
 def fetch_trading_metrics():
     query = """
@@ -249,15 +375,110 @@ def fetch_users_per_day():
         st.error(f"Error fetching users per day: {e}")
         return None
 
-# Load data
+# Main title
+st.title("User Trading Behavior Analysis Dashboard")
+st.caption("This dashboard analyzes trading patterns and behaviors for users")
+
+# Set up the timezone
+singapore_timezone = pytz.timezone('Asia/Singapore')
+now_utc = datetime.now(pytz.utc)
+now_sg = now_utc.astimezone(singapore_timezone)
+st.write(f"Current Singapore Time: {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
+
+# Load PnL data
+with st.spinner("Loading live PnL data..."):
+    st.session_state.daily_pnl = fetch_daily_pnl()
+    st.session_state.all_time_pnl = fetch_all_time_pnl()
+
+# Create tabs with PnL display in Live Trades tab title
+daily_pnl_display = f"${st.session_state.daily_pnl:,.2f}" if st.session_state.daily_pnl else "$0.00"
+all_time_pnl_display = f"${st.session_state.all_time_pnl:,.2f}" if st.session_state.all_time_pnl else "$0.00"
+
+tab1, tab2, tab3, tab4 = st.tabs([
+    f"Live Trades | Daily: {daily_pnl_display} | All-Time: {all_time_pnl_display}",
+    "All Users",
+    "Trading Metrics",
+    "User Analysis"
+])
+
+# Tab 1 - Live Trades
+with tab1:
+    st.header("Live Platform PnL")
+    
+    # Refresh button
+    col1, col2, col3 = st.columns([1, 1, 8])
+    with col1:
+        if st.button("🔄 Refresh", key="refresh_pnl"):
+            st.cache_data.clear()
+            st.rerun()
+    
+    # Daily PnL display
+    st.subheader("Today's Platform PnL (Excluding Rebates)")
+    
+    # Big, bold display for daily PnL
+    daily_color = "green" if st.session_state.daily_pnl >= 0 else "red"
+    st.markdown(f"""
+    <div style="text-align: center; padding: 20px; background-color: rgba(0,0,0,0.05); border-radius: 10px; margin: 10px 0;">
+        <h1 style="color: {daily_color}; font-size: 48px; font-weight: bold; margin: 0;">
+            ${st.session_state.daily_pnl:,.2f}
+        </h1>
+        <p style="font-size: 16px; color: #666; margin-top: 10px;">Since 00:00 SGT</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # All-time PnL display
+    st.subheader("All-Time Platform PnL (Excluding Rebates)")
+    
+    # Big, bold display for all-time PnL
+    all_time_color = "green" if st.session_state.all_time_pnl >= 0 else "red"
+    st.markdown(f"""
+    <div style="text-align: center; padding: 20px; background-color: rgba(0,0,0,0.05); border-radius: 10px; margin: 10px 0;">
+        <h1 style="color: {all_time_color}; font-size: 48px; font-weight: bold; margin: 0;">
+            ${st.session_state.all_time_pnl:,.2f}
+        </h1>
+        <p style="font-size: 16px; color: #666; margin-top: 10px;">Since Platform Launch</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # PnL Calculation Breakdown
+    st.subheader("PnL Calculation Components")
+    
+    components_col1, components_col2 = st.columns(2)
+    
+    with components_col1:
+        st.info("""
+        **Platform PnL Components:**
+        - User Trading PnL (Inverse)
+        - Flat Fee Revenue
+        - Funding Fee PnL
+        - Stop Loss Fees
+        - Minus: All Rebates
+        """)
+    
+    with components_col2:
+        st.info("""
+        **Excluded Users:**
+        - 383645340185311232
+        - 383645323663947776
+        - 384014230417035264
+        - 384014656596699136
+        - 384015011585812480
+        - 384015271796238336
+        - 384015526326947840
+        """)
+    
+    # Auto-refresh note
+    st.caption("Data refreshes every 60 seconds. Click the refresh button for immediate update.")
+
+# Load trading metrics and user data
 with st.spinner("Loading user data..."):
     trading_metrics_df = fetch_trading_metrics()
     users_per_day_df = fetch_users_per_day()
 
 # Check if we have data
 if trading_metrics_df is not None:
-    # Tab 1 - All Users
-    with tab1:
+    # Tab 2 - All Users
+    with tab2:
         st.header("All Users")
         
         # Add search and filter options
@@ -320,8 +541,8 @@ if trading_metrics_df is not None:
             profitable_users = len(trading_metrics_df[trading_metrics_df['net_pnl'] > 0])
             st.metric("Profitable Users", f"{profitable_users:,}")
     
-    # Tab 2 - Trading Metrics
-    with tab2:
+    # Tab 3 - Trading Metrics
+    with tab3:
         st.header("Trading Metrics")
         
         # Add filters and display metrics
@@ -345,8 +566,8 @@ if trading_metrics_df is not None:
         
         st.dataframe(metrics_display, use_container_width=True)
     
-    # Tab 3 - User Analysis
-    with tab3:
+    # Tab 4 - User Analysis
+    with tab4:
         st.header("User Analysis")
         
         # User selection
@@ -496,7 +717,13 @@ if st.sidebar.button("Refresh Data"):
 # Add dashboard info
 st.sidebar.title("About This Dashboard")
 st.sidebar.info("""
-This dashboard provides comprehensive analysis of user behavior.
+This dashboard provides comprehensive analysis of user behavior and live platform PnL.
+
+**Live Trades:**
+- Shows real-time platform PnL
+- Daily PnL reset at 00:00 SGT
+- All-time PnL since launch
+- Excludes specified test accounts
 
 **PnL Calculations:**
 - User Received PNL = taker_pnl * collateral_price
