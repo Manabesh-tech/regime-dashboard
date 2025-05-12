@@ -40,7 +40,7 @@ def fetch_trading_pairs():
     WHERE status = 1
     ORDER BY pair_name
     """
-    
+
     df = pd.read_sql_query(query, engine)
     return df['pair_name'].tolist()
 
@@ -54,7 +54,7 @@ with col1:
     # Select token
     default_token = "BTC/USDT" if "BTC/USDT" in all_tokens else all_tokens[0]
     selected_token = st.selectbox(
-        "Select Token", 
+        "Select Token",
         all_tokens,
         index=all_tokens.index(default_token) if default_token in all_tokens else 0
     )
@@ -79,15 +79,15 @@ def fetch_rollbit_parameters_historical(token, hours=24):
         # Time range matching volatility data
         now_sg = datetime.now(pytz.timezone('Asia/Singapore'))
         start_time_sg = now_sg - timedelta(hours=hours+1)  # Extra hour for buffer
-        
+
         # Convert to UTC for database query
         start_time_utc = start_time_sg.astimezone(pytz.utc)
         end_time_utc = now_sg.astimezone(pytz.utc)
-        
+
         # Format timestamps
         start_str = start_time_utc.strftime("%Y-%m-%d %H:%M:%S")
         end_str = end_time_utc.strftime("%Y-%m-%d %H:%M:%S")
-        
+
         query = f"""
         SELECT 
             pair_name,
@@ -100,9 +100,9 @@ def fetch_rollbit_parameters_historical(token, hours=24):
         AND created_at <= '{end_str}'::timestamp - INTERVAL '8 hour'
         ORDER BY created_at
         """
-        
+
         df = pd.read_sql_query(query, engine)
-        
+
         if not df.empty:
             df['timestamp'] = pd.to_datetime(df['timestamp'])
             df = df.set_index('timestamp').sort_index()
@@ -118,21 +118,21 @@ def get_partition_tables(start_date, end_date):
         start_date = pd.to_datetime(start_date)
     if isinstance(end_date, str):
         end_date = pd.to_datetime(end_date)
-        
+
     # Remove timezone
     start_date = start_date.replace(tzinfo=None)
     end_date = end_date.replace(tzinfo=None)
-    
+
     # Generate all dates
     dates = []
     current_date = start_date
     while current_date <= end_date:
         dates.append(current_date.strftime("%Y%m%d"))
         current_date += timedelta(days=1)
-    
+
     # Table names
     table_names = [f"oracle_price_log_partition_{date}" for date in dates]
-    
+
     # Check which tables exist
     cursor = conn.cursor()
     if table_names:
@@ -143,17 +143,17 @@ def get_partition_tables(start_date, end_date):
             WHERE table_schema = 'public' 
             AND table_name IN ('{table_list_str}')
         """)
-        
+
         existing_tables = [row[0] for row in cursor.fetchall()]
     cursor.close()
-    
+
     return existing_tables
 
 # Build query for partition tables - Modified for 500ms data
 def build_query(tables, token, start_time, end_time):
     if not tables:
         return ""
-    
+
     union_parts = []
     for table in tables:
         # IMPORTANT: Add 8 hours to convert to Singapore time
@@ -172,7 +172,7 @@ def build_query(tables, token, start_time, end_time):
             AND pair_name = '{token}'
         """
         union_parts.append(query)
-    
+
     return " UNION ALL ".join(union_parts) + " ORDER BY timestamp"
 
 # Calculate volatility with percentiles
@@ -181,88 +181,88 @@ def get_volatility_data_with_percentiles(token, display_hours=24, history_days=3
     # Time range - only 3 days for faster loading
     now_sg = datetime.now(pytz.timezone('Asia/Singapore'))
     start_time_sg = now_sg - timedelta(days=history_days)
-    
+
     # Get relevant partition tables (today and yesterday)
     start_date = start_time_sg.replace(tzinfo=None)
     end_date = now_sg.replace(tzinfo=None)
     partition_tables = get_partition_tables(start_date, end_date)
-    
+
     if not partition_tables:
         st.error(f"No data tables found for {start_date} to {end_date}")
         return None, None
-    
+
     # Convert to strings for query
     start_time_str = start_time_sg.strftime("%Y-%m-%d %H:%M:%S")
     end_time_str = now_sg.strftime("%Y-%m-%d %H:%M:%S")
-    
+
     # Build and execute query
     query = build_query(partition_tables, token, start_time_str, end_time_str)
-    
+
     with st.spinner(f"Loading data..."):
         df = pd.read_sql_query(query, engine)
-    
+
     if df.empty:
         st.error(f"No data found for {token}")
         return None, None
-    
+
     # Process timestamps
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df = df.set_index('timestamp').sort_index()
-    
+
     # Resample to 500ms intervals
     price_data = df['final_price'].resample('500ms').ffill().dropna()
-    
+
     # Create 5-minute windows
     result = []
     start_date = price_data.index.min().floor('5min')
     end_date = price_data.index.max().ceil('5min')
     five_min_periods = pd.date_range(start=start_date, end=end_date, freq='5min')
-    
+
     for i in range(len(five_min_periods)-1):
         start_window = five_min_periods[i]
         end_window = five_min_periods[i+1]
-        
+
         # Get price data in this window
         window_data = price_data[(price_data.index >= start_window) & (price_data.index < end_window)]
-        
+
         if len(window_data) >= 2:  # Need at least 2 points for volatility
             # OHLC data
             window_open = window_data.iloc[0]
             window_high = window_data.max()
             window_low = window_data.min()
             window_close = window_data.iloc[-1]
-            
+
             # Calculate volatility using 500ms data points
             # Log returns
             log_returns = np.diff(np.log(window_data.values))
-            
+
             # Annualize: 500ms intervals in year / 500ms intervals in 5 minutes
             # There are 63,072,000 half-seconds in a year and 600 half-seconds in 5 minutes
             annualization_factor = np.sqrt(63072000 / 600)
             volatility = np.std(log_returns) * annualization_factor
-            
+
             result.append({
                 'timestamp': start_window,
                 'open': window_open,
-                'high': window_high, 
+                'high': window_high,
                 'low': window_low,
                 'close': window_close,
                 'realized_vol': volatility,
                 'data_points': len(window_data),  # Track how many 500ms points we have
                 'actual_data_interval': 0.5  # 500ms
             })
-    
+
     # Create dataframe and get last 24 hours of data
     if not result:
         st.error(f"Could not calculate volatility for {token}")
         return None, None
-        
+
     result_df = pd.DataFrame(result).set_index('timestamp')
-    
+
     # Split into display and historical data
     display_periods = display_hours * 12  # 12 5-minute periods per hour
     display_df = result_df.tail(display_periods)
-    
+
     return display_df, result_df
 
 # Get data for selected token
@@ -275,10 +275,10 @@ if vol_data is not None and not vol_data.empty and historical_vol_data is not No
     # Convert to percentage
     vol_data_pct = vol_data.copy()
     vol_data_pct['realized_vol'] = vol_data_pct['realized_vol'] * 100
-    
+
     historical_vol_pct = historical_vol_data.copy()
     historical_vol_pct['realized_vol'] = historical_vol_pct['realized_vol'] * 100
-    
+
     # Calculate percentiles from historical data
     percentiles = {
         'p25': np.percentile(historical_vol_pct['realized_vol'], 25),
@@ -286,17 +286,17 @@ if vol_data is not None and not vol_data.empty and historical_vol_data is not No
         'p75': np.percentile(historical_vol_pct['realized_vol'], 75),
         'p95': np.percentile(historical_vol_pct['realized_vol'], 95)
     }
-    
+
     # Key metrics
     avg_vol = vol_data_pct['realized_vol'].mean()
     max_vol = vol_data_pct['realized_vol'].max()
     current_vol = vol_data_pct['realized_vol'].iloc[-1]
     current_percentile = (historical_vol_pct['realized_vol'] < current_vol).mean() * 100
     avg_data_points = vol_data_pct['data_points'].mean()
-    
+
     # Create subplots with 3 rows
     fig = make_subplots(
-        rows=3, 
+        rows=3,
         cols=1,
         shared_xaxes=True,  # This is key for synchronized hover
         vertical_spacing=0.05,
@@ -307,7 +307,7 @@ if vol_data is not None and not vol_data.empty and historical_vol_data is not No
         ),
         row_heights=[0.4, 0.3, 0.3]
     )
-    
+
     # Color coding for volatility based on percentiles
     colors = []
     for val in vol_data_pct['realized_vol']:
@@ -323,12 +323,12 @@ if vol_data is not None and not vol_data.empty and historical_vol_data is not No
             colors.append('orange')  # Elevated
         else:
             colors.append('red')  # High
-    
+
     # Process Rollbit data if available
     if rollbit_params is not None and not rollbit_params.empty:
         # Resample Rollbit data to 5-minute intervals to match volatility data
         rollbit_resampled = rollbit_params.resample('5min').ffill()
-        
+
         # Merge with volatility data to ensure aligned timestamps
         combined_data = pd.merge(
             vol_data_pct,
@@ -338,25 +338,25 @@ if vol_data is not None and not vol_data.empty and historical_vol_data is not No
             how='left',
             suffixes=('', '_rollbit')
         )
-        
+
         # Forward fill any missing Rollbit values
         combined_data['buffer_rate'] = combined_data['buffer_rate'].ffill()
         combined_data['position_multiplier'] = combined_data['position_multiplier'].ffill()
-        
+
         # Convert buffer rate to percentage
         combined_data['buffer_rate_pct'] = combined_data['buffer_rate'] * 100
-        
+
         # Create combined hover data
         combined_hover = []
         for i in range(len(combined_data)):
             hover_text = (
-                f"<b>Time: {combined_data.index[i].strftime('%Y-%m-%d %H:%M')}</b><br>" +
-                f"Volatility: {combined_data['realized_vol'].iloc[i]:.1f}%<br>" +
-                f"Buffer Rate: {combined_data['buffer_rate_pct'].iloc[i]:.3f}%<br>" +
-                f"Position Mult: {combined_data['position_multiplier'].iloc[i]:,.0f}"
+                    f"<b>Time: {combined_data.index[i].strftime('%Y-%m-%d %H:%M')}</b><br>" +
+                    f"Volatility: {combined_data['realized_vol'].iloc[i]:.1f}%<br>" +
+                    f"Buffer Rate: {combined_data['buffer_rate_pct'].iloc[i]:.3f}%<br>" +
+                    f"Position Mult: {combined_data['position_multiplier'].iloc[i]:,.0f}"
             )
             combined_hover.append(hover_text)
-        
+
         # Panel 1: Volatility (now with combined hover data)
         fig.add_trace(
             go.Scatter(
@@ -371,7 +371,7 @@ if vol_data is not None and not vol_data.empty and historical_vol_data is not No
             ),
             row=1, col=1
         )
-        
+
         # Panel 2: Buffer Rate
         fig.add_trace(
             go.Scatter(
@@ -386,7 +386,7 @@ if vol_data is not None and not vol_data.empty and historical_vol_data is not No
             ),
             row=2, col=1
         )
-        
+
         # Panel 3: Position Multiplier
         fig.add_trace(
             go.Scatter(
@@ -416,7 +416,7 @@ if vol_data is not None and not vol_data.empty and historical_vol_data is not No
             ),
             row=1, col=1
         )
-        
+
         # Add notes if no Rollbit data
         fig.add_annotation(
             x=vol_data_pct.index[len(vol_data_pct)//2],
@@ -426,7 +426,7 @@ if vol_data is not None and not vol_data.empty and historical_vol_data is not No
             font=dict(size=12, color="gray"),
             row=2, col=1
         )
-        
+
         fig.add_annotation(
             x=vol_data_pct.index[len(vol_data_pct)//2],
             y=0.5,
@@ -435,17 +435,17 @@ if vol_data is not None and not vol_data.empty and historical_vol_data is not No
             font=dict(size=12, color="gray"),
             row=3, col=1
         )
-    
+
     # Calculate better y-axis range for volatility
     vol_min = vol_data_pct['realized_vol'].min()
     vol_max = vol_data_pct['realized_vol'].max()
-    
+
     # Look at actual data range
     data_range = vol_max - vol_min
-    
+
     # Start from 0
     y_min = 0
-    
+
     # Determine y_max based on volatility levels
     if vol_max < 5:
         # Low volatility assets (like BTC) - use tight scaling
@@ -459,27 +459,27 @@ if vol_data is not None and not vol_data.empty and historical_vol_data is not No
         # High volatility assets (like PNUT) - use appropriate scaling
         # Add 10% padding but ensure we capture the full range
         y_max = vol_max * 1.1
-        
+
         # For extremely high volatility, ensure the scale is appropriate
         if vol_max > 100:
             # Round up to nearest 50 for cleaner scale
             y_max = ((vol_max // 50) + 1) * 50
-    
+
     # Make sure all percentiles that matter are visible
     if percentiles['p95'] > y_max:
         y_max = percentiles['p95'] * 1.1
-    
+
     # Add percentile lines for volatility with cleaner labels
     percentile_lines = [
         ('p25', 'green', '25th'),
         ('p50', 'blue', '50th'),
         ('p75', 'gold', '75th'),
-            ('p95', 'red', '95th')
+        ('p95', 'red', '95th')
     ]
-    
+
     # Calculate actual visible range for better annotation placement
     visible_range = y_max - y_min
-    
+
     for i, (key, color, label) in enumerate(percentile_lines):
         # Only show percentiles that are within visible range and make sense
         if y_min <= percentiles[key] <= y_max and percentiles[key] > 0:
@@ -492,7 +492,7 @@ if vol_data is not None and not vol_data.empty and historical_vol_data is not No
                 line=dict(color=color, width=3, dash="dash"),  # Thicker lines
                 row=1, col=1
             )
-            
+
             # Place label at the start of the line
             fig.add_annotation(
                 x=vol_data_pct.index[10],  # Place near the start
@@ -507,7 +507,7 @@ if vol_data is not None and not vol_data.empty and historical_vol_data is not No
                 borderwidth=1,
                 row=1, col=1
             )
-            
+
             # Also place label at the end of the line (right side)
             fig.add_annotation(
                 x=vol_data_pct.index[-10],  # Place near the end
@@ -522,10 +522,10 @@ if vol_data is not None and not vol_data.empty and historical_vol_data is not No
                 borderwidth=1,
                 row=1, col=1
             )
-    
+
     # Update layout with enhanced hover line
     fig.update_layout(
-        title=f"{selected_token} Analysis Dashboard<br>" + 
+        title=f"{selected_token} Analysis Dashboard<br>" +
               f"<sub>Current Volatility: {current_vol:.1f}% ({current_percentile:.0f}th percentile)</sub>",
         height=900,
         showlegend=False,
@@ -549,11 +549,11 @@ if vol_data is not None and not vol_data.empty and historical_vol_data is not No
             spikedash="solid"
         )
     )
-    
+
     # Update axes
     fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='LightGray')
     fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='LightGray')
-    
+
     # Configure spike lines for all x-axes
     for i in range(1, 4):
         fig.update_xaxes(
@@ -565,10 +565,10 @@ if vol_data is not None and not vol_data.empty and historical_vol_data is not No
             spikedash="solid",
             row=i, col=1
         )
-    
+
     # Only show x-axis label on the bottom plot
     fig.update_xaxes(title_text="Time (Singapore)", row=3, col=1, tickformat="%H:%M<br>%m/%d", tickangle=-45)
-    
+
     # Update y-axis labels with better scaling for volatility
     # Determine appropriate tick interval based on range
     if y_max < 5:
@@ -581,9 +581,9 @@ if vol_data is not None and not vol_data.empty and historical_vol_data is not No
         dtick = 10.0  # 10% increments for high volatility
     else:
         dtick = 25.0  # 25% increments for extreme volatility
-    
+
     fig.update_yaxes(
-        title_text="Volatility (%)", 
+        title_text="Volatility (%)",
         row=1, col=1,
         range=[y_min, y_max],
         tickformat=".1f",
@@ -595,13 +595,13 @@ if vol_data is not None and not vol_data.empty and historical_vol_data is not No
     )
     fig.update_yaxes(title_text="Buffer Rate (%)", row=2, col=1, tickformat=".3f")
     fig.update_yaxes(title_text="Position Multiplier", row=3, col=1, tickformat=",")
-    
+
     # Display chart
     st.plotly_chart(fig, use_container_width=True)
-    
+
     # Display volatility interpretation
     st.markdown("### Volatility Status")
-    
+
     if current_vol < percentiles['p25']:
         status = "🟩 **Very Low**"
         interpretation = f"Current volatility ({current_vol:.1f}%) is below the 25th percentile"
@@ -617,17 +617,17 @@ if vol_data is not None and not vol_data.empty and historical_vol_data is not No
     else:
         status = "🔴 **High**"
         interpretation = f"Current volatility ({current_vol:.1f}%) is above the 95th percentile"
-    
+
     col1, col2 = st.columns([1, 3])
     with col1:
         st.markdown(status)
     with col2:
         st.markdown(interpretation)
-    
+
     # Display percentile metrics
     st.markdown("### Volatility Percentiles (3-day)")
     col1, col2, col3, col4 = st.columns(4)
-    
+
     with col1:
         st.metric("25th %ile", f"{percentiles['p25']:.1f}%")
     with col2:
@@ -636,25 +636,25 @@ if vol_data is not None and not vol_data.empty and historical_vol_data is not No
         st.metric("75th %ile", f"{percentiles['p75']:.1f}%")
     with col4:
         st.metric("95th %ile", f"{percentiles['p95']:.1f}%")
-    
+
     # Display current metrics
     if rollbit_params is not None and not rollbit_params.empty:
         st.markdown("### Current Metrics")
         col1, col2, col3, col4 = st.columns(4)
-        
+
         with col1:
             st.metric("Current Volatility", f"{current_vol:.1f}%")
-        
+
         with col2:
             st.metric("Average Volatility", f"{avg_vol:.1f}%")
-        
+
         with col3:
             latest_buffer = rollbit_params['buffer_rate'].iloc[-1] * 100
             st.metric("Current Buffer Rate", f"{latest_buffer:.3f}%")
-        
+
         with col4:
             latest_pos_mult = rollbit_params['position_multiplier'].iloc[-1]
             st.metric("Current Position Multiplier", f"{latest_pos_mult:,.0f}")
-    
+
 else:
     st.error("No volatility data available for the selected token")
