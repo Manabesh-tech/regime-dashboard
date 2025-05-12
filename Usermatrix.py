@@ -583,7 +583,12 @@ with tab1:
         
         # Apply color to PnL columns
         def style_pnl_value(val):
-            if isinstance(val, str) and val.startswith('
+         if isinstance(val, str) and val.startswith('$'):
+             # Extract numeric value from string
+             num_val = float(val.replace('$', '').replace(',', ''))
+             color = 'green' if num_val >= 0 else 'red'
+             return f'color: {color}'
+         return ''
         
         # Trade statistics
         st.subheader("Recent Trade Statistics")
