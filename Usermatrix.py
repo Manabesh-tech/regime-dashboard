@@ -937,18 +937,24 @@ if trading_metrics_df is not None:
             # This should match the net_p
             
             # Create line chart
-            fig = px.line(
-                user_trades,
-                x='trade_time',
-                y='cumulative_pnl',
-                title='Cumulative PnL Over Time',
-                labels={'trade_time': 'Trade Time', 'cumulative_pnl': 'Cumulative PnL (USD)'}
-            )
-            
-            # Add markers at each trade
-            fig.update_traces(mode='lines+markers')
-            
-            st.plotly_chart(fig, use_container_width=True)
+            try:
+                fig = px.line(
+                    user_trades,
+                    x='trade_time',
+                    y='cumulative_pnl',
+                    title='Cumulative PnL Over Time',
+                    labels={'trade_time': 'Trade Time', 'cumulative_pnl': 'Cumulative PnL (USD)'}
+                )
+                
+                # Add markers at each trade
+                fig.update_traces(mode='lines+markers')
+                
+                st.plotly_chart(fig, use_container_width=True)
+            except Exception as e:
+                st.error(f"Error creating cumulative PnL chart: {e}")
+                # Show the data that caused the error
+                st.write("Data that caused the error:")
+                st.write(user_trades[['trade_time', 'cumulative_pnl']].head())
             
             # Verify cumulative PnL matches net PnL
             final_cumulative_pnl = user_trades['cumulative_pnl'].iloc[-1]
@@ -1050,6 +1056,7 @@ if trading_metrics_df is not None:
                     total_pnl=('user_received_pnl', 'sum')
                 ).reset_index()
                 
+                # Convert interval to string for plotting
                 leverage_analysis['leverage'] = leverage_analysis['leverage'].astype(str)
                 
                 # Create dual axis chart
@@ -1085,6 +1092,8 @@ if trading_metrics_df is not None:
                 st.plotly_chart(fig, use_container_width=True)
             except Exception as e:
                 st.warning(f"Could not create leverage analysis: {e}")
+                import traceback
+                traceback.print_exc()
         else:
             st.warning("No trade data available for this user.")
 else:
