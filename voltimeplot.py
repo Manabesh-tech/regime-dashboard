@@ -421,19 +421,10 @@ if vol_data is not None and not vol_data.empty and historical_vol_data is not No
         fig.add_annotation(
             x=vol_data_pct.index[len(vol_data_pct)//2],
             y=0.5,
-            text="No Rollbit buffer rate data available",
+            text="No Rollbit data available",
             showarrow=False,
-            font=dict(size=12, color="gray"),
-            row=2, col=1
-        )
-
-        fig.add_annotation(
-            x=vol_data_pct.index[len(vol_data_pct)//2],
-            y=0.5,
-            text="No Rollbit position multiplier data available",
-            showarrow=False,
-            font=dict(size=12, color="gray"),
-            row=3, col=1
+            font=dict(size=12),
+            row=1, col=1
         )
 
     # Calculate better y-axis range for volatility
@@ -489,37 +480,30 @@ if vol_data is not None and not vol_data.empty and historical_vol_data is not No
                 x1=vol_data_pct.index.max(),
                 y0=percentiles[key],
                 y1=percentiles[key],
-                line=dict(color=color, width=3, dash="dash"),  # Thicker lines
+                line=dict(color=color, width=3, dash="dash"),
                 row=1, col=1
             )
-
-            # Place label at the start of the line
+            
+            # 简化注释设置
             fig.add_annotation(
-                x=vol_data_pct.index[10],  # Place near the start
+                x=vol_data_pct.index[10],
                 y=percentiles[key],
                 text=f"{label}: {percentiles[key]:.1f}%",
                 showarrow=False,
-                font=dict(size=9, color=color, weight="bold"),
+                font=dict(size=9),
                 xanchor="left",
                 yanchor="middle",
-                bgcolor="rgba(255,255,255,0.9)",
-                bordercolor=color,
-                borderwidth=1,
                 row=1, col=1
             )
-
-            # Also place label at the end of the line (right side)
+            
             fig.add_annotation(
-                x=vol_data_pct.index[-10],  # Place near the end
+                x=vol_data_pct.index[-10],
                 y=percentiles[key],
                 text=f"{label}: {percentiles[key]:.1f}%",
                 showarrow=False,
-                font=dict(size=9, color=color, weight="bold"),
+                font=dict(size=9),
                 xanchor="right",
                 yanchor="middle",
-                bgcolor="rgba(255,255,255,0.9)",
-                bordercolor=color,
-                borderwidth=1,
                 row=1, col=1
             )
 
