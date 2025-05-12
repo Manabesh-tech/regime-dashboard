@@ -723,51 +723,19 @@ if trading_metrics_df is not None:
             show_debug = st.checkbox("Show Debug Info", value=False)
             
             if show_debug:
-                st.write("Raw Data Sample (first 5 trades):")
+                st.write("Debug Information:")
                 
                 # Show all available columns first
                 st.write("Available columns in user_trades:")
                 st.write(list(user_trades.columns))
                 
-                # Define columns we want to show (some might not exist)
-                debug_cols = ['trade_time', 'pair_name', 'trade_type', 'taker_pnl', 'taker_share_pnl',
-                             'collateral_price', 'user_received_pnl', 'profit_share', 
-                             'profit_share_percent', 'size', 'entry_exit_price']
-                
-                # Only include columns that actually exist
-                available_debug_cols = [col for col in debug_cols if col in user_trades.columns]
-                
-                if available_debug_cols:
-                    debug_df = user_trades[available_debug_cols].head(5)
-                    st.dataframe(debug_df)
-                
-                # Show if trade_pnl still exists (it shouldn't!)
+                # Check if old columns exist
                 if 'trade_pnl' in user_trades.columns:
-                    st.warning("⚠️ Old column 'trade_pnl' still exists in cached data. Please refresh the page and clear cache.")
+                    st.warning("⚠️ Old column 'trade_pnl' still exists in cached data. Please click 'Force Clear Cache' in the sidebar.")
                 
-                # Show calculation verification
-                st.write("Calculation verification (first exit trade):")
-                exit_trades = user_trades[user_trades['position_action'] == 'Exit']
-                if len(exit_trades) > 0:
-                    first_trade = exit_trades.iloc[0]
-                    st.write(f"Raw values:")
-                    st.write(f"- taker_pnl: {first_trade['taker_pnl']}")
-                    st.write(f"- taker_share_pnl: {first_trade['taker_share_pnl']}")
-                    st.write(f"- collateral_price: {first_trade['collateral_price']}")
-                    st.write(f"")
-                    st.write(f"Calculated values:")
-                    st.write(f"- User Received PNL = taker_pnl * collateral_price = {first_trade['taker_pnl']} * {first_trade['collateral_price']} = {(first_trade['taker_pnl'] * first_trade['collateral_price']):.2f}")
-                    st.write(f"- Profit Share = taker_share_pnl * collateral_price = {first_trade['taker_share_pnl']} * {first_trade['collateral_price']} = {(first_trade['taker_share_pnl'] * first_trade['collateral_price']):.2f}")
-                    if 'profit_share' in first_trade and 'user_received_pnl' in first_trade:
-                        st.write(f"- Profit Share % = profit_share / (user_received_pnl + profit_share) * 100 = {first_trade['profit_share']:.2f} / ({first_trade['user_received_pnl']:.2f} + {first_trade['profit_share']:.2f}) * 100 = {first_trade['profit_share_percent']:.2f}%")
-                    st.write(f"")
-                    st.write(f"Query results:")
-                    if 'user_received_pnl' in first_trade:
-                        st.write(f"- user_received_pnl: {first_trade['user_received_pnl']:.2f}")
-                    if 'profit_share' in first_trade:
-                        st.write(f"- profit_share: {first_trade['profit_share']:.2f}")
-                    if 'profit_share_percent' in first_trade:
-                        st.write(f"- profit_share_percent: {first_trade['profit_share_percent']:.2f}%")
+                # Show first few rows with whatever columns exist
+                st.write("First 5 trades (showing available columns):")
+                st.dataframe(user_trades.head(5))
             
             # Create two views - compact and detailed
             view_option = st.radio("Select View", ["Compact View", "Detailed View"], horizontal=True)
