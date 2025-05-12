@@ -720,7 +720,9 @@ if trading_metrics_df is not None:
                 debug_cols = ['trade_time', 'pair_name', 'trade_type', 'taker_pnl', 'collateral_price', 
                              'user_received_pnl', 'order_pnl', 'taker_share_pnl', 'profit_share_usd', 
                              'profit_share_percent', 'size', 'entry_exit_price']
-                debug_df = user_trades[debug_cols].head(5)
+                # Only include columns that exist in the dataframe
+                available_debug_cols = [col for col in debug_cols if col in user_trades.columns]
+                debug_df = user_trades[available_debug_cols].head(5)
                 st.dataframe(debug_df)
                 
                 # Show calculation verification
@@ -743,9 +745,13 @@ if trading_metrics_df is not None:
                 compact_cols = ['trade_time', 'pair_name', 'trade_type', 'position_action', 
                                 'entry_exit_price', 'size', 'leverage_display', 
                                 'order_pnl', 'user_received_pnl', 'profit_share_usd', 
-                                'profit_share_percent', 'percent_distance']
+                                'profit_share_percent']
                 
-                # Filter out columns that might not exist for non-exit trades
+                # Add percent_distance only if it exists (for exit trades)
+                if 'percent_distance' in user_trades.columns:
+                    compact_cols.append('percent_distance')
+                
+                # Filter out columns that might not exist
                 available_cols = [col for col in compact_cols if col in user_trades.columns]
                 
                 # Create display dataframe
