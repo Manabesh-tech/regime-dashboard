@@ -222,18 +222,25 @@ def fetch_live_trades():
       ROUND(taker_pnl * collateral_price, 2) AS user_received_pnl,
       -- Platform Profit Share
       ROUND(taker_share_pnl * collateral_price, 2) AS platform_profit_share,
-      -- CORRECTED Order PnL Calculation
+      -- Order PnL Calculation based on the provided formula
       CASE
-        -- For Flat Fee Mode: Base PnL - Trading Fee - Funding Fee
-        WHEN taker_fee_mode = 1 THEN 
-          ROUND((taker_pnl * collateral_price) - (taker_fee * collateral_price) - (funding_fee * collateral_price), 2)
-        -- For Stop Loss Orders: Base PnL - Stop Loss Fee
-        WHEN taker_mode = 3 THEN 
-          ROUND((taker_pnl * collateral_price) - (taker_sl_fee * collateral_price) - maker_sl_fee, 2)
-        -- For other modes: Just the base PnL
-        ELSE 
-          ROUND(taker_pnl * collateral_price, 2)
-      END AS order_pnl,
+        -- For open/close trades (taker_way 1,2,3,4): Base PnL
+        WHEN taker_way IN (1, 2, 3, 4) THEN
+          COALESCE(taker_pnl, 0) * COALESCE(collateral_price, 0)
+        -- For funding fee only trades
+        WHEN taker_way = 0 THEN
+          COALESCE(funding_fee, 0) * COALESCE(collateral_price, 0)
+        ELSE 0
+      END
+      -- Subtract trading fee for flat fee mode on entry trades
+      - CASE 
+        WHEN taker_fee_mode = 1 AND taker_way IN (1, 3) THEN
+          COALESCE(taker_fee, 0) * COALESCE(collateral_price, 0)
+        ELSE 0
+      END
+      -- Subtract stop loss fees
+      - (COALESCE(taker_sl_fee, 0) * COALESCE(collateral_price, 0) + COALESCE(maker_sl_fee, 0))
+      AS order_pnl,
       -- Flat Fee
       taker_fee * collateral_price AS flat_fee,
       -- Volume in USD
@@ -269,8 +276,8 @@ def fetch_live_trades():
     FROM
       public.trade_fill_fresh
     WHERE
-      taker_way IN (1, 2, 3, 4)
-      AND taker_mode IN (1, 2, 3, 4)
+      taker_way IN (0, 1, 2, 3, 4)  -- Include funding fee trades (0) as well
+      AND (taker_way = 0 OR taker_mode IN (1, 2, 3, 4))  -- Allow all modes for funding, specific modes for others
     ORDER BY
       created_at DESC
     LIMIT 100
@@ -287,52 +294,77 @@ def fetch_live_trades():
 @st.cache_data(ttl=600)
 def fetch_trading_metrics():
     query = """
-    SELECT
-      taker_account_id,
-      CONCAT(taker_account_id, '') AS user_id_str,
-      COUNT(*) AS total_trades,
-      COUNT(CASE WHEN taker_way IN (2, 4) AND taker_pnl > 0 THEN 1 END) AS winning_trades,
-      COUNT(CASE WHEN taker_way IN (2, 4) AND taker_pnl < 0 THEN 1 END) AS losing_trades,
-      COUNT(CASE WHEN taker_way IN (2, 4) AND taker_pnl = 0 THEN 1 END) AS break_even_trades,
-      COUNT(CASE WHEN taker_way = 1 THEN 1 END) AS open_long_count,
-      COUNT(CASE WHEN taker_way = 2 THEN 1 END) AS close_short_count,
-      COUNT(CASE WHEN taker_way = 3 THEN 1 END) AS open_short_count,
-      COUNT(CASE WHEN taker_way = 4 THEN 1 END) AS close_long_count,
-      COUNT(CASE WHEN taker_way IN (1, 3) THEN 1 END) AS opening_positions,
-      COUNT(CASE WHEN taker_way IN (2, 4) THEN 1 END) AS closing_positions,
-      CAST(
-        COUNT(CASE WHEN taker_way IN (2, 4) AND taker_pnl > 0 THEN 1 END) AS FLOAT
-      ) / NULLIF(
-        COUNT(CASE WHEN taker_way IN (2, 4) THEN 1 END), 0
-      ) * 100 AS win_percentage,
-      SUM(
-        CASE
-          WHEN taker_pnl > 0 THEN taker_pnl * collateral_price
-          ELSE 0
-        END
-      ) AS total_profit,
-      SUM(
-        CASE
-          WHEN taker_pnl < 0 THEN taker_pnl * collateral_price
-          ELSE 0
-        END
-      ) AS total_loss,
-      SUM(taker_pnl * collateral_price) AS net_pnl,
-      SUM(taker_share_pnl * collateral_price) AS profit_share,
-      AVG(leverage) AS avg_leverage,
-      MAX(leverage) AS max_leverage,
-      AVG(deal_size) AS avg_position_size,
-      MAX(deal_size) AS max_position_size,
-      COUNT(CASE WHEN taker_mode = 4 THEN 1 END) AS liquidations,
-      STRING_AGG(DISTINCT pair_name, ', ') AS traded_pairs,
-      MIN(created_at + INTERVAL '8 hour') AS first_trade,
-      MAX(created_at + INTERVAL '8 hour') AS last_trade
-    FROM
-      public.trade_fill_fresh
-    GROUP BY
-      taker_account_id, user_id_str
-    ORDER BY
-      total_trades DESC;
+    WITH CombinedResults AS (
+        SELECT
+            t.taker_account_id,
+            CONCAT(t.taker_account_id, '') AS user_id_str,
+            COUNT(*) AS total_trades,
+            COUNT(CASE WHEN t.taker_way IN (2, 4) AND t.taker_pnl > 0 THEN 1 END) AS winning_trades,
+            COUNT(CASE WHEN t.taker_way IN (2, 4) AND t.taker_pnl < 0 THEN 1 END) AS losing_trades,
+            COUNT(CASE WHEN t.taker_way IN (2, 4) AND t.taker_pnl = 0 THEN 1 END) AS break_even_trades,
+            COUNT(CASE WHEN t.taker_way = 1 THEN 1 END) AS open_long_count,
+            COUNT(CASE WHEN t.taker_way = 2 THEN 1 END) AS close_short_count,
+            COUNT(CASE WHEN t.taker_way = 3 THEN 1 END) AS open_short_count,
+            COUNT(CASE WHEN t.taker_way = 4 THEN 1 END) AS close_long_count,
+            COUNT(CASE WHEN t.taker_way IN (1, 3) THEN 1 END) AS opening_positions,
+            COUNT(CASE WHEN t.taker_way IN (2, 4) THEN 1 END) AS closing_positions,
+            -- Win percentage
+            CAST(
+                COUNT(CASE WHEN t.taker_way IN (2, 4) AND t.taker_pnl > 0 THEN 1 END) AS FLOAT
+            ) / NULLIF(
+                COUNT(CASE WHEN t.taker_way IN (2, 4) THEN 1 END), 0
+            ) * 100 AS win_percentage,
+            -- Total profit (only positive PnL)
+            SUM(
+                CASE
+                  WHEN t.taker_pnl > 0 THEN t.taker_pnl * t.collateral_price
+                  ELSE 0
+                END
+            ) AS total_profit,
+            -- Total loss (only negative PnL)
+            SUM(
+                CASE
+                  WHEN t.taker_pnl < 0 THEN t.taker_pnl * t.collateral_price
+                  ELSE 0
+                END
+            ) AS total_loss,
+            -- Net PnL calculation based on the SQL provided
+            -- Total PNL = All Closed Order PNL - Trading Fee (Flat Fee) + Funding Fee - Stop Loss Order Fee
+            SUM(
+                CASE WHEN t.taker_way IN (1, 2, 3, 4) 
+                     THEN COALESCE(t.taker_pnl, 0) * COALESCE(t.collateral_price, 0) 
+                     ELSE 0 END
+            )
+            + SUM(
+                CASE WHEN t.taker_fee_mode = 1 AND t.taker_way IN (1, 3) 
+                     THEN -1 * COALESCE(t.taker_fee, 0) * COALESCE(t.collateral_price, 0) 
+                     ELSE 0 END
+            )
+            + SUM(
+                CASE WHEN t.taker_way = 0 
+                     THEN COALESCE(t.funding_fee, 0) * COALESCE(t.collateral_price, 0) 
+                     ELSE 0 END
+            )
+            + SUM(
+                -COALESCE(t.taker_sl_fee, 0) * COALESCE(t.collateral_price, 0) - COALESCE(t.maker_sl_fee, 0)
+            ) AS net_pnl,
+            -- Profit share
+            SUM(t.taker_share_pnl * t.collateral_price) AS profit_share,
+            AVG(t.leverage) AS avg_leverage,
+            MAX(t.leverage) AS max_leverage,
+            AVG(t.deal_size) AS avg_position_size,
+            MAX(t.deal_size) AS max_position_size,
+            COUNT(CASE WHEN t.taker_mode = 4 THEN 1 END) AS liquidations,
+            STRING_AGG(DISTINCT t.pair_name, ', ') AS traded_pairs,
+            MIN(t.created_at + INTERVAL '8 hour') AS first_trade,
+            MAX(t.created_at + INTERVAL '8 hour') AS last_trade
+        FROM
+            public.trade_fill_fresh t
+        GROUP BY
+            t.taker_account_id, user_id_str
+    )
+    SELECT * FROM CombinedResults
+    ORDER BY total_trades DESC;
     """
     
     try:
@@ -397,18 +429,26 @@ def fetch_user_trade_details_v4(user_id):
       ROUND(taker_pnl * collateral_price, 2) AS user_received_pnl,
       -- Platform Profit Share
       ROUND(taker_share_pnl * collateral_price, 2) AS profit_share,
-      -- CORRECTED Order PnL Calculation based on discussion
+      -- Individual Order PnL Calculation
+      -- Based on the formula components but for individual trades
       CASE
-        -- For Flat Fee Mode: Base PnL - Trading Fee - Funding Fee
-        WHEN taker_fee_mode = 1 THEN 
-          ROUND((taker_pnl * collateral_price) - (taker_fee * collateral_price) - (funding_fee * collateral_price), 2)
-        -- For Stop Loss Orders: Base PnL - Stop Loss Fee
-        WHEN taker_mode = 3 THEN 
-          ROUND((taker_pnl * collateral_price) - (taker_sl_fee * collateral_price) - maker_sl_fee, 2)
-        -- For other modes: Just the base PnL
-        ELSE 
-          ROUND(taker_pnl * collateral_price, 2)
-      END AS order_pnl,
+        -- For open/close trades (taker_way 1,2,3,4): Base PnL
+        WHEN taker_way IN (1, 2, 3, 4) THEN
+          COALESCE(taker_pnl, 0) * COALESCE(collateral_price, 0)
+        -- For funding fee only trades
+        WHEN taker_way = 0 THEN
+          COALESCE(funding_fee, 0) * COALESCE(collateral_price, 0)
+        ELSE 0
+      END
+      -- Subtract trading fee for flat fee mode on entry trades
+      - CASE 
+        WHEN taker_fee_mode = 1 AND taker_way IN (1, 3) THEN
+          COALESCE(taker_fee, 0) * COALESCE(collateral_price, 0)
+        ELSE 0
+      END
+      -- Subtract stop loss fees
+      - (COALESCE(taker_sl_fee, 0) * COALESCE(collateral_price, 0) + COALESCE(maker_sl_fee, 0))
+      AS order_pnl,
       -- Calculate profit share percentage
       CASE 
         WHEN (taker_pnl * collateral_price + taker_share_pnl * collateral_price) != 0 THEN 
@@ -897,11 +937,12 @@ if trading_metrics_df is not None:
             chart_df['trade_time'] = pd.to_datetime(user_trades['trade_time'])
             chart_df['position_action'] = user_trades['position_action']
             chart_df['order_pnl'] = user_trades['order_pnl']
+            chart_df['trade_type'] = user_trades['trade_type']
             
             # Sort by time
             chart_df = chart_df.sort_values('trade_time')
             
-            # Calculate cumulative PnL (sum of all order PnLs as per discussion)
+            # Calculate cumulative PnL (sum of all order PnLs)
             chart_df['cumulative_pnl'] = chart_df['order_pnl'].cumsum()
             
             # Create the chart
@@ -909,8 +950,8 @@ if trading_metrics_df is not None:
                 chart_df,
                 x='trade_time',
                 y='cumulative_pnl',
-                title='Cumulative Order PnL Over Time',
-                labels={'trade_time': 'Trade Time', 'cumulative_pnl': 'Cumulative Order PnL (USD)'}
+                title='Cumulative PnL Over Time',
+                labels={'trade_time': 'Trade Time', 'cumulative_pnl': 'Cumulative PnL (USD)'}
             )
             
             # Add markers
@@ -920,18 +961,23 @@ if trading_metrics_df is not None:
             
             # Verify cumulative PnL
             final_cumulative_pnl = chart_df['cumulative_pnl'].iloc[-1]
+            expected_net_pnl = user_data['net_pnl']
             sum_order_pnl = chart_df['order_pnl'].sum()
             
             st.info(f"""
             **PnL Verification:**
             - Sum of All Order PnLs: ${sum_order_pnl:.2f}
             - Final Cumulative PnL: ${final_cumulative_pnl:.2f}
+            - Expected Net PnL (from metrics): ${expected_net_pnl:.2f}
+            - Difference: ${abs(final_cumulative_pnl - expected_net_pnl):.2f}
             
-            Based on the discussion:
-            - Order PnL = Base PnL - Fees (based on mode)
-            - For Flat Fee Mode: Base PnL - Trading Fee - Funding Fee
-            - For Stop Loss Orders: Base PnL - Stop Loss Fee
-            - Cumulative PnL = Sum of all Order PnLs
+            **Formula Components (Based on SQL):**
+            - All Closed Order PnL (taker_way 1,2,3,4): Base PnL * Price
+            - Funding Fee (taker_way 0): Funding Fee * Price
+            - Trading Fee: -1 * Fee * Price (for flat fee mode on entry trades)
+            - Stop Loss Fee: -(SL Fee * Price + Maker SL Fee)
+            
+            **Total PnL = All Closed Order PnL - Trading Fee + Funding Fee - Stop Loss Order Fee**
             """)
             
         else:
@@ -956,13 +1002,15 @@ This dashboard provides comprehensive analysis of user behavior and live platfor
 - All-time PnL since launch
 - Excludes specified test accounts
 
-**PnL Calculations:**
-- Order PnL:
-  - For Flat Fee Mode: Base PnL - Trading Fee - Funding Fee
-  - For Stop Loss Orders: Base PnL - Stop Loss Fee
-  - For other modes: Base PnL only
+**PnL Calculations (Based on SQL Formula):**
+- **Total PnL = All Closed Order PnL - Trading Fee + Funding Fee - Stop Loss Fee**
+  - All Closed Order PnL: Base trades (taker_way 1,2,3,4)
+  - Trading Fee: Flat fee mode on entry trades (taker_way 1,3)
+  - Funding Fee: Funding fee trades (taker_way 0)
+  - Stop Loss Fee: SL fees on all trades
+  
 - User Received PNL = taker_pnl * collateral_price
 - Profit Share = taker_share_pnl * collateral_price
-- Cumulative PnL = Sum of all Order PnLs for a user
-- % Distance = (Pbefore - Pentry) / Pentry * 100
+- Order PnL = Calculated per trade based on formula
+- Cumulative PnL = Sum of all Order PnLs
 """)
