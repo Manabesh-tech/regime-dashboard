@@ -161,7 +161,7 @@ def get_volatility_data_simplified(token, hours=12):
         df = pd.read_sql_query(query, engine)
     
     if df.empty:
-        return None
+        return None, None
     
     # Process timestamps
     df['timestamp'] = pd.to_datetime(df['timestamp'])
@@ -194,45 +194,44 @@ def get_volatility_data_simplified(token, hours=12):
             })
     
     if not result:
-        return None
+        return None, None
     
     result_df = pd.DataFrame(result).set_index('timestamp')
-    return result_df
+    
+    # Calculate percentiles for the last 12 hours
+    vol_pct = result_df['realized_vol'] * 100
+    percentiles = {
+        'p25': np.percentile(vol_pct, 25),
+        'p50': np.percentile(vol_pct, 50),
+        'p75': np.percentile(vol_pct, 75),
+        'p95': np.percentile(vol_pct, 95)
+    }
+    
+    return result_df, percentiles
 
 # Simplified ranking function
 @st.cache_data(ttl=300)
 def get_rankings_simplified():
-    """Get both volatility and Rollbit rankings in one query"""
+    """Get both volatility and Rollbit rankings"""
     
-    # Volatility ranking - optimized query
-    vol_query = """
-    WITH recent_prices AS (
-        SELECT 
-            pair_name,
-            created_at + INTERVAL '8 hour' AS timestamp,
-            final_price,
-            LAG(final_price) OVER (PARTITION BY pair_name ORDER BY created_at) as prev_price
-        FROM oracle_price_log
-        WHERE created_at >= NOW() - INTERVAL '12 hour'
-        AND source_type = 0
-    ),
-    volatility_calc AS (
-        SELECT 
-            pair_name,
-            STDDEV(LN(final_price/prev_price)) * SQRT(31536000) * 100 as avg_volatility
-        FROM recent_prices
-        WHERE prev_price IS NOT NULL
-        GROUP BY pair_name
-        HAVING COUNT(*) > 100
-    )
-    SELECT 
-        pair_name,
-        avg_volatility,
-        ROW_NUMBER() OVER (ORDER BY avg_volatility DESC) as vol_rank
-    FROM volatility_calc
-    ORDER BY avg_volatility DESC
-    LIMIT 50
-    """
+    # Get all tokens volatility for ranking
+    results = []
+    
+    for token in all_tokens[:50]:  # Limit to top 50 for speed
+        try:
+            vol_data, _ = get_volatility_data_simplified(token, hours=12)
+            
+            if vol_data is not None and not vol_data.empty:
+                avg_vol = vol_data['realized_vol'].mean() * 100  # Convert to percentage
+                results.append({
+                    'pair_name': token,
+                    'avg_volatility': avg_vol
+                })
+        except:
+            continue
+    
+    vol_df = pd.DataFrame(results).sort_values('avg_volatility', ascending=False)
+    vol_df['vol_rank'] = range(1, len(vol_df) + 1)
     
     # Rollbit ranking
     rollbit_query = """
@@ -256,7 +255,6 @@ def get_rankings_simplified():
     LIMIT 50
     """
     
-    vol_df = pd.read_sql_query(vol_query, engine)
     rollbit_df = pd.read_sql_query(rollbit_query, engine)
     
     return vol_df, rollbit_df
@@ -264,7 +262,7 @@ def get_rankings_simplified():
 # Main chart section
 with tab1:
     with st.spinner(f"Loading data for {selected_token}..."):
-        vol_data = get_volatility_data_simplified(selected_token)
+        vol_data, percentiles = get_volatility_data_simplified(selected_token)
         rollbit_params = fetch_rollbit_parameters_simplified(selected_token)
 
     if vol_data is not None and not vol_data.empty:
@@ -277,6 +275,10 @@ with tab1:
         avg_vol = vol_data_pct['realized_vol'].mean()
         max_vol = vol_data_pct['realized_vol'].max()
         min_vol = vol_data_pct['realized_vol'].min()
+        
+        # Calculate current percentile
+        all_vols = vol_data_pct['realized_vol'].values
+        current_percentile = (all_vols < current_vol).mean() * 100
 
         # Create simple plot
         fig = go.Figure()
@@ -292,13 +294,34 @@ with tab1:
             )
         )
 
-        # Add average line
+        # Add percentile lines
+        percentile_lines = [
+            ('p25', '#2ECC71', '25th'),  # Green
+            ('p50', '#3498DB', '50th'),  # Blue
+            ('p75', '#F39C12', '75th'),  # Orange
+            ('p95', '#E74C3C', '95th')   # Red
+        ]
+
+        for key, color, label in percentile_lines:
+            fig.add_hline(
+                y=percentiles[key],
+                line_dash="dash",
+                line_color=color,
+                line_width=2,
+                annotation_text=f"{label}: {percentiles[key]:.1f}%",
+                annotation_position="left",
+                annotation_font_color=color
+            )
+
+        # Add current level indicator
         fig.add_hline(
-            y=avg_vol,
-            line_dash="dash",
-            line_color="gray",
-            annotation_text=f"Avg: {avg_vol:.1f}%",
-            annotation_position="right"
+            y=current_vol,
+            line_dash="solid",
+            line_color="black",
+            line_width=3,
+            annotation_text=f"Current: {current_vol:.1f}%",
+            annotation_position="right",
+            annotation_font_color="black"
         )
 
         # Add Rollbit data if available
@@ -307,10 +330,10 @@ with tab1:
             latest_pos_mult = rollbit_params['position_multiplier'].iloc[-1]
             
             title_text = f"{selected_token} - 1min Volatility (12h)<br>" + \
-                        f"<sub>Current: {current_vol:.1f}% | Buffer: {latest_buffer:.3f}% | Pos Mult: {latest_pos_mult:,.0f}</sub>"
+                        f"<sub>Current: {current_vol:.1f}% ({current_percentile:.0f}th percentile) | Buffer: {latest_buffer:.3f}% | Pos Mult: {latest_pos_mult:,.0f}</sub>"
         else:
             title_text = f"{selected_token} - 1min Volatility (12h)<br>" + \
-                        f"<sub>Current: {current_vol:.1f}% | Avg: {avg_vol:.1f}%</sub>"
+                        f"<sub>Current: {current_vol:.1f}% ({current_percentile:.0f}th percentile)</sub>"
 
         # Update layout
         fig.update_layout(
@@ -334,21 +357,33 @@ with tab1:
             showgrid=True,
             gridwidth=1,
             gridcolor='LightGray',
-            range=[0, max(max_vol * 1.1, 5)]
+            range=[0, max(max_vol * 1.1, percentiles['p95'] * 1.1, 5)]
         )
 
         st.plotly_chart(fig, use_container_width=True)
 
-        # Simple metrics display
+        # Metrics display with percentiles
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.metric("Current", f"{current_vol:.1f}%")
+            st.metric("Current", f"{current_vol:.1f}%", f"{current_percentile:.0f}th %ile")
         with col2:
             st.metric("Average", f"{avg_vol:.1f}%")
         with col3:
             st.metric("Max", f"{max_vol:.1f}%")
         with col4:
             st.metric("Min", f"{min_vol:.1f}%")
+        
+        # Percentile display
+        st.markdown("### Percentiles (12h)")
+        pcol1, pcol2, pcol3, pcol4 = st.columns(4)
+        with pcol1:
+            st.metric("25th", f"{percentiles['p25']:.1f}%")
+        with pcol2:
+            st.metric("50th", f"{percentiles['p50']:.1f}%")
+        with pcol3:
+            st.metric("75th", f"{percentiles['p75']:.1f}%")
+        with pcol4:
+            st.metric("95th", f"{percentiles['p95']:.1f}%")
 
     else:
         st.error("No volatility data available for the selected token")
