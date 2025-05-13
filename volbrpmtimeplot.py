@@ -295,56 +295,69 @@ with tab1:
             row_heights=[0.4, 0.3, 0.3]
         )
 
-        # Panel 1: Volatility
-        fig.add_trace(
-            go.Scatter(
-                x=vol_data_pct.index,
-                y=vol_data_pct['realized_vol'],
-                mode='lines',
-                line=dict(color='blue', width=2),
-                name="Volatility (%)",
-                showlegend=False
-            ),
-            row=1, col=1
-        )
-
-        # Add percentile lines
-        percentile_lines = [
-            ('p25', '#2ECC71', '25th'),  # Green
-            ('p50', '#3498DB', '50th'),  # Blue
-            ('p75', '#F39C12', '75th'),  # Orange
-            ('p95', '#E74C3C', '95th')   # Red
-        ]
-
-        for key, color, label in percentile_lines:
-            fig.add_hline(
-                y=percentiles[key],
-                line_dash="dash",
-                line_color=color,
-                line_width=2,
-                annotation_text=f"{label}: {percentiles[key]:.1f}%",
-                annotation_position="left",
-                annotation_font_color=color,
-                row=1, col=1
-            )
-
-        # Panel 2 & 3: Rollbit data if available
+        # Process Rollbit data if available
         if rollbit_params is not None and not rollbit_params.empty:
-            # Resample to match volatility data
+            # Resample Rollbit data to 1-minute intervals to match volatility data
             rollbit_resampled = rollbit_params.resample('1min').ffill()
             
+            # Merge with volatility data to ensure aligned timestamps
+            combined_data = pd.merge(
+                vol_data_pct,
+                rollbit_resampled,
+                left_index=True,
+                right_index=True,
+                how='left',
+                suffixes=('', '_rollbit')
+            )
+            
+            # Forward fill any missing Rollbit values
+            combined_data['buffer_rate'] = combined_data['buffer_rate'].ffill()
+            combined_data['position_multiplier'] = combined_data['position_multiplier'].ffill()
+            
             # Convert buffer rate to percentage
-            rollbit_resampled['buffer_rate_pct'] = rollbit_resampled['buffer_rate'] * 100
+            combined_data['buffer_rate_pct'] = combined_data['buffer_rate'] * 100
+            
+            # Create unified hover data
+            hover_template = (
+                "<b>Time: %{x}</b><br>" +
+                "Volatility: %{customdata[0]:.1f}%<br>" +
+                "Buffer Rate: %{customdata[1]:.3f}%<br>" +
+                "Position Mult: %{customdata[2]:,.0f}<br>" +
+                "<extra></extra>"
+            )
+            
+            customdata = np.column_stack((
+                combined_data['realized_vol'],
+                combined_data['buffer_rate_pct'],
+                combined_data['position_multiplier']
+            ))
+            
+            # Panel 1: Volatility
+            fig.add_trace(
+                go.Scatter(
+                    x=combined_data.index,
+                    y=combined_data['realized_vol'],
+                    mode='lines',
+                    line=dict(color='blue', width=2),
+                    name="Volatility (%)",
+                    customdata=customdata,
+                    hovertemplate=hover_template,
+                    showlegend=False
+                ),
+                row=1, col=1
+            )
             
             # Panel 2: Buffer Rate
             fig.add_trace(
                 go.Scatter(
-                    x=rollbit_resampled.index,
-                    y=rollbit_resampled['buffer_rate_pct'],
+                    x=combined_data.index,
+                    y=combined_data['buffer_rate_pct'],
                     mode='lines+markers',
                     line=dict(color='darkgreen', width=3),
                     marker=dict(size=6),
                     name="Buffer Rate (%)",
+                    customdata=customdata,
+                    hovertemplate=hover_template,
                     showlegend=False
                 ),
                 row=2, col=1
@@ -353,23 +366,52 @@ with tab1:
             # Panel 3: Position Multiplier
             fig.add_trace(
                 go.Scatter(
-                    x=rollbit_resampled.index,
-                    y=rollbit_resampled['position_multiplier'],
+                    x=combined_data.index,
+                    y=combined_data['position_multiplier'],
                     mode='lines+markers',
                     line=dict(color='darkblue', width=3),
                     marker=dict(size=6),
                     name="Position Multiplier",
+                    customdata=customdata,
+                    hovertemplate=hover_template,
                     showlegend=False
                 ),
                 row=3, col=1
             )
             
-            latest_buffer = rollbit_params['buffer_rate'].iloc[-1] * 100
-            latest_pos_mult = rollbit_params['position_multiplier'].iloc[-1]
+            # Get latest values for title
+            latest_buffer = combined_data['buffer_rate_pct'].iloc[-1]
+            latest_pos_mult = combined_data['position_multiplier'].iloc[-1]
             
-            title_text = f"{selected_token} Analysis Dashboard<br>" + \
-                        f"<sub>Current Vol: {current_vol:.1f}% ({current_percentile:.0f}th percentile) | Buffer: {latest_buffer:.3f}% | Pos Mult: {latest_pos_mult:,.0f}</sub>"
+            # Auto-scale y-axes
+            buffer_min = combined_data['buffer_rate_pct'].min()
+            buffer_max = combined_data['buffer_rate_pct'].max()
+            pos_mult_min = combined_data['position_multiplier'].min()
+            pos_mult_max = combined_data['position_multiplier'].max()
+            
         else:
+            # If no Rollbit data, only show volatility
+            hover_template = (
+                "<b>Time: %{x}</b><br>" +
+                "Volatility: %{y:.1f}%<br>" +
+                "Buffer Rate: N/A<br>" +
+                "Position Mult: N/A<br>" +
+                "<extra></extra>"
+            )
+            
+            fig.add_trace(
+                go.Scatter(
+                    x=vol_data_pct.index,
+                    y=vol_data_pct['realized_vol'],
+                    mode='lines',
+                    line=dict(color='blue', width=2),
+                    name="Volatility (%)",
+                    hovertemplate=hover_template,
+                    showlegend=False
+                ),
+                row=1, col=1
+            )
+            
             # Add notes if no Rollbit data
             fig.add_annotation(
                 x=0.5,
@@ -393,6 +435,36 @@ with tab1:
                 row=3, col=1
             )
             
+            latest_buffer = None
+            latest_pos_mult = None
+            buffer_min = buffer_max = 0
+            pos_mult_min = pos_mult_max = 1
+
+        # Add percentile lines
+        percentile_lines = [
+            ('p25', '#2ECC71', '25th'),  # Green
+            ('p50', '#3498DB', '50th'),  # Blue
+            ('p75', '#F39C12', '75th'),  # Orange
+            ('p95', '#E74C3C', '95th')   # Red
+        ]
+
+        for key, color, label in percentile_lines:
+            fig.add_hline(
+                y=percentiles[key],
+                line_dash="dash",
+                line_color=color,
+                line_width=2,
+                annotation_text=f"{label}: {percentiles[key]:.1f}%",
+                annotation_position="left",
+                annotation_font_color=color,
+                row=1, col=1
+            )
+
+        # Create title
+        if latest_buffer is not None and latest_pos_mult is not None:
+            title_text = f"{selected_token} Analysis Dashboard<br>" + \
+                        f"<sub>Current Vol: {current_vol:.1f}% ({current_percentile:.0f}th percentile) | Buffer: {latest_buffer:.3f}% | Pos Mult: {latest_pos_mult:,.0f}</sub>"
+        else:
             title_text = f"{selected_token} Analysis Dashboard<br>" + \
                         f"<sub>Current Vol: {current_vol:.1f}% ({current_percentile:.0f}th percentile)</sub>"
 
@@ -401,26 +473,73 @@ with tab1:
             title=title_text,
             height=800,
             showlegend=False,
-            hovermode="x",
+            hovermode="x unified",
             plot_bgcolor='white',
-            paper_bgcolor='white'
+            paper_bgcolor='white',
+            hoverlabel=dict(
+                bgcolor="white",
+                bordercolor="black",
+                font_size=12
+            ),
+            # Enable spike lines
+            xaxis=dict(
+                showspikes=True,
+                spikemode="across",
+                spikesnap="cursor",
+                spikethickness=2,
+                spikecolor="gray",
+                spikedash="solid"
+            )
         )
 
-        # Update axes
-        fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='LightGray')
-        fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='LightGray')
+        # Update all x-axes to have spikes
+        for i in range(1, 4):
+            fig.update_xaxes(
+                showspikes=True,
+                spikemode="across",
+                spikesnap="cursor",
+                spikethickness=2,
+                spikecolor="gray",
+                spikedash="solid",
+                showgrid=True,
+                gridwidth=1,
+                gridcolor='LightGray',
+                row=i, col=1
+            )
 
-        # X-axis labels only on bottom
-        fig.update_xaxes(title_text="Time (Singapore)", row=3, col=1, tickformat="%H:%M<br>%m/%d")
-        
-        # Y-axis labels
+        # Update y-axes with auto-scaling
         fig.update_yaxes(
             title_text="Volatility (%)",
             row=1, col=1,
+            showgrid=True,
+            gridwidth=1,
+            gridcolor='LightGray',
             range=[0, max(max_vol * 1.1, percentiles['p95'] * 1.1, 5)]
         )
-        fig.update_yaxes(title_text="Buffer Rate (%)", row=2, col=1, tickformat=".3f")
-        fig.update_yaxes(title_text="Position Multiplier", row=3, col=1, tickformat=",")
+        
+        if latest_buffer is not None:
+            fig.update_yaxes(
+                title_text="Buffer Rate (%)",
+                row=2, col=1,
+                tickformat=".3f",
+                showgrid=True,
+                gridwidth=1,
+                gridcolor='LightGray',
+                range=[buffer_min * 0.95, buffer_max * 1.05] if buffer_max > buffer_min else None
+            )
+            
+            fig.update_yaxes(
+                title_text="Position Multiplier",
+                row=3, col=1,
+                tickformat=",",
+                showgrid=True,
+                gridwidth=1,
+                gridcolor='LightGray',
+                range=[pos_mult_min * 0.95, pos_mult_max * 1.05] if pos_mult_max > pos_mult_min else None
+            )
+        
+        # X-axis labels only on bottom
+        fig.update_xaxes(title_text="Time (Singapore)", row=3, col=1, tickformat="%H:%M<br>%m/%d")
 
         st.plotly_chart(fig, use_container_width=True)
 
@@ -448,7 +567,7 @@ with tab1:
             st.metric("95th", f"{percentiles['p95']:.1f}%")
 
         # Current Rollbit metrics if available
-        if rollbit_params is not None and not rollbit_params.empty:
+        if rollbit_params is not None and not rollbit_params.empty and latest_buffer is not None:
             st.markdown("### Current Rollbit Parameters")
             rcol1, rcol2 = st.columns(2)
             with rcol1:
