@@ -81,8 +81,8 @@ def fetch_rollbit_parameters_historical(token, hours=24):
         start_time_sg = now_sg - timedelta(hours=hours+1)  # Extra hour for buffer
 
         # Convert to UTC for database query
-        start_time_utc = start_time_sg.astimezone(pytz.utc)
-        end_time_utc = now_sg.astimezone(pytz.utc)
+        start_time_utc = start_time_sg.replace(tzinfo=None)
+        end_time_utc = now_sg.replace(tzinfo=None)
 
         # Format timestamps
         start_str = start_time_utc.strftime("%Y-%m-%d %H:%M:%S")
