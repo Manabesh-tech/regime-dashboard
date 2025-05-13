@@ -714,31 +714,6 @@ with tab2:
     else:
         st.warning("No common tokens found between Surf and Rollbit")
     
-    # Original correlation display
-    st.markdown("### Overall Correlation")
-    
-    if not vol_ranking.empty and not rollbit_ranking.empty:
-        # Merge the rankings
-        comparison = pd.merge(
-            vol_ranking,
-            rollbit_ranking,
-            on='pair_name',
-            how='inner'
-        )
-        
-        if not comparison.empty:
-            # Calculate correlations
-            rank_corr, _ = spearmanr(comparison['vol_rank'], comparison['buffer_rank'])
-            value_corr, _ = spearmanr(comparison['avg_volatility'], comparison['buffer_rate_pct'])
-            
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.metric("Rank Correlation", f"{rank_corr:.3f}")
-            
-            with col2:
-                st.metric("Value Correlation", f"{value_corr:.3f}")
-    
     if st.button("Refresh Rankings", type="primary"):
         st.cache_data.clear()
         st.rerun()
