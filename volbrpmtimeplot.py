@@ -70,7 +70,7 @@ with tab1:
 
 # Optimized Rollbit fetch - only get last value and minimal history
 @st.cache_data(ttl=300)
-def fetch_rollbit_parameters_simplified(token, hours=12):
+def fetch_rollbit_parameters_simplified(token, hours=18):
     """Fetch simplified Rollbit parameters"""
     try:
         now_sg = datetime.now(pytz.timezone('Asia/Singapore'))
@@ -81,24 +81,16 @@ def fetch_rollbit_parameters_simplified(token, hours=12):
 
         # Only get hourly samples to reduce data
         query = f"""
-        WITH hourly_data AS (
-            SELECT 
-                date_trunc('hour', created_at + INTERVAL '8 hour') AS hour_timestamp,
-                bust_buffer AS buffer_rate,
-                position_multiplier,
-                ROW_NUMBER() OVER (PARTITION BY date_trunc('hour', created_at + INTERVAL '8 hour') ORDER BY created_at DESC) as rn
-            FROM rollbit_pair_config 
-            WHERE pair_name = '{token}'
-            AND created_at >= '{start_str}'::timestamp - INTERVAL '8 hour'
-            AND created_at <= '{end_str}'::timestamp - INTERVAL '8 hour'
-        )
-        SELECT 
-            hour_timestamp as timestamp,
-            buffer_rate,
-            position_multiplier
-        FROM hourly_data
-        WHERE rn = 1
-        ORDER BY hour_timestamp
+         SELECT 
+            pair_name,
+            bust_buffer AS buffer_rate,
+            position_multiplier,
+            created_at + INTERVAL '8 hour' AS timestamp
+        FROM rollbit_pair_config 
+        WHERE pair_name = '{token}'
+        AND created_at >= '{start_str}'::timestamp - INTERVAL '8 hour'
+        AND created_at <= '{end_str}'::timestamp - INTERVAL '8 hour'
+        ORDER BY created_at
         """
 
         df = pd.read_sql_query(query, engine)
