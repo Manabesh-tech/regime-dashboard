@@ -1,4 +1,4 @@
-# Save this as complete_1min_volatility_with_rankings.py
+# Save this as optimized_1min_volatility_rankings.py
 
 import streamlit as st
 import pandas as pd
@@ -13,9 +13,9 @@ from sqlalchemy import create_engine
 st.set_page_config(page_title="1min Volatility Plot with Rollbit", page_icon="📈", layout="wide")
 
 # --- UI Setup ---
-st.title("1-Minute Volatility Plot with Historical Rollbit Parameters")
+st.title("1-Minute Volatility Plot with Rollbit Rankings")
 
-# DB connection using SQLAlchemy for better pandas compatibility
+# DB connection
 db_params = {
     'host': 'aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com',
     'port': 5432,
@@ -24,15 +24,14 @@ db_params = {
     'password': '866^FKC4hllk'
 }
 
-# Create SQLAlchemy engine for pandas
 engine = create_engine(
     f"postgresql://{db_params['user']}:{db_params['password']}@{db_params['host']}:{db_params['port']}/{db_params['database']}"
 )
 
-# Keep psycopg2 connection for cursor operations
 conn = psycopg2.connect(**db_params)
 
-# Get available tokens
+# Cache token list for longer
+@st.cache_data(ttl=3600)  # Cache for 1 hour
 def fetch_trading_pairs():
     query = """
     SELECT pair_name 
@@ -40,22 +39,18 @@ def fetch_trading_pairs():
     WHERE status = 1
     ORDER BY pair_name
     """
-
     df = pd.read_sql_query(query, engine)
     return df['pair_name'].tolist()
 
-# Get all tokens
 all_tokens = fetch_trading_pairs()
 
 # Create tabs
 tab1, tab2 = st.tabs(["Volatility Chart", "Rankings"])
 
 with tab1:
-    # UI Controls
     col1, col2 = st.columns([3, 1])
 
     with col1:
-        # Select token
         default_token = "BTC/USDT" if "BTC/USDT" in all_tokens else all_tokens[0]
         selected_token = st.selectbox(
             "Select Token",
@@ -64,239 +59,183 @@ with tab1:
         )
 
     with col2:
-        # Refresh button
         if st.button("Refresh Data", type="primary", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
 
-    # Singapore time
     sg_tz = pytz.timezone('Asia/Singapore')
-    now_utc = datetime.now(pytz.utc)
-    now_sg = now_utc.astimezone(sg_tz)
+    now_sg = datetime.now(sg_tz)
     st.write(f"Current time (Singapore): {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
 
-# Fetch historical Rollbit parameters
+# Optimized Rollbit fetch - only get last value and minimal history
 @st.cache_data(ttl=300)
-def fetch_rollbit_parameters_historical(token, hours=24):
-    """Fetch historical Rollbit parameters for the selected token"""
+def fetch_rollbit_parameters_simplified(token, hours=12):
+    """Fetch simplified Rollbit parameters"""
     try:
-        # Time range matching volatility data
         now_sg = datetime.now(pytz.timezone('Asia/Singapore'))
-        start_time_sg = now_sg - timedelta(hours=hours+1)  # Extra hour for buffer
+        start_time_sg = now_sg - timedelta(hours=hours)
+        
+        start_str = start_time_sg.strftime("%Y-%m-%d %H:%M:%S")
+        end_str = now_sg.strftime("%Y-%m-%d %H:%M:%S")
 
-        # Convert to UTC for database query
-        start_time_utc = start_time_sg.replace(tzinfo=None)
-        end_time_utc = now_sg.replace(tzinfo=None)
-
-        # Format timestamps
-        start_str = start_time_utc.strftime("%Y-%m-%d %H:%M:%S")
-        end_str = end_time_utc.strftime("%Y-%m-%d %H:%M:%S")
-
+        # Only get hourly samples to reduce data
         query = f"""
+        WITH hourly_data AS (
+            SELECT 
+                date_trunc('hour', created_at + INTERVAL '8 hour') AS hour_timestamp,
+                bust_buffer AS buffer_rate,
+                position_multiplier,
+                ROW_NUMBER() OVER (PARTITION BY date_trunc('hour', created_at + INTERVAL '8 hour') ORDER BY created_at DESC) as rn
+            FROM rollbit_pair_config 
+            WHERE pair_name = '{token}'
+            AND created_at >= '{start_str}'::timestamp - INTERVAL '8 hour'
+            AND created_at <= '{end_str}'::timestamp - INTERVAL '8 hour'
+        )
         SELECT 
-            pair_name,
-            bust_buffer AS buffer_rate,
-            position_multiplier,
-            created_at + INTERVAL '8 hour' AS timestamp
-        FROM rollbit_pair_config 
-        WHERE pair_name = '{token}'
-        AND created_at >= '{start_str}'::timestamp - INTERVAL '8 hour'
-        AND created_at <= '{end_str}'::timestamp - INTERVAL '8 hour'
-        ORDER BY created_at
+            hour_timestamp as timestamp,
+            buffer_rate,
+            position_multiplier
+        FROM hourly_data
+        WHERE rn = 1
+        ORDER BY hour_timestamp
         """
 
         df = pd.read_sql_query(query, engine)
-
         if not df.empty:
             df['timestamp'] = pd.to_datetime(df['timestamp'])
             df = df.set_index('timestamp').sort_index()
-            return df
-        return None
+        return df
     except Exception as e:
         st.error(f"Error fetching Rollbit parameters: {e}")
         return None
 
-# Get partition tables
-def get_partition_tables(start_date, end_date):
-    if isinstance(start_date, str):
-        start_date = pd.to_datetime(start_date)
-    if isinstance(end_date, str):
-        end_date = pd.to_datetime(end_date)
-
-    # Remove timezone
-    start_date = start_date.replace(tzinfo=None)
-    end_date = end_date.replace(tzinfo=None)
-
-    # Generate all dates
-    dates = []
-    current_date = start_date
-    while current_date <= end_date:
-        dates.append(current_date.strftime("%Y%m%d"))
-        current_date += timedelta(days=1)
-
-    # Table names
-    table_names = [f"oracle_price_log_partition_{date}" for date in dates]
-
-    # Check which tables exist
-    cursor = conn.cursor()
-    if table_names:
-        table_list_str = "', '".join(table_names)
-        cursor.execute(f"""
-            SELECT table_name 
-            FROM information_schema.tables 
-            WHERE table_schema = 'public' 
-            AND table_name IN ('{table_list_str}')
-        """)
-
-        existing_tables = [row[0] for row in cursor.fetchall()]
-    cursor.close()
-
-    return existing_tables
-
-# Build query for partition tables - Modified for 500ms data
-def build_query(tables, token, start_time, end_time):
-    if not tables:
-        return ""
-
-    union_parts = []
-    for table in tables:
-        # IMPORTANT: Add 8 hours to convert to Singapore time
-        # Note: Don't add ORDER BY to individual queries before UNION
-        query = f"""
-        SELECT 
-            pair_name,
-            created_at + INTERVAL '8 hour' AS timestamp,
-            final_price
-        FROM 
-            public.{table}
-        WHERE 
-            created_at >= '{start_time}'::timestamp - INTERVAL '8 hour'
-            AND created_at <= '{end_time}'::timestamp - INTERVAL '8 hour'
-            AND source_type = 0
-            AND pair_name = '{token}'
-        """
-        union_parts.append(query)
-
-    return " UNION ALL ".join(union_parts) + " ORDER BY timestamp"
-
-# Calculate volatility with percentiles - MODIFIED FOR 1 MINUTE WINDOWS
-@st.cache_data(ttl=60)  # Short cache to ensure fresh data
-def get_volatility_data_with_percentiles(token, display_hours=24, history_days=1):
-    # Time range - only 1 day for faster loading
+# Simplified volatility calculation - only 12 hours
+@st.cache_data(ttl=60)
+def get_volatility_data_simplified(token, hours=12):
     now_sg = datetime.now(pytz.timezone('Asia/Singapore'))
-    start_time_sg = now_sg - timedelta(days=history_days)
-
-    # Get relevant partition tables
-    start_date = start_time_sg.replace(tzinfo=None)
-    end_date = now_sg.replace(tzinfo=None)
-    partition_tables = get_partition_tables(start_date, end_date)
-
-    if not partition_tables:
-        st.error(f"No data tables found for {start_date} to {end_date}")
-        return None, None
-
-    # Convert to strings for query
+    start_time_sg = now_sg - timedelta(hours=hours+1)  # Extra hour for buffer
+    
+    # Only get today's partition to speed up
+    today_str = now_sg.strftime("%Y%m%d")
+    yesterday_str = (now_sg - timedelta(days=1)).strftime("%Y%m%d")
+    
+    tables = [f"oracle_price_log_partition_{yesterday_str}", f"oracle_price_log_partition_{today_str}"]
+    
     start_time_str = start_time_sg.strftime("%Y-%m-%d %H:%M:%S")
     end_time_str = now_sg.strftime("%Y-%m-%d %H:%M:%S")
-
-    # Build and execute query
-    query = build_query(partition_tables, token, start_time_str, end_time_str)
-
-    with st.spinner(f"Loading data..."):
+    
+    # Build query for both tables
+    queries = []
+    for table in tables:
+        query = f"""
+        SELECT 
+            created_at + INTERVAL '8 hour' AS timestamp,
+            final_price
+        FROM public.{table}
+        WHERE created_at >= '{start_time_str}'::timestamp - INTERVAL '8 hour'
+        AND created_at <= '{end_time_str}'::timestamp - INTERVAL '8 hour'
+        AND source_type = 0
+        AND pair_name = '{token}'
+        """
+        queries.append(query)
+    
+    # Union query
+    final_query = " UNION ALL ".join(queries) + " ORDER BY timestamp"
+    
+    # Execute query
+    try:
+        df = pd.read_sql_query(final_query, engine)
+    except:
+        # If yesterday's table doesn't exist, only use today
+        query = f"""
+        SELECT 
+            created_at + INTERVAL '8 hour' AS timestamp,
+            final_price
+        FROM public.oracle_price_log_partition_{today_str}
+        WHERE created_at >= '{start_time_str}'::timestamp - INTERVAL '8 hour'
+        AND created_at <= '{end_time_str}'::timestamp - INTERVAL '8 hour'
+        AND source_type = 0
+        AND pair_name = '{token}'
+        ORDER BY timestamp
+        """
         df = pd.read_sql_query(query, engine)
-
+    
     if df.empty:
-        st.error(f"No data found for {token}")
-        return None, None
-
+        return None
+    
     # Process timestamps
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df = df.set_index('timestamp').sort_index()
-
-    # Resample to 500ms intervals
+    
+    # Resample to 500ms
     price_data = df['final_price'].resample('500ms').ffill().dropna()
-
-    # Create 1-minute windows (changed from 5-minute)
+    
+    # Create 1-minute windows
     result = []
     start_date = price_data.index.min().floor('1min')
     end_date = price_data.index.max().ceil('1min')
     one_min_periods = pd.date_range(start=start_date, end=end_date, freq='1min')
-
+    
     for i in range(len(one_min_periods)-1):
         start_window = one_min_periods[i]
         end_window = one_min_periods[i+1]
-
-        # Get price data in this window
+        
         window_data = price_data[(price_data.index >= start_window) & (price_data.index < end_window)]
-
-        if len(window_data) >= 2:  # Need at least 2 points for volatility
-            # OHLC data
-            window_open = window_data.iloc[0]
-            window_high = window_data.max()
-            window_low = window_data.min()
-            window_close = window_data.iloc[-1]
-
-            # Calculate volatility using 500ms data points
-            # Log returns
+        
+        if len(window_data) >= 2:
+            # Calculate volatility
             log_returns = np.diff(np.log(window_data.values))
-
-            # Annualize: 500ms intervals in year / 500ms intervals in 1 minute
-            # There are 63,072,000 half-seconds in a year and 120 half-seconds in 1 minute
-            # Since we're moving from 5 minutes to 1 minute, we multiply by 5
-            annualization_factor = np.sqrt(63072000 / 120)
+            annualization_factor = np.sqrt(63072000 / 120)  # For 1-minute windows
             volatility = np.std(log_returns) * annualization_factor
-
+            
             result.append({
                 'timestamp': start_window,
-                'open': window_open,
-                'high': window_high,
-                'low': window_low,
-                'close': window_close,
-                'realized_vol': volatility,
-                'data_points': len(window_data),  # Track how many 500ms points we have
-                'actual_data_interval': 0.5  # 500ms
+                'realized_vol': volatility
             })
-
-    # Create dataframe and get last 24 hours of data
+    
     if not result:
-        st.error(f"Could not calculate volatility for {token}")
-        return None, None
-
+        return None
+    
     result_df = pd.DataFrame(result).set_index('timestamp')
+    return result_df
 
-    # Split into display and historical data
-    display_periods = display_hours * 60  # 60 1-minute periods per hour
-    display_df = result_df.tail(display_periods)
-
-    return display_df, result_df
-
-# Get volatility for all tokens (for ranking)
+# Simplified ranking function
 @st.cache_data(ttl=300)
-def get_volatility_ranking(hours=12):
-    """Calculate average volatility for all tokens over past hours"""
-    results = []
+def get_rankings_simplified():
+    """Get both volatility and Rollbit rankings in one query"""
     
-    for token in all_tokens:
-        try:
-            vol_data, _ = get_volatility_data_with_percentiles(token, display_hours=hours, history_days=1)
-            
-            if vol_data is not None and not vol_data.empty:
-                avg_vol = vol_data['realized_vol'].mean() * 100  # Convert to percentage
-                results.append({
-                    'pair_name': token,
-                    'avg_volatility': avg_vol
-                })
-        except Exception as e:
-            st.error(f"Error processing {token}: {e}")
-            continue
+    # Volatility ranking - optimized query
+    vol_query = """
+    WITH recent_prices AS (
+        SELECT 
+            pair_name,
+            created_at + INTERVAL '8 hour' AS timestamp,
+            final_price,
+            LAG(final_price) OVER (PARTITION BY pair_name ORDER BY created_at) as prev_price
+        FROM oracle_price_log
+        WHERE created_at >= NOW() - INTERVAL '12 hour'
+        AND source_type = 0
+    ),
+    volatility_calc AS (
+        SELECT 
+            pair_name,
+            STDDEV(LN(final_price/prev_price)) * SQRT(31536000) * 100 as avg_volatility
+        FROM recent_prices
+        WHERE prev_price IS NOT NULL
+        GROUP BY pair_name
+        HAVING COUNT(*) > 100
+    )
+    SELECT 
+        pair_name,
+        avg_volatility,
+        ROW_NUMBER() OVER (ORDER BY avg_volatility DESC) as vol_rank
+    FROM volatility_calc
+    ORDER BY avg_volatility DESC
+    LIMIT 50
+    """
     
-    return pd.DataFrame(results).sort_values('avg_volatility', ascending=False)
-
-# Get Rollbit buffer rates for all tokens
-@st.cache_data(ttl=300)
-def get_rollbit_ranking():
-    """Get current Rollbit buffer rates for all tokens"""
-    query = """
+    # Rollbit ranking
+    rollbit_query = """
     WITH latest_config AS (
         SELECT 
             pair_name,
@@ -309,346 +248,107 @@ def get_rollbit_ranking():
     SELECT 
         pair_name,
         buffer_rate * 100 as buffer_rate_pct,
-        position_multiplier
+        position_multiplier,
+        ROW_NUMBER() OVER (ORDER BY buffer_rate DESC) as buffer_rank
     FROM latest_config
     WHERE rn = 1
     ORDER BY buffer_rate DESC
+    LIMIT 50
     """
     
-    df = pd.read_sql_query(query, engine)
-    return df
+    vol_df = pd.read_sql_query(vol_query, engine)
+    rollbit_df = pd.read_sql_query(rollbit_query, engine)
+    
+    return vol_df, rollbit_df
 
 # Main chart section
 with tab1:
-    # Get data for selected token
-    with st.spinner(f"Calculating volatility and fetching Rollbit parameters for {selected_token}..."):
-        vol_data, historical_vol_data = get_volatility_data_with_percentiles(selected_token)
-        rollbit_params = fetch_rollbit_parameters_historical(selected_token)
+    with st.spinner(f"Loading data for {selected_token}..."):
+        vol_data = get_volatility_data_simplified(selected_token)
+        rollbit_params = fetch_rollbit_parameters_simplified(selected_token)
 
-    # Create the plot
-    if vol_data is not None and not vol_data.empty and historical_vol_data is not None and not historical_vol_data.empty:
+    if vol_data is not None and not vol_data.empty:
         # Convert to percentage
         vol_data_pct = vol_data.copy()
         vol_data_pct['realized_vol'] = vol_data_pct['realized_vol'] * 100
 
-        historical_vol_pct = historical_vol_data.copy()
-        historical_vol_pct['realized_vol'] = historical_vol_pct['realized_vol'] * 100
-
-        # Calculate percentiles from historical data (1 day)
-        percentiles = {
-            'p25': np.percentile(historical_vol_pct['realized_vol'], 25),
-            'p50': np.percentile(historical_vol_pct['realized_vol'], 50),
-            'p75': np.percentile(historical_vol_pct['realized_vol'], 75),
-            'p95': np.percentile(historical_vol_pct['realized_vol'], 95)
-        }
-
         # Key metrics
+        current_vol = vol_data_pct['realized_vol'].iloc[-1]
         avg_vol = vol_data_pct['realized_vol'].mean()
         max_vol = vol_data_pct['realized_vol'].max()
-        current_vol = vol_data_pct['realized_vol'].iloc[-1]
-        current_percentile = (historical_vol_pct['realized_vol'] < current_vol).mean() * 100
-        avg_data_points = vol_data_pct['data_points'].mean()
+        min_vol = vol_data_pct['realized_vol'].min()
 
-        # Create subplots with 3 rows
-        fig = make_subplots(
-            rows=3,
-            cols=1,
-            shared_xaxes=True,
-            vertical_spacing=0.05,
-            subplot_titles=(
-                f"{selected_token} Annualized Volatility (1min windows, 500ms data)",
-                "Rollbit Buffer Rate (%)",
-                "Rollbit Position Multiplier"
-            ),
-            row_heights=[0.4, 0.3, 0.3]
+        # Create simple plot
+        fig = go.Figure()
+
+        # Add volatility line
+        fig.add_trace(
+            go.Scatter(
+                x=vol_data_pct.index,
+                y=vol_data_pct['realized_vol'],
+                mode='lines',
+                line=dict(color='blue', width=2),
+                name="Volatility (%)"
+            )
         )
 
-        # Color coding for volatility based on percentiles
-        colors = []
-        for val in vol_data_pct['realized_vol']:
-            if pd.isna(val):
-                colors.append('gray')
-            elif val < percentiles['p25']:
-                colors.append('darkgreen')  # Very low
-            elif val < percentiles['p50']:
-                colors.append('green')  # Low
-            elif val < percentiles['p75']:
-                colors.append('gold')  # Normal
-            elif val < percentiles['p95']:
-                colors.append('orange')  # Elevated
-            else:
-                colors.append('red')  # High
+        # Add average line
+        fig.add_hline(
+            y=avg_vol,
+            line_dash="dash",
+            line_color="gray",
+            annotation_text=f"Avg: {avg_vol:.1f}%",
+            annotation_position="right"
+        )
 
-        # Process Rollbit data if available
+        # Add Rollbit data if available
         if rollbit_params is not None and not rollbit_params.empty:
-            # Resample Rollbit data to 1-minute intervals to match volatility data
-            rollbit_resampled = rollbit_params.resample('1min').ffill()
-
-            # Merge with volatility data to ensure aligned timestamps
-            combined_data = pd.merge(
-                vol_data_pct,
-                rollbit_resampled,
-                left_index=True,
-                right_index=True,
-                how='left',
-                suffixes=('', '_rollbit')
-            )
-
-            # Forward fill any missing Rollbit values
-            combined_data['buffer_rate'] = combined_data['buffer_rate'].ffill()
-            combined_data['position_multiplier'] = combined_data['position_multiplier'].ffill()
-
-            # Convert buffer rate to percentage
-            combined_data['buffer_rate_pct'] = combined_data['buffer_rate'] * 100
-
-            # Create combined hover data
-            combined_hover = []
-            for i in range(len(combined_data)):
-                hover_text = (
-                        f"<b>Time: {combined_data.index[i].strftime('%Y-%m-%d %H:%M')}</b><br>" +
-                        f"Volatility: {combined_data['realized_vol'].iloc[i]:.1f}%<br>" +
-                        f"Buffer Rate: {combined_data['buffer_rate_pct'].iloc[i]:.3f}%<br>" +
-                        f"Position Mult: {combined_data['position_multiplier'].iloc[i]:,.0f}"
-                )
-                combined_hover.append(hover_text)
-
-            # Panel 1: Volatility
-            fig.add_trace(
-                go.Scatter(
-                    x=combined_data.index,
-                    y=combined_data['realized_vol'],
-                    mode='lines+markers',
-                    line=dict(color='blue', width=2),
-                    marker=dict(color=colors[:len(combined_data)], size=7),
-                    name="Volatility (%)",
-                    hovertemplate=combined_hover,
-                    showlegend=False
-                ),
-                row=1, col=1
-            )
-
-            # Panel 2: Buffer Rate
-            fig.add_trace(
-                go.Scatter(
-                    x=combined_data.index,
-                    y=combined_data['buffer_rate_pct'],
-                    mode='lines+markers',
-                    line=dict(color='darkgreen', width=3),
-                    marker=dict(size=8),
-                    name="Buffer Rate (%)",
-                    hovertemplate=combined_hover,
-                    showlegend=False
-                ),
-                row=2, col=1
-            )
-
-            # Panel 3: Position Multiplier
-            fig.add_trace(
-                go.Scatter(
-                    x=combined_data.index,
-                    y=combined_data['position_multiplier'],
-                    mode='lines+markers',
-                    line=dict(color='darkblue', width=3),
-                    marker=dict(size=8),
-                    name="Position Multiplier",
-                    hovertemplate=combined_hover,
-                    showlegend=False
-                ),
-                row=3, col=1
-            )
+            latest_buffer = rollbit_params['buffer_rate'].iloc[-1] * 100
+            latest_pos_mult = rollbit_params['position_multiplier'].iloc[-1]
+            
+            title_text = f"{selected_token} - 1min Volatility (12h)<br>" + \
+                        f"<sub>Current: {current_vol:.1f}% | Buffer: {latest_buffer:.3f}% | Pos Mult: {latest_pos_mult:,.0f}</sub>"
         else:
-            # If no Rollbit data, still show volatility
-            fig.add_trace(
-                go.Scatter(
-                    x=vol_data_pct.index,
-                    y=vol_data_pct['realized_vol'],
-                    mode='lines+markers',
-                    line=dict(color='blue', width=2),
-                    marker=dict(color=colors, size=7),
-                    name="Volatility (%)",
-                    hovertemplate="<b>Time: %{x}</b><br>Volatility: %{y:.1f}%<br>Buffer Rate: N/A<br>Position Mult: N/A<extra></extra>",
-                    showlegend=False
-                ),
-                row=1, col=1
-            )
-
-        # Calculate better y-axis range for volatility
-        vol_min = vol_data_pct['realized_vol'].min()
-        vol_max = vol_data_pct['realized_vol'].max()
-
-        # Determine y_max based on volatility levels
-        y_min = 0
-        if vol_max < 5:
-            y_max = max(vol_max * 1.2, 5)
-        elif vol_max < 50:
-            y_max = vol_max * 1.15
-        else:
-            y_max = vol_max * 1.1
-            if vol_max > 100:
-                y_max = ((vol_max // 50) + 1) * 50
-
-        # Make sure all percentiles that matter are visible
-        if percentiles['p95'] > y_max:
-            y_max = percentiles['p95'] * 1.1
-
-        # Add percentile lines
-        percentile_lines = [
-            ('p25', 'green', '25th'),
-            ('p50', 'blue', '50th'),
-            ('p75', 'gold', '75th'),
-            ('p95', 'red', '95th')
-        ]
-
-        for i, (key, color, label) in enumerate(percentile_lines):
-            if y_min <= percentiles[key] <= y_max and percentiles[key] > 0:
-                fig.add_shape(
-                    type="line",
-                    x0=vol_data_pct.index.min(),
-                    x1=vol_data_pct.index.max(),
-                    y0=percentiles[key],
-                    y1=percentiles[key],
-                    line=dict(color=color, width=3, dash="dash"),
-                    row=1, col=1
-                )
-                
-                fig.add_annotation(
-                    x=vol_data_pct.index[10],
-                    y=percentiles[key],
-                    text=f"{label}: {percentiles[key]:.1f}%",
-                    showarrow=False,
-                    font=dict(size=9),
-                    xanchor="left",
-                    yanchor="middle",
-                    row=1, col=1
-                )
-                
-                fig.add_annotation(
-                    x=vol_data_pct.index[-10],
-                    y=percentiles[key],
-                    text=f"{label}: {percentiles[key]:.1f}%",
-                    showarrow=False,
-                    font=dict(size=9),
-                    xanchor="right",
-                    yanchor="middle",
-                    row=1, col=1
-                )
+            title_text = f"{selected_token} - 1min Volatility (12h)<br>" + \
+                        f"<sub>Current: {current_vol:.1f}% | Avg: {avg_vol:.1f}%</sub>"
 
         # Update layout
         fig.update_layout(
-            title=f"{selected_token} Analysis Dashboard<br>" +
-                  f"<sub>Current Volatility: {current_vol:.1f}% ({current_percentile:.0f}th percentile)</sub>",
-            height=900,
+            title=title_text,
+            xaxis_title="Time (Singapore)",
+            yaxis_title="Volatility (%)",
+            height=500,
             showlegend=False,
-            hovermode="x unified",
-            plot_bgcolor='white',
-            paper_bgcolor='white',
-            hoverlabel=dict(
-                bgcolor="white",
-                bordercolor="black",
-                font_size=14
-            )
+            hovermode="x",
+            plot_bgcolor='white'
         )
 
-        # Update axes
-        fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='LightGray')
-        fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='LightGray')
-
-        # Configure spike lines
-        for i in range(1, 4):
-            fig.update_xaxes(
-                showspikes=True,
-                spikemode="across",
-                spikesnap="cursor",
-                spikethickness=2,
-                spikecolor="gray",
-                spikedash="solid",
-                row=i, col=1
-            )
-
-        # Update x-axis and y-axis labels
-        fig.update_xaxes(title_text="Time (Singapore)", row=3, col=1, tickformat="%H:%M<br>%m/%d", tickangle=-45)
-        
-        # Determine tick interval for volatility axis
-        if y_max < 5:
-            dtick = 0.5
-        elif y_max < 20:
-            dtick = 2.0
-        elif y_max < 50:
-            dtick = 5.0
-        elif y_max < 100:
-            dtick = 10.0
-        else:
-            dtick = 25.0
+        fig.update_xaxes(
+            tickformat="%H:%M<br>%m/%d",
+            showgrid=True,
+            gridwidth=1,
+            gridcolor='LightGray'
+        )
 
         fig.update_yaxes(
-            title_text="Volatility (%)",
-            row=1, col=1,
-            range=[y_min, y_max],
-            tickformat=".1f",
-            dtick=dtick
+            showgrid=True,
+            gridwidth=1,
+            gridcolor='LightGray',
+            range=[0, max(max_vol * 1.1, 5)]
         )
-        fig.update_yaxes(title_text="Buffer Rate (%)", row=2, col=1, tickformat=".3f")
-        fig.update_yaxes(title_text="Position Multiplier", row=3, col=1, tickformat=",")
 
-        # Display chart
         st.plotly_chart(fig, use_container_width=True)
 
-        # Display volatility interpretation
-        st.markdown("### Volatility Status")
-
-        if current_vol < percentiles['p25']:
-            status = "🟩 **Very Low**"
-            interpretation = f"Current volatility ({current_vol:.1f}%) is below the 25th percentile"
-        elif current_vol < percentiles['p50']:
-            status = "🟢 **Low**"
-            interpretation = f"Current volatility ({current_vol:.1f}%) is below the median"
-        elif current_vol < percentiles['p75']:
-            status = "🟡 **Normal**"
-            interpretation = f"Current volatility ({current_vol:.1f}%) is in the normal range"
-        elif current_vol < percentiles['p95']:
-            status = "🟠 **Elevated**"
-            interpretation = f"Current volatility ({current_vol:.1f}%) is above the 75th percentile"
-        else:
-            status = "🔴 **High**"
-            interpretation = f"Current volatility ({current_vol:.1f}%) is above the 95th percentile"
-
-        col1, col2 = st.columns([1, 3])
-        with col1:
-            st.markdown(status)
-        with col2:
-            st.markdown(interpretation)
-
-        # Display percentile metrics
-        st.markdown("### Volatility Percentiles (1-day)")
+        # Simple metrics display
         col1, col2, col3, col4 = st.columns(4)
-
         with col1:
-            st.metric("25th %ile", f"{percentiles['p25']:.1f}%")
+            st.metric("Current", f"{current_vol:.1f}%")
         with col2:
-            st.metric("Median", f"{percentiles['p50']:.1f}%")
+            st.metric("Average", f"{avg_vol:.1f}%")
         with col3:
-            st.metric("75th %ile", f"{percentiles['p75']:.1f}%")
+            st.metric("Max", f"{max_vol:.1f}%")
         with col4:
-            st.metric("95th %ile", f"{percentiles['p95']:.1f}%")
-
-        # Display current metrics
-        if rollbit_params is not None and not rollbit_params.empty:
-            st.markdown("### Current Metrics")
-            col1, col2, col3, col4 = st.columns(4)
-
-            with col1:
-                st.metric("Current Volatility", f"{current_vol:.1f}%")
-
-            with col2:
-                st.metric("Average Volatility", f"{avg_vol:.1f}%")
-
-            with col3:
-                latest_buffer = rollbit_params['buffer_rate'].iloc[-1] * 100
-                st.metric("Current Buffer Rate", f"{latest_buffer:.3f}%")
-
-            with col4:
-                latest_pos_mult = rollbit_params['position_multiplier'].iloc[-1]
-                st.metric("Current Position Multiplier", f"{latest_pos_mult:,.0f}")
+            st.metric("Min", f"{min_vol:.1f}%")
 
     else:
         st.error("No volatility data available for the selected token")
@@ -657,100 +357,34 @@ with tab1:
 with tab2:
     st.markdown("## Token Rankings")
     
-    # Get volatility ranking
-    with st.spinner("Calculating volatility rankings..."):
-        vol_ranking = get_volatility_ranking(hours=12)
-    
-    # Get Rollbit buffer ranking
-    with st.spinner("Fetching Rollbit buffer rankings..."):
-        rollbit_ranking = get_rollbit_ranking()
+    with st.spinner("Loading rankings..."):
+        vol_ranking, rollbit_ranking = get_rankings_simplified()
     
     col1, col2 = st.columns(2)
     
     with col1:
-        st.markdown("### Volatility Ranking (12-hour average)")
-        st.markdown("*Ranked by average 1-minute volatility over past 12 hours*")
-        
+        st.markdown("### Volatility Ranking (12h)")
         if not vol_ranking.empty:
-            # Format the dataframe for display
             vol_display = vol_ranking.copy()
-            vol_display['Rank'] = range(1, len(vol_display) + 1)
-            vol_display = vol_display[['Rank', 'pair_name', 'avg_volatility']]
-            vol_display.columns = ['Rank', 'Token', 'Avg Volatility (%)']
-            vol_display['Avg Volatility (%)'] = vol_display['Avg Volatility (%)'].apply(lambda x: f"{x:.2f}%")
-            
+            vol_display['avg_volatility'] = vol_display['avg_volatility'].apply(lambda x: f"{x:.2f}%")
+            vol_display.columns = ['Token', 'Avg Volatility (%)', 'Rank']
+            vol_display = vol_display[['Rank', 'Token', 'Avg Volatility (%)']]
             st.dataframe(vol_display, hide_index=True, use_container_width=True)
         else:
             st.warning("No volatility data available")
     
     with col2:
-        st.markdown("### Rollbit Buffer Rate Ranking")
-        st.markdown("*Ranked by current buffer rate*")
-        
+        st.markdown("### Rollbit Buffer Ranking")
         if not rollbit_ranking.empty:
-            # Format the dataframe for display
             rollbit_display = rollbit_ranking.copy()
-            rollbit_display['Rank'] = range(1, len(rollbit_display) + 1)
-            rollbit_display = rollbit_display[['Rank', 'pair_name', 'buffer_rate_pct', 'position_multiplier']]
-            rollbit_display.columns = ['Rank', 'Token', 'Buffer Rate (%)', 'Position Multiplier']
-            rollbit_display['Buffer Rate (%)'] = rollbit_display['Buffer Rate (%)'].apply(lambda x: f"{x:.3f}%")
-            rollbit_display['Position Multiplier'] = rollbit_display['Position Multiplier'].apply(lambda x: f"{x:,.0f}")
-            
+            rollbit_display['buffer_rate_pct'] = rollbit_display['buffer_rate_pct'].apply(lambda x: f"{x:.3f}%")
+            rollbit_display['position_multiplier'] = rollbit_display['position_multiplier'].apply(lambda x: f"{x:,.0f}")
+            rollbit_display.columns = ['Token', 'Buffer Rate (%)', 'Position Multiplier', 'Rank']
+            rollbit_display = rollbit_display[['Rank', 'Token', 'Buffer Rate (%)', 'Position Multiplier']]
             st.dataframe(rollbit_display, hide_index=True, use_container_width=True)
         else:
             st.warning("No Rollbit data available")
     
-    # Add comparison analysis
-    st.markdown("### Comparison Analysis")
-    
-    if not vol_ranking.empty and not rollbit_ranking.empty:
-        # Merge the rankings
-        vol_rank = vol_ranking.copy()
-        vol_rank['vol_rank'] = range(1, len(vol_rank) + 1)
-        
-        rollbit_rank = rollbit_ranking.copy()
-        rollbit_rank['buffer_rank'] = range(1, len(rollbit_rank) + 1)
-        
-        # Merge on token name
-        comparison = pd.merge(
-            vol_rank[['pair_name', 'vol_rank', 'avg_volatility']],
-            rollbit_rank[['pair_name', 'buffer_rank', 'buffer_rate_pct']],
-            on='pair_name',
-            how='inner'
-        )
-        
-        # Calculate rank difference
-        comparison['rank_diff'] = comparison['buffer_rank'] - comparison['vol_rank']
-        comparison = comparison.sort_values('rank_diff', ascending=False)
-        
-        st.markdown("#### Tokens with highest rank discrepancy")
-        st.markdown("*Positive values mean higher buffer rate ranking than volatility ranking*")
-        
-        # Show top discrepancies
-        top_discrepancies = comparison.head(10)
-        display_df = top_discrepancies[['pair_name', 'vol_rank', 'buffer_rank', 'rank_diff', 'avg_volatility', 'buffer_rate_pct']].copy()
-        display_df.columns = ['Token', 'Vol Rank', 'Buffer Rank', 'Rank Diff', 'Avg Vol (%)', 'Buffer Rate (%)']
-        display_df['Avg Vol (%)'] = display_df['Avg Vol (%)'].apply(lambda x: f"{x:.2f}%")
-        display_df['Buffer Rate (%)'] = display_df['Buffer Rate (%)'].apply(lambda x: f"{x:.3f}%")
-        
-        st.dataframe(display_df, hide_index=True, use_container_width=True)
-        
-        # Calculate correlation
-        from scipy.stats import spearmanr
-        corr, p_value = spearmanr(comparison['vol_rank'], comparison['buffer_rank'])
-        
-        st.markdown(f"**Spearman Rank Correlation:** {corr:.3f} (p-value: {p_value:.4f})")
-        
-        if corr > 0.7:
-            st.success("Strong positive correlation between volatility and buffer rate rankings")
-        elif corr > 0.4:
-            st.info("Moderate positive correlation between volatility and buffer rate rankings")
-        elif corr > 0:
-            st.warning("Weak positive correlation between volatility and buffer rate rankings")
-        else:
-            st.error("No or negative correlation between volatility and buffer rate rankings")
-    
-    # Refresh button for rankings
     if st.button("Refresh Rankings", type="primary"):
         st.cache_data.clear()
         st.rerun()
