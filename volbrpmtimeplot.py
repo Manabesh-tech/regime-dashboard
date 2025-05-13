@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 import psycopg2
 import pytz
 from sqlalchemy import create_engine
+from scipy.stats import spearmanr
 
 st.set_page_config(page_title="1min Volatility Plot with Rollbit", page_icon="📈", layout="wide")
 
@@ -280,18 +281,31 @@ with tab1:
         all_vols = vol_data_pct['realized_vol'].values
         current_percentile = (all_vols < current_vol).mean() * 100
 
-        # Create simple plot
-        fig = go.Figure()
+        # Create subplots with 3 rows
+        fig = make_subplots(
+            rows=3,
+            cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.05,
+            subplot_titles=(
+                f"{selected_token} Annualized Volatility (1min windows)",
+                "Rollbit Buffer Rate (%)",
+                "Rollbit Position Multiplier"
+            ),
+            row_heights=[0.4, 0.3, 0.3]
+        )
 
-        # Add volatility line
+        # Panel 1: Volatility
         fig.add_trace(
             go.Scatter(
                 x=vol_data_pct.index,
                 y=vol_data_pct['realized_vol'],
                 mode='lines',
                 line=dict(color='blue', width=2),
-                name="Volatility (%)"
-            )
+                name="Volatility (%)",
+                showlegend=False
+            ),
+            row=1, col=1
         )
 
         # Add percentile lines
@@ -310,55 +324,103 @@ with tab1:
                 line_width=2,
                 annotation_text=f"{label}: {percentiles[key]:.1f}%",
                 annotation_position="left",
-                annotation_font_color=color
+                annotation_font_color=color,
+                row=1, col=1
             )
 
-        # Add current level indicator
-        fig.add_hline(
-            y=current_vol,
-            line_dash="solid",
-            line_color="black",
-            line_width=3,
-            annotation_text=f"Current: {current_vol:.1f}%",
-            annotation_position="right",
-            annotation_font_color="black"
-        )
-
-        # Add Rollbit data if available
+        # Panel 2 & 3: Rollbit data if available
         if rollbit_params is not None and not rollbit_params.empty:
+            # Resample to match volatility data
+            rollbit_resampled = rollbit_params.resample('1min').ffill()
+            
+            # Convert buffer rate to percentage
+            rollbit_resampled['buffer_rate_pct'] = rollbit_resampled['buffer_rate'] * 100
+            
+            # Panel 2: Buffer Rate
+            fig.add_trace(
+                go.Scatter(
+                    x=rollbit_resampled.index,
+                    y=rollbit_resampled['buffer_rate_pct'],
+                    mode='lines+markers',
+                    line=dict(color='darkgreen', width=3),
+                    marker=dict(size=6),
+                    name="Buffer Rate (%)",
+                    showlegend=False
+                ),
+                row=2, col=1
+            )
+            
+            # Panel 3: Position Multiplier
+            fig.add_trace(
+                go.Scatter(
+                    x=rollbit_resampled.index,
+                    y=rollbit_resampled['position_multiplier'],
+                    mode='lines+markers',
+                    line=dict(color='darkblue', width=3),
+                    marker=dict(size=6),
+                    name="Position Multiplier",
+                    showlegend=False
+                ),
+                row=3, col=1
+            )
+            
             latest_buffer = rollbit_params['buffer_rate'].iloc[-1] * 100
             latest_pos_mult = rollbit_params['position_multiplier'].iloc[-1]
             
-            title_text = f"{selected_token} - 1min Volatility (12h)<br>" + \
-                        f"<sub>Current: {current_vol:.1f}% ({current_percentile:.0f}th percentile) | Buffer: {latest_buffer:.3f}% | Pos Mult: {latest_pos_mult:,.0f}</sub>"
+            title_text = f"{selected_token} Analysis Dashboard<br>" + \
+                        f"<sub>Current Vol: {current_vol:.1f}% ({current_percentile:.0f}th percentile) | Buffer: {latest_buffer:.3f}% | Pos Mult: {latest_pos_mult:,.0f}</sub>"
         else:
-            title_text = f"{selected_token} - 1min Volatility (12h)<br>" + \
-                        f"<sub>Current: {current_vol:.1f}% ({current_percentile:.0f}th percentile)</sub>"
+            # Add notes if no Rollbit data
+            fig.add_annotation(
+                x=0.5,
+                y=0.5,
+                text="No Rollbit data available",
+                showarrow=False,
+                font=dict(size=12),
+                xref="x2 domain",
+                yref="y2 domain",
+                row=2, col=1
+            )
+            
+            fig.add_annotation(
+                x=0.5,
+                y=0.5,
+                text="No Rollbit data available",
+                showarrow=False,
+                font=dict(size=12),
+                xref="x3 domain",
+                yref="y3 domain",
+                row=3, col=1
+            )
+            
+            title_text = f"{selected_token} Analysis Dashboard<br>" + \
+                        f"<sub>Current Vol: {current_vol:.1f}% ({current_percentile:.0f}th percentile)</sub>"
 
         # Update layout
         fig.update_layout(
             title=title_text,
-            xaxis_title="Time (Singapore)",
-            yaxis_title="Volatility (%)",
-            height=500,
+            height=800,
             showlegend=False,
             hovermode="x",
-            plot_bgcolor='white'
+            plot_bgcolor='white',
+            paper_bgcolor='white'
         )
 
-        fig.update_xaxes(
-            tickformat="%H:%M<br>%m/%d",
-            showgrid=True,
-            gridwidth=1,
-            gridcolor='LightGray'
-        )
+        # Update axes
+        fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='LightGray')
+        fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='LightGray')
 
+        # X-axis labels only on bottom
+        fig.update_xaxes(title_text="Time (Singapore)", row=3, col=1, tickformat="%H:%M<br>%m/%d")
+        
+        # Y-axis labels
         fig.update_yaxes(
-            showgrid=True,
-            gridwidth=1,
-            gridcolor='LightGray',
+            title_text="Volatility (%)",
+            row=1, col=1,
             range=[0, max(max_vol * 1.1, percentiles['p95'] * 1.1, 5)]
         )
+        fig.update_yaxes(title_text="Buffer Rate (%)", row=2, col=1, tickformat=".3f")
+        fig.update_yaxes(title_text="Position Multiplier", row=3, col=1, tickformat=",")
 
         st.plotly_chart(fig, use_container_width=True)
 
@@ -384,6 +446,15 @@ with tab1:
             st.metric("75th", f"{percentiles['p75']:.1f}%")
         with pcol4:
             st.metric("95th", f"{percentiles['p95']:.1f}%")
+
+        # Current Rollbit metrics if available
+        if rollbit_params is not None and not rollbit_params.empty:
+            st.markdown("### Current Rollbit Parameters")
+            rcol1, rcol2 = st.columns(2)
+            with rcol1:
+                st.metric("Current Buffer Rate", f"{latest_buffer:.3f}%")
+            with rcol2:
+                st.metric("Current Position Multiplier", f"{latest_pos_mult:,.0f}")
 
     else:
         st.error("No volatility data available for the selected token")
@@ -419,6 +490,31 @@ with tab2:
             st.dataframe(rollbit_display, hide_index=True, use_container_width=True)
         else:
             st.warning("No Rollbit data available")
+    
+    # Simple correlation display
+    if not vol_ranking.empty and not rollbit_ranking.empty:
+        st.markdown("### Correlation")
+        
+        # Merge the rankings
+        comparison = pd.merge(
+            vol_ranking,
+            rollbit_ranking,
+            on='pair_name',
+            how='inner'
+        )
+        
+        if not comparison.empty:
+            # Calculate correlations
+            rank_corr, _ = spearmanr(comparison['vol_rank'], comparison['buffer_rank'])
+            value_corr, _ = spearmanr(comparison['avg_volatility'], comparison['buffer_rate_pct'])
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.metric("Rank Correlation", f"{rank_corr:.3f}")
+            
+            with col2:
+                st.metric("Value Correlation", f"{value_corr:.3f}")
     
     if st.button("Refresh Rankings", type="primary"):
         st.cache_data.clear()
