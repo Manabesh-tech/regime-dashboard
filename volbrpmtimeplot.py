@@ -210,7 +210,44 @@ def get_volatility_data_simplified(token, hours=12):
     
     return result_df, percentiles
 
-# Simplified ranking function
+# Get common tokens between Surf and Rollbit
+@st.cache_data(ttl=300)
+def get_common_tokens_volatility():
+    """Get volatility ranking for tokens that exist in both Surf and Rollbit"""
+    # First get all Rollbit tokens
+    rollbit_query = """
+    SELECT DISTINCT pair_name
+    FROM rollbit_pair_config
+    WHERE created_at >= NOW() - INTERVAL '1 day'
+    """
+    rollbit_tokens_df = pd.read_sql_query(rollbit_query, engine)
+    rollbit_tokens = set(rollbit_tokens_df['pair_name'].tolist())
+    
+    # Get Surf tokens (from our all_tokens list)
+    surf_tokens = set(all_tokens)
+    
+    # Find common tokens
+    common_tokens = list(surf_tokens.intersection(rollbit_tokens))
+    
+    # Calculate volatility for common tokens
+    results = []
+    for token in common_tokens[:30]:  # Limit to 30 for speed
+        try:
+            vol_data, _ = get_volatility_data_simplified(token, hours=12)
+            
+            if vol_data is not None and not vol_data.empty:
+                avg_vol = vol_data['realized_vol'].mean() * 100  # Convert to percentage
+                results.append({
+                    'pair_name': token,
+                    'avg_volatility': avg_vol
+                })
+        except:
+            continue
+    
+    common_vol_df = pd.DataFrame(results).sort_values('avg_volatility', ascending=False)
+    common_vol_df['vol_rank'] = range(1, len(common_vol_df) + 1)
+    
+    return common_vol_df
 @st.cache_data(ttl=300)
 def get_rankings_simplified():
     """Get both volatility and Rollbit rankings"""
@@ -582,13 +619,14 @@ with tab1:
 with tab2:
     st.markdown("## Token Rankings")
     
-    with st.spinner("Loading rankings..."):
-        vol_ranking, rollbit_ranking = get_rankings_simplified()
-    
+    # Main rankings in columns
     col1, col2 = st.columns(2)
     
     with col1:
-        st.markdown("### Volatility Ranking (12h)")
+        st.markdown("### All Surf Tokens - Volatility Ranking (12h)")
+        with st.spinner("Loading volatility rankings..."):
+            vol_ranking, rollbit_ranking = get_rankings_simplified()
+        
         if not vol_ranking.empty:
             vol_display = vol_ranking.copy()
             vol_display['avg_volatility'] = vol_display['avg_volatility'].apply(lambda x: f"{x:.2f}%")
@@ -610,10 +648,76 @@ with tab2:
         else:
             st.warning("No Rollbit data available")
     
-    # Simple correlation display
-    if not vol_ranking.empty and not rollbit_ranking.empty:
-        st.markdown("### Correlation")
+    # Common tokens ranking section
+    st.markdown("### Common Tokens (Surf + Rollbit) - Volatility Ranking")
+    st.markdown("*Tokens that exist in both Surf and Rollbit platforms*")
+    
+    with st.spinner("Loading common tokens volatility ranking..."):
+        common_vol_ranking = get_common_tokens_volatility()
+    
+    if not common_vol_ranking.empty:
+        # Get Rollbit rankings for common tokens
+        common_tokens_list = common_vol_ranking['pair_name'].tolist()
+        rollbit_common_query = f"""
+        WITH latest_config AS (
+            SELECT 
+                pair_name,
+                bust_buffer AS buffer_rate,
+                position_multiplier,
+                ROW_NUMBER() OVER (PARTITION BY pair_name ORDER BY created_at DESC) as rn
+            FROM rollbit_pair_config
+            WHERE created_at >= NOW() - INTERVAL '1 day'
+            AND pair_name IN ('{"','".join(common_tokens_list)}')
+        )
+        SELECT 
+            pair_name,
+            buffer_rate * 100 as buffer_rate_pct,
+            position_multiplier
+        FROM latest_config
+        WHERE rn = 1
+        ORDER BY buffer_rate DESC
+        """
         
+        rollbit_common_df = pd.read_sql_query(rollbit_common_query, engine)
+        rollbit_common_df['buffer_rank'] = range(1, len(rollbit_common_df) + 1)
+        
+        # Merge volatility and buffer rankings
+        comparison_df = pd.merge(
+            common_vol_ranking,
+            rollbit_common_df,
+            on='pair_name',
+            how='inner'
+        )
+        
+        # Display the comparison table
+        display_df = comparison_df[['vol_rank', 'pair_name', 'avg_volatility', 'buffer_rate_pct', 'buffer_rank']].copy()
+        display_df['rank_diff'] = display_df['buffer_rank'] - display_df['vol_rank']
+        display_df['avg_volatility'] = display_df['avg_volatility'].apply(lambda x: f"{x:.2f}%")
+        display_df['buffer_rate_pct'] = display_df['buffer_rate_pct'].apply(lambda x: f"{x:.3f}%")
+        display_df.columns = ['Vol Rank', 'Token', 'Avg Vol (%)', 'Buffer Rate (%)', 'Buffer Rank', 'Rank Diff']
+        
+        # Color code the rank difference
+        def style_rank_diff(val):
+            if val > 5:
+                return 'color: red'
+            elif val < -5:
+                return 'color: green'
+            else:
+                return 'color: black'
+        
+        styled_df = display_df.style.applymap(style_rank_diff, subset=['Rank Diff'])
+        st.dataframe(styled_df, hide_index=True, use_container_width=True)
+        
+        # Calculate correlation for common tokens
+        corr, _ = spearmanr(comparison_df['vol_rank'], comparison_df['buffer_rank'])
+        st.metric("Common Tokens Rank Correlation", f"{corr:.3f}")
+    else:
+        st.warning("No common tokens found between Surf and Rollbit")
+    
+    # Original correlation display
+    st.markdown("### Overall Correlation")
+    
+    if not vol_ranking.empty and not rollbit_ranking.empty:
         # Merge the rankings
         comparison = pd.merge(
             vol_ranking,
