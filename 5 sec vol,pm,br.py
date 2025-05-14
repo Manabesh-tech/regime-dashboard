@@ -249,15 +249,24 @@ def get_rankings_5sec():
         except:
             continue
     
-    vol_df = pd.DataFrame(results).sort_values('vol_1h', ascending=False)
+    if not results:
+        return pd.DataFrame(), pd.DataFrame()
+    
+    vol_df = pd.DataFrame(results)
+    
+    # Sort and rank by 1h volatility
+    vol_df = vol_df.sort_values('vol_1h', ascending=False)
     vol_df['rank_1h'] = range(1, len(vol_df) + 1)
     
-    # Sort by 2h and 3h to get those rankings
-    vol_df = vol_df.sort_values('vol_2h', ascending=False)
-    vol_df['rank_2h'] = range(1, len(vol_df) + 1) if vol_df['vol_2h'].notna().all() else None
+    # Sort and rank by 2h volatility if data exists
+    if 'vol_2h' in vol_df.columns and vol_df['vol_2h'].notna().any():
+        vol_df = vol_df.sort_values('vol_2h', ascending=False)
+        vol_df['rank_2h'] = range(1, len(vol_df) + 1)
     
-    vol_df = vol_df.sort_values('vol_3h', ascending=False)
-    vol_df['rank_3h'] = range(1, len(vol_df) + 1) if vol_df['vol_3h'].notna().all() else None
+    # Sort and rank by 3h volatility if data exists
+    if 'vol_3h' in vol_df.columns and vol_df['vol_3h'].notna().any():
+        vol_df = vol_df.sort_values('vol_3h', ascending=False)
+        vol_df['rank_3h'] = range(1, len(vol_df) + 1)
     
     # Sort back by 1h ranking
     vol_df = vol_df.sort_values('rank_1h')
@@ -623,11 +632,29 @@ with tab2:
         vol_display['vol_2h'] = vol_display['vol_2h'].apply(lambda x: f"{x:.2f}%" if x is not None else "N/A")
         vol_display['vol_3h'] = vol_display['vol_3h'].apply(lambda x: f"{x:.2f}%" if x is not None else "N/A")
         
-        vol_display.columns = [
-            'Token', 'Vol 1h (%)', 'Vol 2h (%)', 'Vol 3h (%)', 
-            'Rank 1h', 'Rank 2h', 'Rank 3h'
-        ]
-        vol_display = vol_display[['Rank 1h', 'Token', 'Vol 1h (%)', 'Vol 2h (%)', 'Vol 3h (%)']]
+        # Create column names based on available data
+        columns_map = {
+            'pair_name': 'Token',
+            'vol_1h': 'Vol 1h (%)',
+            'vol_2h': 'Vol 2h (%)',
+            'vol_3h': 'Vol 3h (%)',
+            'rank_1h': 'Rank 1h',
+            'rank_2h': 'Rank 2h',
+            'rank_3h': 'Rank 3h'
+        }
+        
+        # Only rename columns that exist
+        existing_columns = [col for col in columns_map.keys() if col in vol_display.columns]
+        vol_display = vol_display[existing_columns].rename(columns=columns_map)
+        
+        # Select display columns based on what exists
+        display_columns = ['Rank 1h', 'Token', 'Vol 1h (%)']
+        if 'Vol 2h (%)' in vol_display.columns:
+            display_columns.append('Vol 2h (%)')
+        if 'Vol 3h (%)' in vol_display.columns:
+            display_columns.append('Vol 3h (%)')
+        
+        vol_display = vol_display[display_columns]
         
         st.dataframe(vol_display, hide_index=True, use_container_width=True)
         
