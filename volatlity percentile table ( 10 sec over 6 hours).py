@@ -173,49 +173,53 @@ if results:
     st.markdown("### Volatility Percentiles (Last 6 Hours)")
     st.markdown("*Based on 10-second window annualized volatility calculations*")
     
-    # Create colored display
-    def get_color(val):
-        if val > 100:
-            return 'red'
-        elif val > 50:
-            return 'orange'
-        else:
-            return 'green'
+    # Create a styled dataframe with color coding
+    def style_volatility(val):
+        """Apply color based on volatility value"""
+        try:
+            # Extract numeric value from percentage string
+            if isinstance(val, str) and '%' in val:
+                num_val = float(val.replace('%', ''))
+            else:
+                num_val = float(val)
+                
+            if num_val > 100:
+                color = '#ff4444'  # Red
+            elif num_val > 50:
+                color = '#ff8800'  # Orange
+            else:
+                color = '#44ff44'  # Green
+            return f'background-color: {color}; color: black'
+        except:
+            return ''
     
-    # Display the data with custom HTML
-    table_html = """
-    <table style="width:100%; border-collapse: collapse;">
-    <thead>
-        <tr style="background-color: #f0f0f0;">
-            <th style="padding: 10px; text-align: left; border: 1px solid #ddd;">Pair</th>
-            <th style="padding: 10px; text-align: right; border: 1px solid #ddd;">50th %ile</th>
-            <th style="padding: 10px; text-align: right; border: 1px solid #ddd;">75th %ile</th>
-            <th style="padding: 10px; text-align: right; border: 1px solid #ddd;">90th %ile</th>
-        </tr>
-    </thead>
-    <tbody>
-    """
+    # Format the dataframe
+    styled_df = df_results.style.format({
+        '50_pctile': '{:.1f}%',
+        '75_pctile': '{:.1f}%',
+        '90_pctile': '{:.1f}%'
+    })
     
-    for _, row in df_results.iterrows():
-        table_html += f"""
-        <tr>
-            <td style="padding: 8px; border: 1px solid #ddd;">{row['pair']}</td>
-            <td style="padding: 8px; text-align: right; border: 1px solid #ddd; background-color: {get_color(row['50_pctile'])}; color: white;">
-                {row['50_pctile']:.1f}%
-            </td>
-            <td style="padding: 8px; text-align: right; border: 1px solid #ddd; background-color: {get_color(row['75_pctile'])}; color: white;">
-                {row['75_pctile']:.1f}%
-            </td>
-            <td style="padding: 8px; text-align: right; border: 1px solid #ddd; background-color: {get_color(row['90_pctile'])}; color: white;">
-                {row['90_pctile']:.1f}%
-            </td>
-        </tr>
-        """
+    # Apply styling to percentile columns
+    styled_df = styled_df.applymap(
+        style_volatility,
+        subset=['50_pctile', '75_pctile', '90_pctile']
+    )
     
-    table_html += "</tbody></table>"
+    # Rename columns
+    styled_df = styled_df.rename(columns={
+        'pair': 'Pair',
+        '50_pctile': '50th %ile',
+        '75_pctile': '75th %ile',
+        '90_pctile': '90th %ile'
+    })
     
-    # Display the table
-    st.markdown(table_html, unsafe_allow_html=True)
+    # Display the styled dataframe
+    st.dataframe(
+        styled_df,
+        use_container_width=True,
+        height=600
+    )
     
     # Summary statistics
     st.markdown("### Summary Statistics")
