@@ -32,7 +32,7 @@ conn = psycopg2.connect(**db_params)
 
 # UAT DB connection - DIFFERENT DATABASE
 uat_db_params = {
-    'host': 'aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com',  # Remove http:// if present
+    'host': 'aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com',  
     'port': 5432,
     'database': 'report_dev',  # Different database
     'user': 'public_rw',     # Different user
@@ -96,7 +96,6 @@ def fetch_rollbit_parameters_10sec(token, hours=3):
          SELECT 
             pair_name,
             bust_buffer AS buffer_rate,
-            position_multiplier,
             created_at + INTERVAL '8 hour' AS timestamp
         FROM rollbit_pair_config 
         WHERE pair_name = '{token}'
@@ -281,35 +280,16 @@ if vol_data is not None and not vol_data.empty:
     all_vols = vol_data_pct['realized_vol'].values
     current_percentile = (all_vols < current_vol).mean() * 100
 
-    # Determine how many rows we need
-    has_uat_data = uat_buffer is not None and not uat_buffer.empty
-    has_rollbit_data = rollbit_params is not None and not rollbit_params.empty
-    
-    if has_uat_data and has_rollbit_data:
-        num_rows = 4
-        subplot_titles = (
-            f"{selected_token} Annualized Volatility (10sec windows)",
-            "Rollbit Buffer Rate (%)",
-            "UAT Buffer Rate (%)", 
-            "Rollbit Position Multiplier"
-        )
-        row_heights = [0.3, 0.23, 0.23, 0.24]
-    else:
-        num_rows = 3
-        subplot_titles = (
-            f"{selected_token} Annualized Volatility (10sec windows)",
-            "Rollbit Buffer Rate (%)",
-            "Rollbit Position Multiplier"
-        )
-        row_heights = [0.4, 0.3, 0.3]
+    # Always create 3 rows (no position multiplier)
+    num_rows = 3
+    row_heights = [0.4, 0.3, 0.3]
 
-    # Create subplots
+    # Create subplots without titles (we'll add descriptions below each chart)
     fig = make_subplots(
         rows=num_rows,
         cols=1,
         shared_xaxes=True,
         vertical_spacing=0.05,
-        subplot_titles=subplot_titles,
         row_heights=row_heights
     )
 
@@ -317,24 +297,22 @@ if vol_data is not None and not vol_data.empty:
     combined_data = vol_data_pct.copy()
     
     # Add Rollbit data if available
-    if has_rollbit_data:
+    if rollbit_params is not None and not rollbit_params.empty:
         rollbit_params['buffer_rate_pct'] = rollbit_params['buffer_rate'] * 100
         combined_data = pd.merge(
             combined_data,
-            rollbit_params[['buffer_rate_pct', 'position_multiplier']],
+            rollbit_params[['buffer_rate_pct']],
             left_index=True,
             right_index=True,
             how='left',
             suffixes=('', '_rollbit')
         )
         combined_data['buffer_rate_pct'] = combined_data['buffer_rate_pct'].ffill()
-        combined_data['position_multiplier'] = combined_data['position_multiplier'].ffill()
     else:
         combined_data['buffer_rate_pct'] = np.nan
-        combined_data['position_multiplier'] = np.nan
     
     # Add UAT data if available
-    if has_uat_data:
+    if uat_buffer is not None and not uat_buffer.empty:
         uat_buffer['uat_buffer_rate_pct'] = uat_buffer['buffer_rate'] * 100
         combined_data = pd.merge(
             combined_data,
@@ -353,18 +331,16 @@ if vol_data is not None and not vol_data.empty:
         "Volatility: %{customdata[0]:.1f}%<br>" +
         "Rollbit Buffer: %{customdata[1]:.3f}%<br>" +
         "UAT Buffer: %{customdata[2]:.3f}%<br>" +
-        "Position Mult: %{customdata[3]:,.0f}<br>" +
         "<extra></extra>"
     )
     
     customdata = np.column_stack((
         combined_data['realized_vol'],
         combined_data['buffer_rate_pct'].fillna(0),
-        combined_data['uat_buffer_rate_pct'].fillna(0),
-        combined_data['position_multiplier'].fillna(0)
+        combined_data['uat_buffer_rate_pct'].fillna(0)
     ))
     
-    # Panel 1: Volatility (always shown)
+    # Panel 1: Volatility
     fig.add_trace(
         go.Scatter(
             x=combined_data.index,
@@ -380,7 +356,7 @@ if vol_data is not None and not vol_data.empty:
     )
     
     # Panel 2: Rollbit Buffer Rate
-    if has_rollbit_data:
+    if rollbit_params is not None and not rollbit_params.empty:
         fig.add_trace(
             go.Scatter(
                 x=combined_data.index,
@@ -409,9 +385,8 @@ if vol_data is not None and not vol_data.empty:
         )
         latest_rollbit_buffer = None
     
-    # Panel 3: UAT Buffer Rate (only if we have UAT data)
-    if has_uat_data:
-        uat_row = 3
+    # Panel 3: UAT Buffer Rate
+    if uat_buffer is not None and not uat_buffer.empty:
         fig.add_trace(
             go.Scatter(
                 x=combined_data.index,
@@ -424,43 +399,21 @@ if vol_data is not None and not vol_data.empty:
                 hovertemplate=hover_template,
                 showlegend=False
             ),
-            row=uat_row, col=1
+            row=3, col=1
         )
         latest_uat_buffer = combined_data['uat_buffer_rate_pct'].iloc[-1]
-        pos_mult_row = 4
-    else:
-        latest_uat_buffer = None
-        pos_mult_row = 3
-    
-    # Panel 4 (or 3): Position Multiplier
-    if has_rollbit_data:
-        fig.add_trace(
-            go.Scatter(
-                x=combined_data.index,
-                y=combined_data['position_multiplier'],
-                mode='lines+markers',
-                line=dict(color='darkblue', width=3),
-                marker=dict(size=4),
-                name="Position Multiplier",
-                customdata=customdata,
-                hovertemplate=hover_template,
-                showlegend=False
-            ),
-            row=pos_mult_row, col=1
-        )
-        latest_pos_mult = combined_data['position_multiplier'].iloc[-1]
     else:
         fig.add_annotation(
             x=0.5,
             y=0.5,
-            text="No Rollbit data available",
+            text="No UAT data available",
             showarrow=False,
             font=dict(size=12),
-            xref=f"x{pos_mult_row} domain",
-            yref=f"y{pos_mult_row} domain",
-            row=pos_mult_row, col=1
+            xref="x3 domain",
+            yref="y3 domain",
+            row=3, col=1
         )
-        latest_pos_mult = None
+        latest_uat_buffer = None
     
     # Add percentile lines to volatility panel
     percentile_lines = [
@@ -490,15 +443,13 @@ if vol_data is not None and not vol_data.empty:
         subtitle_parts.append(f"Rollbit Buffer: {latest_rollbit_buffer:.3f}%")
     if latest_uat_buffer is not None:
         subtitle_parts.append(f"UAT Buffer: {latest_uat_buffer:.3f}%")
-    if latest_pos_mult is not None:
-        subtitle_parts.append(f"Pos Mult: {latest_pos_mult:,.0f}")
     
     title_text = title_parts[0] + f"<sub>{' | '.join(subtitle_parts)}</sub>"
 
     # Update layout
     fig.update_layout(
         title=title_text,
-        height=1000 if has_uat_data else 800,
+        height=800,
         showlegend=False,
         hovermode="x unified",
         plot_bgcolor='white',
@@ -544,7 +495,7 @@ if vol_data is not None and not vol_data.empty:
     )
     
     # Rollbit buffer rate
-    if has_rollbit_data:
+    if rollbit_params is not None and not rollbit_params.empty:
         buffer_min = combined_data['buffer_rate_pct'].min()
         buffer_max = combined_data['buffer_rate_pct'].max()
         fig.update_yaxes(
@@ -558,7 +509,7 @@ if vol_data is not None and not vol_data.empty:
         )
     
     # UAT buffer rate
-    if has_uat_data:
+    if uat_buffer is not None and not uat_buffer.empty:
         uat_buffer_min = combined_data['uat_buffer_rate_pct'].min()
         uat_buffer_max = combined_data['uat_buffer_rate_pct'].max()
         fig.update_yaxes(
@@ -571,26 +522,23 @@ if vol_data is not None and not vol_data.empty:
             range=[uat_buffer_min * 0.95, uat_buffer_max * 1.05] if uat_buffer_max > uat_buffer_min else None
         )
     
-    # Position multiplier
-    if has_rollbit_data:
-        pos_mult_min = combined_data['position_multiplier'].min()
-        pos_mult_max = combined_data['position_multiplier'].max()
-        fig.update_yaxes(
-            title_text="Position Multiplier",
-            row=pos_mult_row, col=1,
-            tickformat=",",
-            showgrid=True,
-            gridwidth=1,
-            gridcolor='LightGray',
-            range=[pos_mult_min * 0.95, pos_mult_max * 1.05] if pos_mult_max > pos_mult_min else None
-        )
-    
     # X-axis labels only on bottom
     fig.update_xaxes(title_text="Time (Singapore)", row=num_rows, col=1, tickformat="%H:%M:%S<br>%m/%d")
 
     st.plotly_chart(fig, use_container_width=True)
 
+    # Add chart descriptions below each panel
+    st.markdown("**Panel 1**: Annualized Volatility (10-second windows)")
+    st.markdown("Shows the annualized volatility calculated using 10-second price windows. The percentile lines indicate historical volatility levels over the past 3 hours.")
+    
+    st.markdown("**Panel 2**: Rollbit Buffer Rate (%)")
+    st.markdown("Displays the Rollbit buffer rate from production database over time. This rate determines the risk management parameters for trading.")
+    
+    st.markdown("**Panel 3**: UAT Buffer Rate (%)")
+    st.markdown("Shows the UAT (test environment) buffer rate for comparison with production Rollbit rates. This helps verify if test parameters align with production.")
+
     # Metrics display with percentiles
+    st.markdown("### Key Metrics")
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("Current", f"{current_vol:.1f}%", f"{current_percentile:.0f}th %ile")
@@ -617,32 +565,27 @@ if vol_data is not None and not vol_data.empty:
     st.markdown("### Current Parameters")
     
     # Buffer rate comparison
-    if has_rollbit_data or has_uat_data:
-        bcol1, bcol2, bcol3 = st.columns(3)
-        
-        with bcol1:
-            if latest_rollbit_buffer is not None:
-                st.metric("Rollbit Buffer Rate", f"{latest_rollbit_buffer:.3f}%")
-            else:
-                st.metric("Rollbit Buffer Rate", "N/A")
-        
-        with bcol2:
-            if latest_uat_buffer is not None:
-                st.metric("UAT Buffer Rate", f"{latest_uat_buffer:.3f}%")
-            else:
-                st.metric("UAT Buffer Rate", "N/A")
-        
-        with bcol3:
-            if latest_rollbit_buffer is not None and latest_uat_buffer is not None:
-                diff = latest_uat_buffer - latest_rollbit_buffer
-                diff_pct = (diff / latest_rollbit_buffer * 100) if latest_rollbit_buffer != 0 else 0
-                st.metric("UAT vs Rollbit", f"{diff:.3f}%", f"{diff_pct:.1f}% diff")
-            else:
-                st.metric("UAT vs Rollbit", "N/A")
+    bcol1, bcol2, bcol3 = st.columns(3)
     
-    # Position multiplier
-    if latest_pos_mult is not None:
-        st.metric("Current Position Multiplier", f"{latest_pos_mult:,.0f}")
+    with bcol1:
+        if latest_rollbit_buffer is not None:
+            st.metric("Rollbit Buffer Rate", f"{latest_rollbit_buffer:.3f}%")
+        else:
+            st.metric("Rollbit Buffer Rate", "N/A")
+    
+    with bcol2:
+        if latest_uat_buffer is not None:
+            st.metric("UAT Buffer Rate", f"{latest_uat_buffer:.3f}%")
+        else:
+            st.metric("UAT Buffer Rate", "N/A")
+    
+    with bcol3:
+        if latest_rollbit_buffer is not None and latest_uat_buffer is not None:
+            diff = latest_uat_buffer - latest_rollbit_buffer
+            diff_pct = (diff / latest_rollbit_buffer * 100) if latest_rollbit_buffer != 0 else 0
+            st.metric("UAT vs Rollbit", f"{diff:.3f}%", f"{diff_pct:.1f}% diff")
+        else:
+            st.metric("UAT vs Rollbit", "N/A")
 
 else:
     st.error("No volatility data available for the selected token")
