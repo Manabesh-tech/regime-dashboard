@@ -305,7 +305,7 @@ def fit_parameters(volatilities, actual_buffers, percentiles):
     """
     def objective(params):
         buffer_base, k = params
-        vol_base = volatilities[0]  # Use first volatility as base
+        vol_base = volatilities[-1]  # Use the most recent volatility as base
         
         predicted_buffers = simulate_buffer_updates(
             volatilities, buffer_base, vol_base, k, percentiles
@@ -318,8 +318,8 @@ def fit_parameters(volatilities, actual_buffers, percentiles):
     # Initial guess - use mean of actual buffers as starting point
     initial_guess = [np.mean(actual_buffers), 0.5]
     
-    # Bounds for optimization
-    bounds = [(0.03, 0.08), (0.1, 2.0)]  # buffer_base in percentage, k between 0.1 and 2
+    # Bounds for optimization - wider bounds for better fitting
+    bounds = [(0.001, 0.5), (0.01, 5.0)]  # buffer_base in percentage, k between 0.01 and 5
     
     # Optimize
     result = minimize(objective, initial_guess, bounds=bounds, method='L-BFGS-B')
@@ -330,7 +330,7 @@ def fit_parameters(volatilities, actual_buffers, percentiles):
 all_tokens = fetch_trading_pairs()
 
 st.markdown("### Configuration")
-col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
+col1, col2, col3 = st.columns([3, 1, 1])
 
 with col1:
     selected_token = st.selectbox(
@@ -340,18 +340,15 @@ with col1:
     )
 
 with col2:
-    fit_hours = st.number_input("Hours for fitting", min_value=3, max_value=72, value=24)
-
-with col3:
     remove_spikes = st.checkbox("Remove Spikes", value=True, help="Remove event-related spikes around 8:30-8:40 PM")
 
-with col4:
+with col3:
     if st.button("Analyze All Tokens", type="primary"):
         st.session_state.analyze_all = True
 
 # Single token analysis
 with st.spinner(f"Loading data for {selected_token}..."):
-    data = get_combined_data(selected_token, fit_hours)
+    data = get_combined_data(selected_token)
 
 if data is not None and len(data) > 0:
     # Remove spikes if option is selected
@@ -382,17 +379,25 @@ if data is not None and len(data) > 0:
     
     # Fit parameters
     buffer_base, k = fit_parameters(volatilities, buffers, percentiles)
+    vol_base = volatilities[-1]  # Most recent volatility
     
     # Calculate predicted buffers
-    vol_base = volatilities[0]
     predicted_buffers = simulate_buffer_updates(
         volatilities, buffer_base, vol_base, k, percentiles
     )
     
-    # Calculate R-squared
+    # Calculate R-squared and other metrics
     ss_res = np.sum((buffers - predicted_buffers) ** 2)
     ss_tot = np.sum((buffers - np.mean(buffers)) ** 2)
     r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+    
+    # Additional diagnostics
+    rmse = np.sqrt(np.mean((buffers - predicted_buffers) ** 2))
+    mae = np.mean(np.abs(buffers - predicted_buffers))
+    
+    # Check if parameters hit bounds
+    param_at_lower_bound = np.isclose(buffer_base, 0.03) or np.isclose(k, 0.1)
+    param_at_upper_bound = np.isclose(buffer_base, 0.08) or np.isclose(k, 2.0)
     
     # Display results
     st.markdown(f"### {selected_token} - Parameter Fitting Results")
@@ -406,6 +411,26 @@ if data is not None and len(data) > 0:
         st.metric("Vol Base", f"{vol_base:.2f}%")
     with col4:
         st.metric("R² Score", f"{r_squared:.3f}")
+    
+    # Show warnings if fit is poor
+    if r_squared < 0:
+        st.error("⚠️ Negative R² indicates the model is performing worse than using the mean. The formula may not match how this token's buffer is calculated.")
+    elif r_squared < 0.3:
+        st.warning("⚠️ Poor fit (R² < 0.3). Consider checking data quality or if this token uses a different formula.")
+    
+    if param_at_lower_bound or param_at_upper_bound:
+        st.warning("⚠️ One or more parameters hit optimization bounds. Consider adjusting bounds.")
+    
+    # Additional metrics
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("RMSE", f"{rmse:.4f}%")
+    with col2:
+        st.metric("MAE", f"{mae:.4f}%")
+    with col3:
+        st.metric("Buffer Range", f"{buffers.min():.4f}% - {buffers.max():.4f}%")
+    with col4:
+        st.metric("Vol Range", f"{volatilities.min():.1f}% - {volatilities.max():.1f}%")
     
     # Show percentiles
     st.markdown("### Percentile Values (Last 6000 points = ~16.7 hours)")
@@ -561,7 +586,7 @@ if st.session_state.get('analyze_all', False):
         progress_bar.progress((i + 1) / len(all_tokens))
         
         try:
-            data = get_combined_data(token, fit_hours)
+            data = get_combined_data(token)
             
             if data is not None and len(data) > 50:  # Need enough data
                 # Remove spikes if option is selected
@@ -587,9 +612,9 @@ if st.session_state.get('analyze_all', False):
                 
                 # Fit parameters
                 buffer_base, k = fit_parameters(volatilities, buffers, percentiles)
+                vol_base = volatilities[-1]  # Most recent volatility
                 
                 # Calculate predicted buffers
-                vol_base = volatilities[0]
                 predicted_buffers = simulate_buffer_updates(
                     volatilities, buffer_base, vol_base, k, percentiles
                 )
