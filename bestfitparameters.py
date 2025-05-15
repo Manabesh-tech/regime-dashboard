@@ -152,7 +152,50 @@ def get_combined_data(token, hours=3):
     
     return combined
 
-def get_zone(vol, p25, p50, p75, p95):
+def remove_buffer_spikes(data, spike_time_ranges=None, use_time_based=True, use_statistical=True):
+    """
+    Remove or smooth out event-related spikes in buffer rates
+    Can use time-based removal and/or statistical outlier detection
+    """
+    data_copy = data.copy()
+    original_buffer = data_copy['buffer_rate'].copy()
+    
+    # Time-based spike removal
+    if use_time_based and spike_time_ranges is None:
+        # Define spike time ranges (8:25-8:35 PM and 8:35-8:45 PM)
+        spike_time_ranges = [
+            ('20:25', '20:35'),  # 8:25-8:35 PM
+            ('20:35', '20:45'),  # 8:35-8:45 PM
+        ]
+    
+    spike_mask = pd.Series(False, index=data_copy.index)
+    
+    if use_time_based and spike_time_ranges:
+        for start_time, end_time in spike_time_ranges:
+            time_mask = (data_copy.index.time >= pd.to_datetime(start_time).time()) & \
+                       (data_copy.index.time <= pd.to_datetime(end_time).time())
+            spike_mask |= time_mask
+    
+    # Statistical outlier detection
+    if use_statistical:
+        # Calculate rolling statistics
+        rolling_mean = data_copy['buffer_rate'].rolling(window=30, center=True).mean()
+        rolling_std = data_copy['buffer_rate'].rolling(window=30, center=True).std()
+        
+        # Identify outliers (more than 3 standard deviations from rolling mean)
+        outlier_mask = np.abs(data_copy['buffer_rate'] - rolling_mean) > 3 * rolling_std
+        spike_mask |= outlier_mask
+    
+    # Apply filtering
+    if spike_mask.any():
+        # For buffer rates during spike periods, use interpolation
+        data_copy.loc[spike_mask, 'buffer_rate'] = np.nan
+        data_copy['buffer_rate'] = data_copy['buffer_rate'].interpolate(method='linear')
+        
+        # Fill any remaining NaN values
+        data_copy['buffer_rate'] = data_copy['buffer_rate'].bfill().ffill()
+    
+    return data_copy
     """
     Determine zone based on volatility and percentiles
     Zone 1: vol >= p95
@@ -225,7 +268,7 @@ def fit_parameters(volatilities, actual_buffers, percentiles):
 all_tokens = fetch_trading_pairs()
 
 st.markdown("### Configuration")
-col1, col2, col3 = st.columns([3, 1, 1])
+col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
 
 with col1:
     selected_token = st.selectbox(
@@ -235,9 +278,12 @@ with col1:
     )
 
 with col2:
-    fit_hours = st.number_input("Hours for fitting", min_value=1, max_value=24, value=3)
+    fit_hours = st.number_input("Hours for fitting", min_value=3, max_value=72, value=24)
 
 with col3:
+    remove_spikes = st.checkbox("Remove Spikes", value=True, help="Remove event-related spikes around 8:30-8:40 PM")
+
+with col4:
     if st.button("Analyze All Tokens", type="primary"):
         st.session_state.analyze_all = True
 
@@ -246,8 +292,13 @@ with st.spinner(f"Loading data for {selected_token}..."):
     data = get_combined_data(selected_token, fit_hours)
 
 if data is not None and len(data) > 0:
-    # Get last 600 values for percentile calculation
-    percentile_window = min(600, len(data))
+    # Remove spikes if option is selected
+    if remove_spikes:
+        data = remove_buffer_spikes(data)
+        st.info("Event-related spikes around 8:30-8:40 PM have been filtered out")
+    
+    # Get last 6000 values for percentile calculation (6000 10-sec intervals = ~16.7 hours)
+    percentile_window = min(6000, len(data))
     percentile_data = data.tail(percentile_window)
     
     # Calculate percentiles
@@ -259,8 +310,8 @@ if data is not None and len(data) > 0:
         np.percentile(all_vols, 95)
     )
     
-    # Get last 200 values for fitting
-    fit_window = min(200, len(data))
+    # Get last 1000 values for fitting (1000 10-sec intervals = ~2.8 hours)
+    fit_window = min(1000, len(data))
     recent_data = data.tail(fit_window)
     
     # Extract volatility and buffer
@@ -295,7 +346,7 @@ if data is not None and len(data) > 0:
         st.metric("R² Score", f"{r_squared:.3f}")
     
     # Show percentiles
-    st.markdown("### Percentile Values (Last 600 points)")
+    st.markdown("### Percentile Values (Last 6000 points = ~16.7 hours)")
     pcol1, pcol2, pcol3, pcol4 = st.columns(4)
     with pcol1:
         st.metric("P25", f"{percentiles[0]:.2f}%")
@@ -376,22 +427,29 @@ if data is not None and len(data) > 0:
     st.plotly_chart(fig, use_container_width=True)
     
     # Show table
-    st.markdown("### Data Table (Last 200 values)")
+    st.markdown("### Data Table (Last 1000 values = ~2.8 hours)")
     
     # Add zone information
     zones = [get_zone(vol, *percentiles) for vol in volatilities]
     
-    # Create display dataframe
+    # Create display dataframe (show last 200 rows for performance)
+    display_volatilities = volatilities[-200:]
+    display_zones = zones[-200:]
+    display_buffers = buffers[-200:]
+    display_predicted = predicted_buffers[-200:]
+    display_index = recent_data.index[-200:]
+    
     display_df = pd.DataFrame({
-        'Timestamp': recent_data.index,
-        'Volatility (%)': volatilities,
-        'Zone': zones,
-        'Actual Buffer (%)': buffers,
-        'Predicted Buffer (%)': predicted_buffers,
-        'Error (%)': np.abs(buffers - predicted_buffers)
+        'Timestamp': display_index,
+        'Volatility (%)': display_volatilities,
+        'Zone': display_zones,
+        'Actual Buffer (%)': display_buffers,
+        'Predicted Buffer (%)': display_predicted,
+        'Error (%)': np.abs(display_buffers - display_predicted)
     })
     
     # Show table with formatting
+    st.info("Showing last 200 rows of 1000 for display performance")
     st.dataframe(
         display_df.style.format({
             'Volatility (%)': '{:.2f}',
@@ -444,8 +502,12 @@ if st.session_state.get('analyze_all', False):
             data = get_combined_data(token, fit_hours)
             
             if data is not None and len(data) > 50:  # Need enough data
+                # Remove spikes if option is selected
+                if remove_spikes:
+                    data = remove_buffer_spikes(data)
+                
                 # Calculate percentiles
-                percentile_window = min(600, len(data))
+                percentile_window = min(6000, len(data))
                 percentile_data = data.tail(percentile_window)
                 all_vols = percentile_data['volatility'].values
                 percentiles = (
@@ -456,7 +518,7 @@ if st.session_state.get('analyze_all', False):
                 )
                 
                 # Get fitting data
-                fit_window = min(200, len(data))
+                fit_window = min(1000, len(data))
                 recent_data = data.tail(fit_window)
                 volatilities = recent_data['volatility'].values
                 buffers = recent_data['buffer_rate'].values
