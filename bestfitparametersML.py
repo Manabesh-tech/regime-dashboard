@@ -14,9 +14,6 @@ from sklearn.tree import DecisionTreeRegressor
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.svm import SVR
 from sklearn.neural_network import MLPRegressor
-from sklearn.gaussian_process import GaussianProcessRegressor
-from sklearn.gaussian_process.kernels import RBF, Matern, RationalQuadratic
-import xgboost as xgb
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -194,10 +191,6 @@ def create_features(volatility_data):
     features['vol_rolling_mean_10'] = vol_series.rolling(10, min_periods=1).mean().values
     features['vol_rolling_std_10'] = vol_series.rolling(10, min_periods=1).std().fillna(0).values
     
-    # Lagged features
-    features['vol_lag_1'] = vol_series.shift(1).fillna(method='bfill').values
-    features['vol_lag_5'] = vol_series.shift(5).fillna(method='bfill').values
-    
     # Difference features
     features['vol_diff_1'] = vol_series.diff().fillna(0).values
     features['vol_diff_5'] = vol_series.diff(5).fillna(0).values
@@ -224,11 +217,9 @@ def train_multiple_models(X_train, y_train, X_test, y_test):
         'Decision Tree': DecisionTreeRegressor(max_depth=10, random_state=42),
         'Random Forest': RandomForestRegressor(n_estimators=100, max_depth=10, random_state=42),
         'Gradient Boosting': GradientBoostingRegressor(n_estimators=100, max_depth=5, random_state=42),
-        'XGBoost': xgb.XGBRegressor(n_estimators=100, max_depth=5, random_state=42),
         'SVR (RBF)': SVR(kernel='rbf', C=1.0, gamma='scale'),
         'SVR (Linear)': SVR(kernel='linear', C=1.0),
-        'Neural Network': MLPRegressor(hidden_layers_sizes=(100, 50), max_iter=500, random_state=42),
-        'Gaussian Process': GaussianProcessRegressor(kernel=RBF(length_scale=1.0), random_state=42)
+        'Neural Network': MLPRegressor(hidden_layer_sizes=(100, 50), max_iter=500, random_state=42)
     }
     
     # Scale features for certain models
@@ -239,7 +230,7 @@ def train_multiple_models(X_train, y_train, X_test, y_test):
     for name, model in models.items():
         try:
             # Use scaled features for certain models
-            if name in ['SVR (RBF)', 'SVR (Linear)', 'Neural Network', 'Gaussian Process']:
+            if name in ['SVR (RBF)', 'SVR (Linear)', 'Neural Network']:
                 model.fit(X_train_scaled, y_train)
                 y_pred_train = model.predict(X_train_scaled)
                 y_pred_test = model.predict(X_test_scaled)
@@ -261,7 +252,7 @@ def train_multiple_models(X_train, y_train, X_test, y_test):
                 'mae': test_mae,
                 'rmse': test_rmse,
                 'predictions': y_pred_test,
-                'scaler': scaler if name in ['SVR (RBF)', 'SVR (Linear)', 'Neural Network', 'Gaussian Process'] else None
+                'scaler': scaler if name in ['SVR (RBF)', 'SVR (Linear)', 'Neural Network'] else None
             }
             
         except Exception as e:
@@ -434,13 +425,10 @@ if data is not None and len(data) > 0:
     st.plotly_chart(fig, use_container_width=True)
     
     # Feature importance for tree-based models
-    if best_model_name in ['Random Forest', 'Gradient Boosting', 'XGBoost', 'Decision Tree']:
+    if best_model_name in ['Random Forest', 'Gradient Boosting', 'Decision Tree']:
         st.markdown("### Feature Importance")
         
-        if best_model_name in ['Random Forest', 'Gradient Boosting', 'Decision Tree']:
-            importances = best_model_data['model'].feature_importances_
-        else:  # XGBoost
-            importances = best_model_data['model'].feature_importances_
+        importances = best_model_data['model'].feature_importances_
         
         feature_importance_df = pd.DataFrame({
             'Feature': features.columns,
