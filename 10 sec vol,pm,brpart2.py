@@ -54,10 +54,10 @@ def fetch_trading_pairs():
     query = """
     SELECT pair_name 
     FROM trade_pool_pairs 
-    WHERE status = 1
+    WHERE status in (1,2)
     ORDER BY pair_name
     """
-    df = pd.read_sql_query(query, engine)
+    df = pd.read_sql_query(query, uat_engine)
     return df['pair_name'].tolist()
 
 all_tokens = fetch_trading_pairs()
@@ -200,7 +200,7 @@ def get_volatility_data_10sec(token, hours=3):
     """
     
     try:
-        df = pd.read_sql_query(query, engine)
+        df = pd.read_sql_query(query, uat_engine)
         
         # If we don't have enough data, try yesterday's partition too
         if df.empty or len(df) < 10:
