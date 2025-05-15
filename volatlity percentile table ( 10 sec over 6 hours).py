@@ -4,8 +4,6 @@ import numpy as np
 from datetime import datetime, timedelta
 import pytz
 from sqlalchemy import create_engine
-import concurrent.futures
-from functools import partial
 
 st.set_page_config(page_title="Volatility Percentile Table", page_icon="📊", layout="wide")
 
@@ -37,137 +35,132 @@ def fetch_trading_pairs():
     df = pd.read_sql_query(query, engine)
     return df['pair_name'].tolist()
 
-# Function to calculate volatility for a single token
-def calculate_volatility_percentiles(token, engine):
-    try:
-        sg_tz = pytz.timezone('Asia/Singapore')
-        now_sg = datetime.now(sg_tz)
-        start_time_sg = now_sg - timedelta(hours=6)
+# Function to calculate volatility for a single token - sequential version
+@st.cache_data(ttl=300)  # Cache for 5 minutes
+def calculate_all_volatilities():
+    all_tokens = fetch_trading_pairs()
+    results = []
+    
+    sg_tz = pytz.timezone('Asia/Singapore')
+    now_sg = datetime.now(sg_tz)
+    start_time_sg = now_sg - timedelta(hours=6)
+    
+    # Get partitions
+    today_str = now_sg.strftime("%Y%m%d")
+    yesterday_str = (now_sg - timedelta(days=1)).strftime("%Y%m%d")
+    
+    start_time_str = start_time_sg.strftime("%Y-%m-%d %H:%M:%S")
+    end_time_str = now_sg.strftime("%Y-%m-%d %H:%M:%S")
+    
+    progress_container = st.container()
+    progress_bar = progress_container.progress(0)
+    status_text = progress_container.empty()
+    
+    for idx, token in enumerate(all_tokens):
+        # Update progress
+        progress = (idx + 1) / len(all_tokens)
+        progress_bar.progress(progress)
+        status_text.text(f"Processing {idx + 1}/{len(all_tokens)}: {token}")
         
-        # Get partitions
-        today_str = now_sg.strftime("%Y%m%d")
-        yesterday_str = (now_sg - timedelta(days=1)).strftime("%Y%m%d")
-        
-        start_time_str = start_time_sg.strftime("%Y-%m-%d %H:%M:%S")
-        end_time_str = now_sg.strftime("%Y-%m-%d %H:%M:%S")
-        
-        # Try today's partition first
-        query = f"""
-        SELECT 
-            created_at + INTERVAL '8 hour' AS timestamp,
-            final_price
-        FROM public.oracle_price_log_partition_{today_str}
-        WHERE created_at >= '{start_time_str}'::timestamp - INTERVAL '8 hour'
-        AND created_at <= '{end_time_str}'::timestamp - INTERVAL '8 hour'
-        AND source_type = 0
-        AND pair_name = '{token}'
-        ORDER BY timestamp
-        """
-        
-        df = pd.read_sql_query(query, engine)
-        
-        # If we don't have enough data, try yesterday's partition too
-        if df.empty or len(df) < 10:
-            query_yesterday = f"""
+        try:
+            # Try today's partition first
+            query = f"""
             SELECT 
                 created_at + INTERVAL '8 hour' AS timestamp,
                 final_price
-            FROM public.oracle_price_log_partition_{yesterday_str}
+            FROM public.oracle_price_log_partition_{today_str}
             WHERE created_at >= '{start_time_str}'::timestamp - INTERVAL '8 hour'
             AND created_at <= '{end_time_str}'::timestamp - INTERVAL '8 hour'
             AND source_type = 0
             AND pair_name = '{token}'
             ORDER BY timestamp
             """
-            try:
-                df_yesterday = pd.read_sql_query(query_yesterday, engine)
-                df = pd.concat([df_yesterday, df]).drop_duplicates().sort_values('timestamp')
-            except:
-                pass
-        
-        if df.empty:
-            return None
-        
-        # Process timestamps
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        df = df.set_index('timestamp').sort_index()
-        
-        # Resample to 500ms
-        price_data = df['final_price'].resample('500ms').ffill().dropna()
-        
-        if len(price_data) < 2:
-            return None
-        
-        # Calculate 10-second volatilities
-        result = []
-        start_date = price_data.index.min().floor('10s')
-        end_date = price_data.index.max().ceil('10s')
-        ten_sec_periods = pd.date_range(start=start_date, end=end_date, freq='10s')
-        
-        for i in range(len(ten_sec_periods)-1):
-            start_window = ten_sec_periods[i]
-            end_window = ten_sec_periods[i+1]
             
-            window_data = price_data[(price_data.index >= start_window) & (price_data.index < end_window)]
+            df = pd.read_sql_query(query, engine)
             
-            if len(window_data) >= 2:
-                # Calculate volatility for 10-second window
-                log_returns = np.diff(np.log(window_data.values))
-                if len(log_returns) > 0:
-                    annualization_factor = np.sqrt(3153600)  # For 10-second windows
-                    volatility = np.std(log_returns) * annualization_factor
-                    result.append(volatility)
-        
-        if not result:
-            return None
-        
-        # Convert to percentage
-        vol_pct = np.array(result) * 100
-        
-        # Calculate percentiles
-        percentiles = {
-            'pair': token,
-            '50_pctile': np.percentile(vol_pct, 50),
-            '75_pctile': np.percentile(vol_pct, 75),
-            '90_pctile': np.percentile(vol_pct, 90)
-        }
-        
-        return percentiles
-        
-    except Exception as e:
-        return None
+            # If we don't have enough data, try yesterday's partition too
+            if df.empty or len(df) < 10:
+                query_yesterday = f"""
+                SELECT 
+                    created_at + INTERVAL '8 hour' AS timestamp,
+                    final_price
+                FROM public.oracle_price_log_partition_{yesterday_str}
+                WHERE created_at >= '{start_time_str}'::timestamp - INTERVAL '8 hour'
+                AND created_at <= '{end_time_str}'::timestamp - INTERVAL '8 hour'
+                AND source_type = 0
+                AND pair_name = '{token}'
+                ORDER BY timestamp
+                """
+                try:
+                    df_yesterday = pd.read_sql_query(query_yesterday, engine)
+                    df = pd.concat([df_yesterday, df]).drop_duplicates().sort_values('timestamp')
+                except:
+                    pass
+            
+            if df.empty:
+                continue
+            
+            # Process timestamps
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            df = df.set_index('timestamp').sort_index()
+            
+            # Resample to 500ms
+            price_data = df['final_price'].resample('500ms').ffill().dropna()
+            
+            if len(price_data) < 2:
+                continue
+            
+            # Calculate 10-second volatilities
+            volatility_values = []
+            start_date = price_data.index.min().floor('10s')
+            end_date = price_data.index.max().ceil('10s')
+            ten_sec_periods = pd.date_range(start=start_date, end=end_date, freq='10s')
+            
+            for i in range(len(ten_sec_periods)-1):
+                start_window = ten_sec_periods[i]
+                end_window = ten_sec_periods[i+1]
+                
+                window_data = price_data[(price_data.index >= start_window) & (price_data.index < end_window)]
+                
+                if len(window_data) >= 2:
+                    # Calculate volatility for 10-second window
+                    log_returns = np.diff(np.log(window_data.values))
+                    if len(log_returns) > 0:
+                        annualization_factor = np.sqrt(3153600)  # For 10-second windows
+                        volatility = np.std(log_returns) * annualization_factor
+                        volatility_values.append(volatility)
+            
+            if not volatility_values:
+                continue
+            
+            # Convert to percentage
+            vol_pct = np.array(volatility_values) * 100
+            
+            # Calculate percentiles
+            percentiles = {
+                'pair': token,
+                '50_pctile': np.percentile(vol_pct, 50),
+                '75_pctile': np.percentile(vol_pct, 75),
+                '90_pctile': np.percentile(vol_pct, 90)
+            }
+            
+            results.append(percentiles)
+            
+        except Exception as e:
+            st.warning(f"Error processing {token}: {str(e)}")
+            continue
+    
+    # Clear progress indicators
+    progress_bar.empty()
+    status_text.empty()
+    
+    return results
 
 # Main execution
-with st.spinner("Fetching all trading pairs..."):
-    all_tokens = fetch_trading_pairs()
+st.write("Calculating volatility percentiles for all trading pairs...")
 
-st.write(f"Total pairs: {len(all_tokens)}")
-
-# Calculate percentiles for all pairs with parallel processing
-results = []
-
-# Create multiple engines for parallel processing
-engines = [create_engine(
-    f"postgresql://{db_params['user']}:{db_params['password']}@{db_params['host']}:{db_params['port']}/{db_params['database']}"
-) for _ in range(10)]
-
-def process_token(token, engine_idx):
-    engine = engines[engine_idx % len(engines)]
-    result = calculate_volatility_percentiles(token, engine)
-    return result
-
-# Process tokens in parallel
-with st.spinner(f"Processing {len(all_tokens)} pairs..."):
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-        futures = []
-        for idx, token in enumerate(all_tokens):
-            future = executor.submit(process_token, token, idx)
-            futures.append(future)
-        
-        for future in concurrent.futures.as_completed(futures):
-            result = future.result()
-            if result:
-                results.append(result)
+# Calculate all volatilities
+results = calculate_all_volatilities()
 
 # Create DataFrame
 if results:
@@ -180,28 +173,49 @@ if results:
     st.markdown("### Volatility Percentiles (Last 6 Hours)")
     st.markdown("*Based on 10-second window annualized volatility calculations*")
     
-    # Create a styled version
-    def color_cells(val):
+    # Create colored display
+    def get_color(val):
         if val > 100:
-            color = '#FF6B6B'  # Red for high volatility
+            return 'red'
         elif val > 50:
-            color = '#FFA500'  # Orange for medium
+            return 'orange'
         else:
-            color = '#4CAF50'  # Green for low
-        return f'background-color: {color}; color: white'
+            return 'green'
     
-    styled_df = df_results.style.format({
-        '50_pctile': '{:.1f}%',
-        '75_pctile': '{:.1f}%',
-        '90_pctile': '{:.1f}%'
-    }).rename(columns={
-        'pair': 'Pair',
-        '50_pctile': '50th %ile',
-        '75_pctile': '75th %ile',
-        '90_pctile': '90th %ile'
-    }).applymap(color_cells, subset=['50_pctile', '75_pctile', '90_pctile'])
+    # Display the data with custom HTML
+    table_html = """
+    <table style="width:100%; border-collapse: collapse;">
+    <thead>
+        <tr style="background-color: #f0f0f0;">
+            <th style="padding: 10px; text-align: left; border: 1px solid #ddd;">Pair</th>
+            <th style="padding: 10px; text-align: right; border: 1px solid #ddd;">50th %ile</th>
+            <th style="padding: 10px; text-align: right; border: 1px solid #ddd;">75th %ile</th>
+            <th style="padding: 10px; text-align: right; border: 1px solid #ddd;">90th %ile</th>
+        </tr>
+    </thead>
+    <tbody>
+    """
     
-    st.dataframe(styled_df, use_container_width=True, height=600)
+    for _, row in df_results.iterrows():
+        table_html += f"""
+        <tr>
+            <td style="padding: 8px; border: 1px solid #ddd;">{row['pair']}</td>
+            <td style="padding: 8px; text-align: right; border: 1px solid #ddd; background-color: {get_color(row['50_pctile'])}; color: white;">
+                {row['50_pctile']:.1f}%
+            </td>
+            <td style="padding: 8px; text-align: right; border: 1px solid #ddd; background-color: {get_color(row['75_pctile'])}; color: white;">
+                {row['75_pctile']:.1f}%
+            </td>
+            <td style="padding: 8px; text-align: right; border: 1px solid #ddd; background-color: {get_color(row['90_pctile'])}; color: white;">
+                {row['90_pctile']:.1f}%
+            </td>
+        </tr>
+        """
+    
+    table_html += "</tbody></table>"
+    
+    # Display the table
+    st.markdown(table_html, unsafe_allow_html=True)
     
     # Summary statistics
     st.markdown("### Summary Statistics")
@@ -232,10 +246,6 @@ if results:
     )
 else:
     st.error("No data could be calculated for any pairs")
-
-# Close engines
-for engine in engines:
-    engine.dispose()
 
 # Refresh button
 if st.button("Refresh Data", type="primary"):
