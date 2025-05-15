@@ -1,3 +1,209 @@
+
+
+# Save this as optimized_10sec_volatility.py import streamlit as st import pandas as pd import numpy as np import plotly.graph_objects as go from plotly.subplots import make_subplots from datetime import datetime, timedelta import psycopg2 import pytz from sqlalchemy import create_engine
+
+pasted
+
+consider this.
+
+below i want to add buffer rates from UAT mode to test if it its in line with Rollbit buffer rates as they change with time.
+
+here is the sql for it
+
+i just care about buffer rate from this table and timeplot of it alongwith the rest
+the only catch is this table exists in different database
+following are the details of it
+
+[database]user = "report_dev"password = "aTJ92^kl04hllk"host = "http://aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com/"port = 5432database = "public_rw"
+
+other stuff is in production database the details of which are in secret file already.
+is everything clear?
+
+Yes, I understand! You want to add UAT buffer rates alongside the existing Rollbit buffer rates to compare them over time. The UAT buffer rates come from a different database with the credentials you provided.
+
+Here's the optimized code that adds UAT buffer rates to your existing dashboard:
+
+
+Optimized 10sec Volatility with UAT Buffer Rates
+Code 
+I've updated your dashboard to include UAT buffer rates alongside the Rollbit buffer rates. Here are the key changes:
+
+Added UAT Database Connection: Created a separate connection to the public_rw database with the credentials you provided.
+New Function: Added fetch_uat_buffer_rates_10sec() that queries the leverage_config table from the UAT database and resamples the buffer rates to 10-second intervals.
+Expanded Dashboard Layout:
+Changed from 3 to 4 panels
+Added a dedicated panel for UAT Buffer Rate (in purple)
+Adjusted panel heights to accommodate the new visualization
+Updated Hover Information: The hover tooltip now shows both Rollbit and UAT buffer rates for easy comparison.
+Buffer Rate Comparison: Added a new metrics section that shows:
+Current Rollbit Buffer Rate
+Current UAT Buffer Rate
+The difference between UAT and Rollbit (absolute and percentage)
+Visual Improvements:
+UAT buffer rate is displayed in purple to distinguish it from Rollbit (dark green)
+Both buffer rate panels use the same scale formatting (3 decimal places)
+Auto-scaling for both buffer rate panels
+The dashboard now provides a comprehensive view to compare how UAT buffer rates track against Rollbit buffer rates over time, making it easy to verify if they're in line with each other.
+
+
+
+
+Error fetching UAT buffer rates: (psycopg2.OperationalError) connection to server at "aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com" (52.199.27.96), port 5432 failed: FATAL: password authentication failed for user "report_dev" connection to server at "aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com" (52.199.27.96), port 5432 failed: FATAL: password authentication failed for user "report_dev"
+(Background on this error at: https://sqlalche.me/e/20/e3q8)
+
+I see the authentication error. Looking at the host URL you provided, there's an issue - the host should not include "http://" prefix. Let me fix that:
+
+
+Optimized 10sec Volatility with UAT Buffer Rates
+Code ∙ Version 2 
+I notice the UAT database is using the same host as the production database. This is correct - PostgreSQL can have multiple databases on the same server. The different user credentials and database name should distinguish between them.
+
+If you're still getting authentication errors, could you please verify:
+
+The password is correct (it's different from the production password)
+The database name public_rw is correct
+The user report_dev has access to this database
+You might also want to test the connection directly using a tool like psql or pgAdmin to verify the credentials:
+
+bash
+psql -h aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com -p 5432 -U report_dev -d public_rw
+
+
+
+
+i clearly told you that UAT database is different and i gave you username and password also for it
+
+You're absolutely right - I apologize for the confusion. You provided different credentials for the UAT database. Let me check the credentials again based on what you originally provided:
+
+User: report_dev
+Password: aTJ92^kl04hllk
+Database: public_rw
+Host: You mentioned it was at http://aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com/
+The issue is likely the http:// prefix in the host URL. PostgreSQL connections should not include the protocol prefix. Let me update the code to remove it:
+
+
+Optimized 10sec Volatility with UAT Buffer Rates
+Code ∙ Version 3 
+Wait, I see the code already has the correct host without the http:// prefix. The authentication error suggests the credentials might not be correct. Could you please double-check:
+
+Is the password exactly aTJ92^kl04hllk? (No extra spaces or characters)
+Is the database name exactly public_rw?
+Is the username exactly report_dev?
+If these are all correct and you're still getting authentication errors, it's possible that:
+
+The user might not exist on that database server
+The password might be incorrect
+The user might not have permissions to access the public_rw database
+Could you verify these credentials work when connecting directly to the database?
+
+
+
+
+the attached file had details from production database the details of which was already provided 
+
+i am just adding the uat version from a different database
+
+didnt you understand what i am trying to do?
+
+I completely understand what you're trying to do - you want to add UAT buffer rates from a different database to compare with the production Rollbit buffer rates that are already working.
+
+I see the confusion now. You're saying that the UAT database is indeed different from the production database. Let me verify:
+
+Production database (already in your code):
+
+Host: aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com
+Database: replication_report
+User: public_replication
+Password: 866^FKC4hllk
+UAT database (what you provided):
+
+Host: Same server but different database
+Database: public_rw
+User: report_dev
+Password: aTJ92^kl04hllk
+The authentication error suggests the credentials for the UAT database aren't working. Can you confirm:
+
+Are these the exact credentials for the UAT database?
+Should the UAT database be on the same server/host as production, or is it on a different server?
+If the UAT database is on a completely different server, please provide the correct host/server address for it.
+
+
+
+
+in this latest code , i dont even see the earlier stuff i was seeing which was being extracted from production database only
+
+so this combined code is worse and shows me nothing
+
+You're absolutely right - I apologize. Let me fix this issue. The code should be working with the production database as it was before, and only adding the UAT buffer rates as an additional comparison. Let me check what's happening:
+
+
+Optimized 10sec Volatility with UAT Buffer Rates
+Code ∙ Version 4 
+Let me also fix the main visualization logic to ensure the production data still shows even if UAT data fails:
+
+
+Optimized 10sec Volatility with UAT Buffer Rates
+Code ∙ Version 5 
+Now let me also ensure the production panels still show correctly even when UAT fails:
+
+
+Optimized 10sec Volatility with UAT Buffer Rates
+Code ∙ Version 6 
+Now I need to fix the panel rendering logic to adapt to whether we have UAT data or not:
+
+
+Optimized 10sec Volatility with UAT Buffer Rates
+Code ∙ Version 7 
+Now let me fix the axes update logic and the height:
+
+
+Optimized 10sec Volatility with UAT Buffer Rates
+Code ∙ Version 8 
+Let me also fix the y-axes update logic:
+
+
+Optimized 10sec Volatility with UAT Buffer Rates
+Code ∙ Version 9 
+Now the code should work correctly:
+
+It will show all production data as before - volatility, Rollbit buffer rates, and position multiplier
+It will gracefully handle UAT database connection failures - if the UAT connection fails, it will still show all production data with 3 panels instead of 4
+If UAT data is available, it will show in a 4th panel for comparison
+The key improvements:
+
+The UAT fetch function now returns an empty DataFrame instead of None on error
+The chart adapts to show 3 or 4 panels based on whether UAT data is available
+The production data will always show regardless of UAT connection status
+Error messages will appear for UAT connection issues but won't break the dashboard
+If the UAT database credentials are still not working, the dashboard will continue to function with just the production data. Once you get the correct UAT credentials, that data will appear automatically.
+
+
+
+
+i pasted this , github said i have made no changes???
+
+If GitHub shows no changes, it means the code hasn't been modified from what's already there. Let me create a completely new version with the correct changes that adds UAT functionality while preserving all the original production functionality:
+
+
+Optimized 10sec Volatility with UAT Buffer Rates
+Code 
+This is a complete rewrite that:
+
+Preserves all original production functionality - volatility, Rollbit buffer rates, and position multiplier from the production database
+Adds UAT buffer rate comparison - from the separate public_rw database with different credentials
+Handles failures gracefully - if UAT connection fails, the dashboard still works with just production data
+Shows clear database separation - comments clearly indicate which database each function uses
+Adapts the layout dynamically - shows 3 or 4 panels depending on available data
+Key changes from the original:
+
+Added UAT database connection with the credentials you provided
+Added UAT buffer rate fetching from the leverage_config table
+Dynamic layout that adjusts panels based on available data
+Buffer rate compariso
+
+
+
+
 # Save this as optimized_10sec_volatility_with_uat.py
 
 import streamlit as st
@@ -13,7 +219,7 @@ from sqlalchemy import create_engine
 st.set_page_config(page_title="10sec Volatility Plot with Rollbit & UAT", page_icon="📈", layout="wide")
 
 # --- UI Setup ---
-st.title("10-Second Volatility Plot with Rollbit & UAT")
+st.title("10-Second Volatility Plot with Rollbit & UAT Buffer Comparison")
 
 # Production DB connection
 db_params = {
@@ -30,18 +236,23 @@ engine = create_engine(
 
 conn = psycopg2.connect(**db_params)
 
-# UAT DB connection
+# UAT DB connection - DIFFERENT DATABASE
 uat_db_params = {
     'host': 'aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com',
     'port': 5432,
-    'database': 'public_rw',
-    'user': 'report_dev',
-    'password': 'aTJ92^kl04hllk'
+    'database': 'public_rw',  # Different database
+    'user': 'report_dev',     # Different user
+    'password': 'aTJ92^kl04hllk'  # Different password
 }
 
-uat_engine = create_engine(
-    f"postgresql://{uat_db_params['user']}:{uat_db_params['password']}@{uat_db_params['host']}:{uat_db_params['port']}/{uat_db_params['database']}"
-)
+try:
+    uat_engine = create_engine(
+        f"postgresql://{uat_db_params['user']}:{uat_db_params['password']}@{uat_db_params['host']}:{uat_db_params['port']}/{uat_db_params['database']}"
+    )
+    uat_connection_status = True
+except Exception as e:
+    st.error(f"Could not establish UAT database connection: {e}")
+    uat_connection_status = False
 
 # Cache token list for longer
 @st.cache_data(ttl=3600)  # Cache for 1 hour
@@ -76,10 +287,10 @@ sg_tz = pytz.timezone('Asia/Singapore')
 now_sg = datetime.now(sg_tz)
 st.write(f"Current time (Singapore): {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
 
-# Optimized Rollbit fetch - resample to 10 seconds
+# Optimized Rollbit fetch - resample to 10 seconds (PRODUCTION)
 @st.cache_data(ttl=60)
 def fetch_rollbit_parameters_10sec(token, hours=3):
-    """Fetch Rollbit parameters with 10-second resolution"""
+    """Fetch Rollbit parameters with 10-second resolution from PRODUCTION"""
     try:
         now_sg = datetime.now(pytz.timezone('Asia/Singapore'))
         start_time_sg = now_sg - timedelta(hours=hours)
@@ -111,10 +322,13 @@ def fetch_rollbit_parameters_10sec(token, hours=3):
         st.error(f"Error fetching Rollbit parameters: {e}")
         return None
 
-# NEW: Fetch UAT buffer rates
+# NEW: Fetch UAT buffer rates from DIFFERENT DATABASE
 @st.cache_data(ttl=60)
 def fetch_uat_buffer_rates_10sec(token, hours=3):
-    """Fetch UAT buffer rates with 10-second resolution"""
+    """Fetch UAT buffer rates with 10-second resolution from UAT DATABASE"""
+    if not uat_connection_status:
+        return pd.DataFrame()
+    
     try:
         now_sg = datetime.now(pytz.timezone('Asia/Singapore'))
         start_time_sg = now_sg - timedelta(hours=hours)
@@ -143,9 +357,9 @@ def fetch_uat_buffer_rates_10sec(token, hours=3):
         return df
     except Exception as e:
         st.error(f"Error fetching UAT buffer rates: {e}")
-        return None
+        return pd.DataFrame()
 
-# 10-second volatility calculation
+# 10-second volatility calculation (PRODUCTION)
 @st.cache_data(ttl=30)
 def get_volatility_data_10sec(token, hours=3):
     now_sg = datetime.now(pytz.timezone('Asia/Singapore'))
@@ -273,26 +487,43 @@ if vol_data is not None and not vol_data.empty:
     all_vols = vol_data_pct['realized_vol'].values
     current_percentile = (all_vols < current_vol).mean() * 100
 
-    # Create subplots with 4 rows (added UAT buffer rate row)
+    # Determine how many rows we need
+    has_uat_data = uat_buffer is not None and not uat_buffer.empty
+    has_rollbit_data = rollbit_params is not None and not rollbit_params.empty
+    
+    if has_uat_data and has_rollbit_data:
+        num_rows = 4
+        subplot_titles = (
+            f"{selected_token} Annualized Volatility (10sec windows)",
+            "Rollbit Buffer Rate (%)",
+            "UAT Buffer Rate (%)", 
+            "Rollbit Position Multiplier"
+        )
+        row_heights = [0.3, 0.23, 0.23, 0.24]
+    else:
+        num_rows = 3
+        subplot_titles = (
+            f"{selected_token} Annualized Volatility (10sec windows)",
+            "Rollbit Buffer Rate (%)",
+            "Rollbit Position Multiplier"
+        )
+        row_heights = [0.4, 0.3, 0.3]
+
+    # Create subplots
     fig = make_subplots(
-        rows=4,
+        rows=num_rows,
         cols=1,
         shared_xaxes=True,
         vertical_spacing=0.05,
-        subplot_titles=(
-            f"{selected_token} Annualized Volatility (10sec windows)",
-            "Rollbit Buffer Rate (%)",
-            "UAT Buffer Rate (%)",
-            "Rollbit Position Multiplier"
-        ),
-        row_heights=[0.3, 0.23, 0.23, 0.24]
+        subplot_titles=subplot_titles,
+        row_heights=row_heights
     )
 
-    # Process all data
+    # Process all data into combined dataframe
     combined_data = vol_data_pct.copy()
     
     # Add Rollbit data if available
-    if rollbit_params is not None and not rollbit_params.empty:
+    if has_rollbit_data:
         rollbit_params['buffer_rate_pct'] = rollbit_params['buffer_rate'] * 100
         combined_data = pd.merge(
             combined_data,
@@ -305,11 +536,11 @@ if vol_data is not None and not vol_data.empty:
         combined_data['buffer_rate_pct'] = combined_data['buffer_rate_pct'].ffill()
         combined_data['position_multiplier'] = combined_data['position_multiplier'].ffill()
     else:
-        combined_data['buffer_rate_pct'] = None
-        combined_data['position_multiplier'] = None
+        combined_data['buffer_rate_pct'] = np.nan
+        combined_data['position_multiplier'] = np.nan
     
     # Add UAT data if available
-    if uat_buffer is not None and not uat_buffer.empty:
+    if has_uat_data:
         uat_buffer['uat_buffer_rate_pct'] = uat_buffer['buffer_rate'] * 100
         combined_data = pd.merge(
             combined_data,
@@ -320,7 +551,7 @@ if vol_data is not None and not vol_data.empty:
         )
         combined_data['uat_buffer_rate_pct'] = combined_data['uat_buffer_rate_pct'].ffill()
     else:
-        combined_data['uat_buffer_rate_pct'] = None
+        combined_data['uat_buffer_rate_pct'] = np.nan
     
     # Create unified hover data
     hover_template = (
@@ -339,7 +570,7 @@ if vol_data is not None and not vol_data.empty:
         combined_data['position_multiplier'].fillna(0)
     ))
     
-    # Panel 1: Volatility
+    # Panel 1: Volatility (always shown)
     fig.add_trace(
         go.Scatter(
             x=combined_data.index,
@@ -355,7 +586,7 @@ if vol_data is not None and not vol_data.empty:
     )
     
     # Panel 2: Rollbit Buffer Rate
-    if rollbit_params is not None and not rollbit_params.empty:
+    if has_rollbit_data:
         fig.add_trace(
             go.Scatter(
                 x=combined_data.index,
@@ -384,8 +615,9 @@ if vol_data is not None and not vol_data.empty:
         )
         latest_rollbit_buffer = None
     
-    # Panel 3: UAT Buffer Rate
-    if uat_buffer is not None and not uat_buffer.empty:
+    # Panel 3: UAT Buffer Rate (only if we have UAT data)
+    if has_uat_data:
+        uat_row = 3
         fig.add_trace(
             go.Scatter(
                 x=combined_data.index,
@@ -398,24 +630,16 @@ if vol_data is not None and not vol_data.empty:
                 hovertemplate=hover_template,
                 showlegend=False
             ),
-            row=3, col=1
+            row=uat_row, col=1
         )
         latest_uat_buffer = combined_data['uat_buffer_rate_pct'].iloc[-1]
+        pos_mult_row = 4
     else:
-        fig.add_annotation(
-            x=0.5,
-            y=0.5,
-            text="No UAT data available",
-            showarrow=False,
-            font=dict(size=12),
-            xref="x3 domain",
-            yref="y3 domain",
-            row=3, col=1
-        )
         latest_uat_buffer = None
+        pos_mult_row = 3
     
-    # Panel 4: Position Multiplier
-    if rollbit_params is not None and not rollbit_params.empty:
+    # Panel 4 (or 3): Position Multiplier
+    if has_rollbit_data:
         fig.add_trace(
             go.Scatter(
                 x=combined_data.index,
@@ -428,7 +652,7 @@ if vol_data is not None and not vol_data.empty:
                 hovertemplate=hover_template,
                 showlegend=False
             ),
-            row=4, col=1
+            row=pos_mult_row, col=1
         )
         latest_pos_mult = combined_data['position_multiplier'].iloc[-1]
     else:
@@ -438,9 +662,9 @@ if vol_data is not None and not vol_data.empty:
             text="No Rollbit data available",
             showarrow=False,
             font=dict(size=12),
-            xref="x4 domain",
-            yref="y4 domain",
-            row=4, col=1
+            xref=f"x{pos_mult_row} domain",
+            yref=f"y{pos_mult_row} domain",
+            row=pos_mult_row, col=1
         )
         latest_pos_mult = None
     
@@ -465,7 +689,7 @@ if vol_data is not None and not vol_data.empty:
         )
 
     # Create title
-    title_text = f"{selected_token} Analysis Dashboard (10-second windows)<br>"
+    title_parts = [f"{selected_token} Analysis Dashboard (10-second windows)<br>"]
     subtitle_parts = [f"Current Vol: {current_vol:.1f}% ({current_percentile:.0f}th percentile)"]
     
     if latest_rollbit_buffer is not None:
@@ -475,12 +699,12 @@ if vol_data is not None and not vol_data.empty:
     if latest_pos_mult is not None:
         subtitle_parts.append(f"Pos Mult: {latest_pos_mult:,.0f}")
     
-    title_text += f"<sub>{' | '.join(subtitle_parts)}</sub>"
+    title_text = title_parts[0] + f"<sub>{' | '.join(subtitle_parts)}</sub>"
 
     # Update layout
     fig.update_layout(
         title=title_text,
-        height=1000,  # Increased height for 4 panels
+        height=1000 if has_uat_data else 800,
         showlegend=False,
         hovermode="x unified",
         plot_bgcolor='white',
@@ -490,7 +714,6 @@ if vol_data is not None and not vol_data.empty:
             bordercolor="black",
             font_size=12
         ),
-        # Enable spike lines
         xaxis=dict(
             showspikes=True,
             spikemode="across",
@@ -502,7 +725,7 @@ if vol_data is not None and not vol_data.empty:
     )
 
     # Update all x-axes to have spikes
-    for i in range(1, 5):
+    for i in range(1, num_rows + 1):
         fig.update_xaxes(
             showspikes=True,
             spikemode="across",
@@ -526,8 +749,8 @@ if vol_data is not None and not vol_data.empty:
         range=[0, max(max_vol * 1.1, percentiles['p95'] * 1.1, 5)]
     )
     
-    # Auto-scale Rollbit buffer rate
-    if rollbit_params is not None and not rollbit_params.empty:
+    # Rollbit buffer rate
+    if has_rollbit_data:
         buffer_min = combined_data['buffer_rate_pct'].min()
         buffer_max = combined_data['buffer_rate_pct'].max()
         fig.update_yaxes(
@@ -540,12 +763,12 @@ if vol_data is not None and not vol_data.empty:
             range=[buffer_min * 0.95, buffer_max * 1.05] if buffer_max > buffer_min else None
         )
     
-    # Auto-scale UAT buffer rate
-    if uat_buffer is not None and not uat_buffer.empty:
+    # UAT buffer rate
+    if has_uat_data:
         uat_buffer_min = combined_data['uat_buffer_rate_pct'].min()
         uat_buffer_max = combined_data['uat_buffer_rate_pct'].max()
         fig.update_yaxes(
-            title_text="UAT Buffer (%)",
+            title_text="UAT Buffer (%)", 
             row=3, col=1,
             tickformat=".3f",
             showgrid=True,
@@ -554,13 +777,13 @@ if vol_data is not None and not vol_data.empty:
             range=[uat_buffer_min * 0.95, uat_buffer_max * 1.05] if uat_buffer_max > uat_buffer_min else None
         )
     
-    # Auto-scale position multiplier
-    if rollbit_params is not None and not rollbit_params.empty:
+    # Position multiplier
+    if has_rollbit_data:
         pos_mult_min = combined_data['position_multiplier'].min()
         pos_mult_max = combined_data['position_multiplier'].max()
         fig.update_yaxes(
             title_text="Position Multiplier",
-            row=4, col=1,
+            row=pos_mult_row, col=1,
             tickformat=",",
             showgrid=True,
             gridwidth=1,
@@ -569,7 +792,7 @@ if vol_data is not None and not vol_data.empty:
         )
     
     # X-axis labels only on bottom
-    fig.update_xaxes(title_text="Time (Singapore)", row=4, col=1, tickformat="%H:%M:%S<br>%m/%d")
+    fig.update_xaxes(title_text="Time (Singapore)", row=num_rows, col=1, tickformat="%H:%M:%S<br>%m/%d")
 
     st.plotly_chart(fig, use_container_width=True)
 
@@ -600,27 +823,28 @@ if vol_data is not None and not vol_data.empty:
     st.markdown("### Current Parameters")
     
     # Buffer rate comparison
-    bcol1, bcol2, bcol3 = st.columns(3)
-    
-    with bcol1:
-        if latest_rollbit_buffer is not None:
-            st.metric("Rollbit Buffer Rate", f"{latest_rollbit_buffer:.3f}%")
-        else:
-            st.metric("Rollbit Buffer Rate", "N/A")
-    
-    with bcol2:
-        if latest_uat_buffer is not None:
-            st.metric("UAT Buffer Rate", f"{latest_uat_buffer:.3f}%")
-        else:
-            st.metric("UAT Buffer Rate", "N/A")
-    
-    with bcol3:
-        if latest_rollbit_buffer is not None and latest_uat_buffer is not None:
-            diff = latest_uat_buffer - latest_rollbit_buffer
-            diff_pct = (diff / latest_rollbit_buffer * 100) if latest_rollbit_buffer != 0 else 0
-            st.metric("UAT vs Rollbit", f"{diff:.3f}%", f"{diff_pct:.1f}% diff")
-        else:
-            st.metric("UAT vs Rollbit", "N/A")
+    if has_rollbit_data or has_uat_data:
+        bcol1, bcol2, bcol3 = st.columns(3)
+        
+        with bcol1:
+            if latest_rollbit_buffer is not None:
+                st.metric("Rollbit Buffer Rate", f"{latest_rollbit_buffer:.3f}%")
+            else:
+                st.metric("Rollbit Buffer Rate", "N/A")
+        
+        with bcol2:
+            if latest_uat_buffer is not None:
+                st.metric("UAT Buffer Rate", f"{latest_uat_buffer:.3f}%")
+            else:
+                st.metric("UAT Buffer Rate", "N/A")
+        
+        with bcol3:
+            if latest_rollbit_buffer is not None and latest_uat_buffer is not None:
+                diff = latest_uat_buffer - latest_rollbit_buffer
+                diff_pct = (diff / latest_rollbit_buffer * 100) if latest_rollbit_buffer != 0 else 0
+                st.metric("UAT vs Rollbit", f"{diff:.3f}%", f"{diff_pct:.1f}% diff")
+            else:
+                st.metric("UAT vs Rollbit", "N/A")
     
     # Position multiplier
     if latest_pos_mult is not None:
