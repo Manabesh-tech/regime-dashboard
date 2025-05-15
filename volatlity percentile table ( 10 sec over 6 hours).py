@@ -177,11 +177,8 @@ if results:
     def style_volatility(val):
         """Apply color based on volatility value"""
         try:
-            # Extract numeric value from percentage string
-            if isinstance(val, str) and '%' in val:
-                num_val = float(val.replace('%', ''))
-            else:
-                num_val = float(val)
+            # Extract numeric value
+            num_val = float(val)
                 
             if num_val > 100:
                 color = '#ff4444'  # Red
@@ -193,26 +190,26 @@ if results:
         except:
             return ''
     
-    # Format the dataframe
-    styled_df = df_results.style.format({
-        '50_pctile': '{:.1f}%',
-        '75_pctile': '{:.1f}%',
-        '90_pctile': '{:.1f}%'
-    })
-    
-    # Apply styling to percentile columns
-    styled_df = styled_df.applymap(
-        style_volatility,
-        subset=['50_pctile', '75_pctile', '90_pctile']
-    )
-    
-    # Rename columns
-    styled_df = styled_df.rename(columns={
+    # First rename columns
+    display_df = df_results.rename(columns={
         'pair': 'Pair',
         '50_pctile': '50th %ile',
         '75_pctile': '75th %ile',
         '90_pctile': '90th %ile'
     })
+    
+    # Then format and style
+    styled_df = display_df.style.format({
+        '50th %ile': '{:.1f}%',
+        '75th %ile': '{:.1f}%',
+        '90th %ile': '{:.1f}%'
+    })
+    
+    # Apply styling to percentile columns
+    styled_df = styled_df.applymap(
+        style_volatility,
+        subset=['50th %ile', '75th %ile', '90th %ile']
+    )
     
     # Display the styled dataframe
     st.dataframe(
