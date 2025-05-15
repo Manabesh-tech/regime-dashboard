@@ -139,6 +139,7 @@ def calculate_all_volatilities():
             # Calculate percentiles
             percentiles = {
                 'pair': token,
+                '25_pctile': np.percentile(vol_pct, 25),
                 '50_pctile': np.percentile(vol_pct, 50),
                 '75_pctile': np.percentile(vol_pct, 75),
                 '95_pctile': np.percentile(vol_pct, 95)
@@ -193,6 +194,7 @@ if results:
     # First rename columns
     display_df = df_results.rename(columns={
         'pair': 'Pair',
+        '25_pctile': '25th %ile'
         '50_pctile': '50th %ile',
         '75_pctile': '75th %ile',
         '95_pctile': '95th %ile'
@@ -200,6 +202,7 @@ if results:
     
     # Then format and style
     styled_df = display_df.style.format({
+        '25th %ile': '{:.1f}%',
         '50th %ile': '{:.1f}%',
         '75th %ile': '{:.1f}%',
         '95th %ile': '{:.1f}%'
@@ -208,7 +211,7 @@ if results:
     # Apply styling to percentile columns
     styled_df = styled_df.applymap(
         style_volatility,
-        subset=['50th %ile', '75th %ile', '95th %ile']
+        subset=['25th %ile','50th %ile','75th %ile','95th %ile']
     )
     
     # Display the styled dataframe
@@ -220,17 +223,22 @@ if results:
     
     # Summary statistics
     st.markdown("### Summary Statistics")
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(3)
     
     with col1:
+        st.metric("Average 25th %ile", f"{df_results['25_pctile'].mean():.1f}%")
+        st.metric("Pairs with 25th > 25%", f"{(df_results['25_pctile'] > 25).sum()}")
+    
+    
+    with col2:
         st.metric("Average 50th %ile", f"{df_results['50_pctile'].mean():.1f}%")
         st.metric("Pairs with 50th > 50%", f"{(df_results['50_pctile'] > 50).sum()}")
     
-    with col2:
+    with col3:
         st.metric("Average 75th %ile", f"{df_results['75_pctile'].mean():.1f}%")
         st.metric("Pairs with 75th > 100%", f"{(df_results['75_pctile'] > 100).sum()}")
     
-    with col3:
+    with col4:
         st.metric("Average 95th %ile", f"{df_results['95_pctile'].mean():.1f}%")
         st.metric("Pairs with 95th > 150%", f"{(df_results['95_pctile'] > 150).sum()}")
     
