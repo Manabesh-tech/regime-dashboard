@@ -84,8 +84,11 @@ st.write(f"Current time (Singapore): {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
 # Optimized Rollbit fetch - resample to 10 seconds (PRODUCTION)
 @st.cache_data(ttl=60)
 def fetch_rollbit_parameters_10sec(token, hours=3):
-    """Fetch Rollbit parameters with 10-second resolution from PRODUCTION"""
+    """Fetch Rollbit parameters with 10-second resolution"""
     try:
+        # 移除 token 名称中的 'PROD'
+        clean_token = token.replace('PROD', '')
+        
         now_sg = datetime.now(pytz.timezone('Asia/Singapore'))
         start_time_sg = now_sg - timedelta(hours=hours)
         
@@ -96,9 +99,10 @@ def fetch_rollbit_parameters_10sec(token, hours=3):
          SELECT 
             pair_name,
             bust_buffer AS buffer_rate,
+            position_multiplier,
             created_at + INTERVAL '8 hour' AS timestamp
         FROM rollbit_pair_config 
-        WHERE pair_name = '{token}'
+        WHERE pair_name = '{clean_token}'
         AND created_at >= '{start_str}'::timestamp - INTERVAL '8 hour'
         AND created_at <= '{end_str}'::timestamp - INTERVAL '8 hour'
         ORDER BY created_at
