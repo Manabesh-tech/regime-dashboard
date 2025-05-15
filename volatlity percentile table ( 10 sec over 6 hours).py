@@ -194,7 +194,7 @@ if results:
     # First rename columns
     display_df = df_results.rename(columns={
         'pair': 'Pair',
-        '25_pctile': '25th %ile'
+        '25_pctile': '25th %ile',
         '50_pctile': '50th %ile',
         '75_pctile': '75th %ile',
         '95_pctile': '95th %ile'
