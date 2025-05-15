@@ -223,7 +223,7 @@ if results:
     
     # Summary statistics
     st.markdown("### Summary Statistics")
-    col1, col2, col3, col4 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     
     with col1:
         st.metric("Average 25th %ile", f"{df_results['25_pctile'].mean():.1f}%")
