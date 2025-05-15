@@ -129,6 +129,7 @@ def fetch_uat_buffer_rates_10sec(token, hours=3):
         start_str = start_time_sg.strftime("%Y-%m-%d %H:%M:%S")
         end_str = now_sg.strftime("%Y-%m-%d %H:%M:%S")
 
+        # Debug: Check what data we're getting
         query = f"""
         SELECT 
             pair_name,
@@ -142,11 +143,31 @@ def fetch_uat_buffer_rates_10sec(token, hours=3):
         """
 
         df = pd.read_sql_query(query, uat_engine)
+        
+        # Debug info
+        if df.empty:
+            st.warning(f"No UAT data found for {token}")
+            # Try to see what tokens are available
+            check_query = f"""
+            SELECT DISTINCT pair_name 
+            FROM trade_pair_risk_history 
+            WHERE created_at >= '{start_str}'::timestamp - INTERVAL '8 hour'
+            LIMIT 10
+            """
+            available = pd.read_sql_query(check_query, uat_engine)
+            st.info(f"Available tokens in UAT: {available['pair_name'].tolist()}")
+        else:
+            st.success(f"Found {len(df)} UAT records for {token}")
+            
         if not df.empty:
             df['timestamp'] = pd.to_datetime(df['timestamp'])
             df = df.set_index('timestamp').sort_index()
-            # Resample to 10 seconds
+            # Resample to 10 seconds and forward fill missing values
             df = df.resample('10s').ffill()
+            
+            # Remove any potential NaN values
+            df = df.dropna()
+            
         return df
     except Exception as e:
         st.error(f"Error fetching UAT buffer rates: {e}")
@@ -387,21 +408,28 @@ if vol_data is not None and not vol_data.empty:
     
     # Panel 3: UAT Buffer Rate
     if uat_buffer is not None and not uat_buffer.empty:
+        # Filter to only valid UAT data
+        valid_indices = combined_data.index.intersection(uat_buffer.index)
+        
         fig.add_trace(
             go.Scatter(
-                x=combined_data.index,
-                y=combined_data['uat_buffer_rate_pct'],
+                x=combined_data.loc[valid_indices].index,
+                y=combined_data.loc[valid_indices, 'uat_buffer_rate_pct'],
                 mode='lines+markers',
                 line=dict(color='purple', width=3),
                 marker=dict(size=4),
                 name="UAT Buffer Rate (%)",
-                customdata=customdata,
+                customdata=customdata[combined_data.index.isin(valid_indices)],
                 hovertemplate=hover_template,
-                showlegend=False
+                showlegend=False,
+                connectgaps=False  # Don't connect gaps in data
             ),
             row=3, col=1
         )
-        latest_uat_buffer = combined_data['uat_buffer_rate_pct'].iloc[-1]
+        
+        # Get the latest non-null value
+        latest_uat_values = combined_data['uat_buffer_rate_pct'].dropna()
+        latest_uat_buffer = latest_uat_values.iloc[-1] if len(latest_uat_values) > 0 else None
     else:
         fig.add_annotation(
             x=0.5,
@@ -510,17 +538,41 @@ if vol_data is not None and not vol_data.empty:
     
     # UAT buffer rate
     if uat_buffer is not None and not uat_buffer.empty:
-        uat_buffer_min = combined_data['uat_buffer_rate_pct'].min()
-        uat_buffer_max = combined_data['uat_buffer_rate_pct'].max()
-        fig.update_yaxes(
-            title_text="UAT Buffer (%)", 
-            row=3, col=1,
-            tickformat=".3f",
-            showgrid=True,
-            gridwidth=1,
-            gridcolor='LightGray',
-            range=[uat_buffer_min * 0.95, uat_buffer_max * 1.05] if uat_buffer_max > uat_buffer_min else None
-        )
+        # Ensure we capture the full range including very small values
+        valid_uat_data = combined_data['uat_buffer_rate_pct'].dropna()
+        if len(valid_uat_data) > 0:
+            uat_buffer_min = max(0, valid_uat_data.min())  # Ensure minimum is at least 0
+            uat_buffer_max = valid_uat_data.max()
+            
+            # Add some padding to make sure we see the full range
+            if uat_buffer_min > 0:
+                range_min = uat_buffer_min * 0.9  # 10% below minimum
+            else:
+                range_min = -0.001  # Slightly below 0 to show the axis
+                
+            range_max = uat_buffer_max * 1.1  # 10% above maximum
+            
+            fig.update_yaxes(
+                title_text="UAT Buffer (%)", 
+                row=3, col=1,
+                tickformat=".4f",  # Increased decimal places for small values
+                showgrid=True,
+                gridwidth=1,
+                gridcolor='LightGray',
+                range=[range_min, range_max],
+                zeroline=True,
+                zerolinewidth=2,
+                zerolinecolor='gray'
+            )
+        else:
+            fig.update_yaxes(
+                title_text="UAT Buffer (%)", 
+                row=3, col=1,
+                tickformat=".4f",
+                showgrid=True,
+                gridwidth=1,
+                gridcolor='LightGray'
+            )
     
     # X-axis labels only on bottom
     fig.update_xaxes(title_text="Time (Singapore)", row=num_rows, col=1, tickformat="%H:%M:%S<br>%m/%d")
@@ -575,7 +627,11 @@ if vol_data is not None and not vol_data.empty:
     
     with bcol2:
         if latest_uat_buffer is not None:
-            st.metric("UAT Buffer Rate", f"{latest_uat_buffer:.3f}%")
+            # Use more decimal places for small values
+            if latest_uat_buffer < 0.1:
+                st.metric("UAT Buffer Rate", f"{latest_uat_buffer:.4f}%")
+            else:
+                st.metric("UAT Buffer Rate", f"{latest_uat_buffer:.3f}%")
         else:
             st.metric("UAT Buffer Rate", "N/A")
     
@@ -583,7 +639,11 @@ if vol_data is not None and not vol_data.empty:
         if latest_rollbit_buffer is not None and latest_uat_buffer is not None:
             diff = latest_uat_buffer - latest_rollbit_buffer
             diff_pct = (diff / latest_rollbit_buffer * 100) if latest_rollbit_buffer != 0 else 0
-            st.metric("UAT vs Rollbit", f"{diff:.3f}%", f"{diff_pct:.1f}% diff")
+            # Use more decimal places for small differences
+            if abs(diff) < 0.01:
+                st.metric("UAT vs Rollbit", f"{diff:.4f}%", f"{diff_pct:.1f}% diff")
+            else:
+                st.metric("UAT vs Rollbit", f"{diff:.3f}%", f"{diff_pct:.1f}% diff")
         else:
             st.metric("UAT vs Rollbit", "N/A")
 
