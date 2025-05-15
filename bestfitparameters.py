@@ -38,7 +38,69 @@ def fetch_trading_pairs():
     df = pd.read_sql_query(query, engine)
     return df['pair_name'].tolist()
 
+def remove_buffer_spikes(data, spike_time_ranges=None, use_time_based=True, use_statistical=True):
+    """
+    Remove or smooth out event-related spikes in buffer rates
+    Can use time-based removal and/or statistical outlier detection
+    """
+    data_copy = data.copy()
+    original_buffer = data_copy['buffer_rate'].copy()
+    
+    # Time-based spike removal
+    if use_time_based and spike_time_ranges is None:
+        # Define spike time ranges (8:25-8:35 PM and 8:35-8:45 PM)
+        spike_time_ranges = [
+            ('20:25', '20:35'),  # 8:25-8:35 PM
+            ('20:35', '20:45'),  # 8:35-8:45 PM
+        ]
+    
+    spike_mask = pd.Series(False, index=data_copy.index)
+    
+    if use_time_based and spike_time_ranges:
+        for start_time, end_time in spike_time_ranges:
+            time_mask = (data_copy.index.time >= pd.to_datetime(start_time).time()) & \
+                       (data_copy.index.time <= pd.to_datetime(end_time).time())
+            spike_mask |= time_mask
+    
+    # Statistical outlier detection
+    if use_statistical:
+        # Calculate rolling statistics
+        rolling_mean = data_copy['buffer_rate'].rolling(window=30, center=True).mean()
+        rolling_std = data_copy['buffer_rate'].rolling(window=30, center=True).std()
+        
+        # Identify outliers (more than 3 standard deviations from rolling mean)
+        outlier_mask = np.abs(data_copy['buffer_rate'] - rolling_mean) > 3 * rolling_std
+        spike_mask |= outlier_mask
+    
+    # Apply filtering
+    if spike_mask.any():
+        # For buffer rates during spike periods, use interpolation
+        data_copy.loc[spike_mask, 'buffer_rate'] = np.nan
+        data_copy['buffer_rate'] = data_copy['buffer_rate'].interpolate(method='linear')
+        
+        # Fill any remaining NaN values
+        data_copy['buffer_rate'] = data_copy['buffer_rate'].bfill().ffill()
+    
+    return data_copy
+
 # Get volatility and rollbit data
+def get_zone(vol, p25, p50, p75, p95):
+    """
+    Determine zone based on volatility and percentiles
+    Zone 1: vol >= p95
+    Zone 2: p75 < vol <= p95
+    Zone 3: p50 < vol <= p75
+    Zone 4: vol <= p50
+    """
+    if vol >= p95:
+        return 1
+    elif vol > p75:
+        return 2
+    elif vol > p50:
+        return 3
+    else:
+        return 4
+
 @st.cache_data(ttl=60)
 def get_combined_data(token, hours=3):
     now_sg = datetime.now(pytz.timezone('Asia/Singapore'))
