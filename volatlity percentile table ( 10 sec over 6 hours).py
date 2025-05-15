@@ -141,7 +141,7 @@ def calculate_all_volatilities():
                 'pair': token,
                 '50_pctile': np.percentile(vol_pct, 50),
                 '75_pctile': np.percentile(vol_pct, 75),
-                '90_pctile': np.percentile(vol_pct, 90)
+                '95_pctile': np.percentile(vol_pct, 95)
             }
             
             results.append(percentiles)
@@ -195,20 +195,20 @@ if results:
         'pair': 'Pair',
         '50_pctile': '50th %ile',
         '75_pctile': '75th %ile',
-        '90_pctile': '90th %ile'
+        '95_pctile': '95th %ile'
     })
     
     # Then format and style
     styled_df = display_df.style.format({
         '50th %ile': '{:.1f}%',
         '75th %ile': '{:.1f}%',
-        '90th %ile': '{:.1f}%'
+        '95th %ile': '{:.1f}%'
     })
     
     # Apply styling to percentile columns
     styled_df = styled_df.applymap(
         style_volatility,
-        subset=['50th %ile', '75th %ile', '90th %ile']
+        subset=['50th %ile', '75th %ile', '95th %ile']
     )
     
     # Display the styled dataframe
@@ -231,8 +231,8 @@ if results:
         st.metric("Pairs with 75th > 100%", f"{(df_results['75_pctile'] > 100).sum()}")
     
     with col3:
-        st.metric("Average 90th %ile", f"{df_results['90_pctile'].mean():.1f}%")
-        st.metric("Pairs with 90th > 150%", f"{(df_results['90_pctile'] > 150).sum()}")
+        st.metric("Average 95th %ile", f"{df_results['95_pctile'].mean():.1f}%")
+        st.metric("Pairs with 95th > 150%", f"{(df_results['95_pctile'] > 150).sum()}")
     
     # Option to download
     csv = df_results.to_csv(index=False)
