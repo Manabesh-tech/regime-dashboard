@@ -34,8 +34,8 @@ conn = psycopg2.connect(**db_params)
 uat_db_params = {
     'host': 'aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com',  # Remove http:// if present
     'port': 5432,
-    'database': 'public_rw',  # Different database
-    'user': 'report_dev',     # Different user
+    'database': 'report_dev',  # Different database
+    'user': 'public_rw',     # Different user
     'password': 'aTJ92^kl04hllk'  # Different password
 }
 
@@ -133,9 +133,9 @@ def fetch_uat_buffer_rates_10sec(token, hours=3):
         query = f"""
         SELECT 
             pair_name,
-            buffer AS buffer_rate,
+            buffer_rate AS buffer_rate,
             created_at + INTERVAL '8 hour' AS timestamp
-        FROM leverage_config 
+        FROM trade_pair_risk_history 
         WHERE pair_name = '{token}'
         AND created_at >= '{start_str}'::timestamp - INTERVAL '8 hour'
         AND created_at <= '{end_str}'::timestamp - INTERVAL '8 hour'
