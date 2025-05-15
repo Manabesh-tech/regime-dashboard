@@ -143,13 +143,8 @@ with st.spinner("Fetching all trading pairs..."):
 
 st.write(f"Total pairs: {len(all_tokens)}")
 
-# Progress bar
-progress_bar = st.progress(0)
-status_text = st.empty()
-
 # Calculate percentiles for all pairs with parallel processing
 results = []
-processed_count = 0
 
 # Create multiple engines for parallel processing
 engines = [create_engine(
@@ -157,29 +152,22 @@ engines = [create_engine(
 ) for _ in range(10)]
 
 def process_token(token, engine_idx):
-    global processed_count
     engine = engines[engine_idx % len(engines)]
     result = calculate_volatility_percentiles(token, engine)
-    processed_count += 1
-    progress_bar.progress(processed_count / len(all_tokens))
-    status_text.text(f"Processing {processed_count}/{len(all_tokens)} pairs...")
     return result
 
 # Process tokens in parallel
-with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-    futures = []
-    for idx, token in enumerate(all_tokens):
-        future = executor.submit(process_token, token, idx)
-        futures.append(future)
-    
-    for future in concurrent.futures.as_completed(futures):
-        result = future.result()
-        if result:
-            results.append(result)
-
-# Clear progress indicators
-progress_bar.empty()
-status_text.empty()
+with st.spinner(f"Processing {len(all_tokens)} pairs..."):
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        futures = []
+        for idx, token in enumerate(all_tokens):
+            future = executor.submit(process_token, token, idx)
+            futures.append(future)
+        
+        for future in concurrent.futures.as_completed(futures):
+            result = future.result()
+            if result:
+                results.append(result)
 
 # Create DataFrame
 if results:
