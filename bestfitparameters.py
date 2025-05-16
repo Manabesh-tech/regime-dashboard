@@ -214,66 +214,6 @@ def get_combined_data(token, hours=3):
     
     return combined
 
-def remove_buffer_spikes(data, spike_time_ranges=None, use_time_based=True, use_statistical=True):
-    """
-    Remove or smooth out event-related spikes in buffer rates
-    Can use time-based removal and/or statistical outlier detection
-    """
-    data_copy = data.copy()
-    original_buffer = data_copy['buffer_rate'].copy()
-    
-    # Time-based spike removal
-    if use_time_based and spike_time_ranges is None:
-        # Define spike time ranges (8:25-8:35 PM and 8:35-8:45 PM)
-        spike_time_ranges = [
-            ('20:25', '20:35'),  # 8:25-8:35 PM
-            ('20:35', '20:45'),  # 8:35-8:45 PM
-        ]
-    
-    spike_mask = pd.Series(False, index=data_copy.index)
-    
-    if use_time_based and spike_time_ranges:
-        for start_time, end_time in spike_time_ranges:
-            time_mask = (data_copy.index.time >= pd.to_datetime(start_time).time()) & \
-                       (data_copy.index.time <= pd.to_datetime(end_time).time())
-            spike_mask |= time_mask
-    
-    # Statistical outlier detection
-    if use_statistical:
-        # Calculate rolling statistics
-        rolling_mean = data_copy['buffer_rate'].rolling(window=30, center=True).mean()
-        rolling_std = data_copy['buffer_rate'].rolling(window=30, center=True).std()
-        
-        # Identify outliers (more than 3 standard deviations from rolling mean)
-        outlier_mask = np.abs(data_copy['buffer_rate'] - rolling_mean) > 3 * rolling_std
-        spike_mask |= outlier_mask
-    
-    # Apply filtering
-    if spike_mask.any():
-        # For buffer rates during spike periods, use interpolation
-        data_copy.loc[spike_mask, 'buffer_rate'] = np.nan
-        data_copy['buffer_rate'] = data_copy['buffer_rate'].interpolate(method='linear')
-        
-        # Fill any remaining NaN values
-        data_copy['buffer_rate'] = data_copy['buffer_rate'].bfill().ffill()
-    
-    return data_copy
-    """
-    Determine zone based on volatility and percentiles
-    Zone 1: vol >= p95
-    Zone 2: p75 < vol <= p95
-    Zone 3: p50 < vol <= p75
-    Zone 4: vol <= p50
-    """
-    if vol >= p95:
-        return 1
-    elif vol > p75:
-        return 2
-    elif vol > p50:
-        return 3
-    else:
-        return 4
-
 def simulate_buffer_updates(volatilities, buffer_base, vol_base, k, percentiles):
     """
     Simulate buffer updates using the zone-based formula
@@ -302,10 +242,13 @@ def simulate_buffer_updates(volatilities, buffer_base, vol_base, k, percentiles)
 def fit_parameters(volatilities, actual_buffers, percentiles):
     """
     Fit buffer_base and k parameters using optimization
+    Fixed vol_base as the 50th percentile (p50)
     """
+    # Fixed vol_base to be the 50th percentile (p50)
+    vol_base = percentiles[1]  # p50 is at index 1
+    
     def objective(params):
         buffer_base, k = params
-        vol_base = volatilities[-1]  # Use the most recent volatility as base
         
         predicted_buffers = simulate_buffer_updates(
             volatilities, buffer_base, vol_base, k, percentiles
@@ -319,12 +262,12 @@ def fit_parameters(volatilities, actual_buffers, percentiles):
     initial_guess = [np.mean(actual_buffers), 0.5]
     
     # Bounds for optimization - wider bounds for better fitting
-    bounds = [(0.001, 0.5), (0.01, 5.0)]  # buffer_base in percentage, k between 0.01 and 5
+    bounds = [(0.03, 0.08), (0.01, 5.0)]  # buffer_base in percentage, k between 0.01 and 5
     
     # Optimize
     result = minimize(objective, initial_guess, bounds=bounds, method='L-BFGS-B')
     
-    return result.x[0], result.x[1]
+    return result.x[0], result.x[1], vol_base
 
 # Main UI
 all_tokens = fetch_trading_pairs()
@@ -377,9 +320,8 @@ if data is not None and len(data) > 0:
     volatilities = recent_data['volatility'].values
     buffers = recent_data['buffer_rate'].values
     
-    # Fit parameters
-    buffer_base, k = fit_parameters(volatilities, buffers, percentiles)
-    vol_base = volatilities[-1]  # Most recent volatility
+    # Fit parameters with fixed vol_base as p50
+    buffer_base, k, vol_base = fit_parameters(volatilities, buffers, percentiles)
     
     # Calculate predicted buffers
     predicted_buffers = simulate_buffer_updates(
@@ -396,8 +338,8 @@ if data is not None and len(data) > 0:
     mae = np.mean(np.abs(buffers - predicted_buffers))
     
     # Check if parameters hit bounds
-    param_at_lower_bound = np.isclose(buffer_base, 0.03) or np.isclose(k, 0.1)
-    param_at_upper_bound = np.isclose(buffer_base, 0.08) or np.isclose(k, 2.0)
+    param_at_lower_bound = np.isclose(buffer_base, 0.03) or np.isclose(k, 0.01)
+    param_at_upper_bound = np.isclose(buffer_base, 0.08) or np.isclose(k, 5.0)
     
     # Display results
     st.markdown(f"### {selected_token} - Parameter Fitting Results")
@@ -408,7 +350,7 @@ if data is not None and len(data) > 0:
     with col2:
         st.metric("K Parameter", f"{k:.3f}")
     with col3:
-        st.metric("Vol Base", f"{vol_base:.2f}%")
+        st.metric("Vol Base (P50)", f"{vol_base:.2f}%")
     with col4:
         st.metric("R² Score", f"{r_squared:.3f}")
     
@@ -468,7 +410,7 @@ if data is not None and len(data) > 0:
     # Add percentile lines
     percentile_lines = [
         (percentiles[0], 'P25', 'green'),
-        (percentiles[1], 'P50', 'orange'),
+        (percentiles[1], 'P50 (Vol Base)', 'orange'),
         (percentiles[2], 'P75', 'red'),
         (percentiles[3], 'P95', 'purple')
     ]
@@ -610,9 +552,8 @@ if st.session_state.get('analyze_all', False):
                 volatilities = recent_data['volatility'].values
                 buffers = recent_data['buffer_rate'].values
                 
-                # Fit parameters
-                buffer_base, k = fit_parameters(volatilities, buffers, percentiles)
-                vol_base = volatilities[-1]  # Most recent volatility
+                # Fit parameters with fixed vol_base as p50
+                buffer_base, k, vol_base = fit_parameters(volatilities, buffers, percentiles)
                 
                 # Calculate predicted buffers
                 predicted_buffers = simulate_buffer_updates(
@@ -628,7 +569,7 @@ if st.session_state.get('analyze_all', False):
                     'Token': token,
                     'Buffer Base (%)': buffer_base,
                     'K': k,
-                    'Vol Base (%)': vol_base,
+                    'Vol Base (P50) (%)': vol_base,
                     'R²': r_squared,
                     'Data Points': len(recent_data)
                 })
@@ -637,7 +578,7 @@ if st.session_state.get('analyze_all', False):
                 'Token': token,
                 'Buffer Base (%)': np.nan,
                 'K': np.nan,
-                'Vol Base (%)': np.nan,
+                'Vol Base (P50) (%)': np.nan,
                 'R²': np.nan,
                 'Data Points': 0,
                 'Error': str(e)
@@ -657,7 +598,7 @@ if st.session_state.get('analyze_all', False):
         results_df.style.format({
             'Buffer Base (%)': '{:.4f}',
             'K': '{:.3f}',
-            'Vol Base (%)': '{:.2f}',
+            'Vol Base (P50) (%)': '{:.2f}',
             'R²': '{:.3f}',
             'Data Points': '{:.0f}'
         }).highlight_max(subset=['R²'])
