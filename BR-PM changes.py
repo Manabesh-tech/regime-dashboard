@@ -153,7 +153,6 @@ def create_weekly_stats_table():
 # --- Data Fetching Functions ---
 @st.cache_data(ttl=600)
 def fetch_current_parameters():
-    """Fetch current parameters from the leverage_config JSON"""
     try:
         engine = init_connection()
         if not engine:
@@ -161,10 +160,9 @@ def fetch_current_parameters():
         query = """
         SELECT
             pair_name,
-            (leverage_config::jsonb->0->>'buffer_rate')::numeric AS buffer_rate,
+            buffer_rate,
             position_multiplier,
-            max_leverage,
-            leverage_config
+            max_leverage
         FROM
             public.trade_pool_pairs
         WHERE
@@ -403,6 +401,10 @@ def save_spread_baseline(pair_name, baseline_spread):
         if not engine:
             return False
         
+        # 确保 baseline_spread 是 Python 原生 float 类型
+        if isinstance(baseline_spread, (np.float32, np.float64)):
+            baseline_spread = float(baseline_spread)
+        
         # Use SQLAlchemy text() for parameterized queries
         query = text("""
         INSERT INTO spread_baselines (pair_name, baseline_spread, updated_at)
@@ -564,7 +566,7 @@ def render_complete_parameter_table(params_df, market_data_df, baselines_df, wee
     })
     
     # Style the dataframe with highlighting
-    styled_df = display_df.style.applymap(highlight_changes, subset=['Spread Change'])
+    styled_df = display_df.style.map(highlight_changes, subset=['Spread Change'])
     
     # Display with highlighting
     st.dataframe(styled_df, use_container_width=True)
@@ -681,7 +683,7 @@ def main():
     # Add a refresh button
     if st.sidebar.button("Refresh Data", use_container_width=True):
         st.cache_data.clear()
-        st.experimental_rerun()
+        st.rerun()
 
     # Add a reset baselines button
     if st.sidebar.button("Reset Baselines to Current Spreads", use_container_width=True):
