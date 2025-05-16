@@ -1,3 +1,67 @@
+
+
+# Save this as optimized_10sec_volatility_with_uat.py import streamlit as st import pandas as pd import numpy as np import plotly.graph_objects as go from plotly.subplots import make_subplots from datetime import datetime, timedelta import psycopg2 import pytz from sqlalchemy import creat
+
+pasted
+
+can you make the uat buffer rate y axis range and scale similar to rollbit buffer?
+so we can exactly see how they move alongside each other.
+
+I'll help you adjust the UAT buffer rate y-axis to match the Rollbit buffer rate y-axis scale for better comparison. Looking at your code, I can see you're currently setting different y-axis ranges for the Rollbit buffer and UAT buffer panels, which makes it harder to visually compare their movements.
+
+Let's modify the code where you're setting the y-axis ranges for these panels to ensure they have the same scale. Here's the solution:
+
+
+Updated Y-Axis Code for Matching Buffer Scales
+Code 
+Now, let's update your actual code with this change. You'll need to replace the current section where you're setting the y-axis ranges for both buffer rate panels with this new unified approach.
+
+Let's find that section in your code and make the change:
+
+
+Updated Y-Axis Code for Matching Buffer Scales
+Code ∙ Version 2 
+To complete this modification, you'll need to replace the current y-axis configuration code in your script with the updated version. Here's where you should make the changes:
+
+Find the section in your code where you're currently setting the y-axis ranges for the Rollbit buffer and UAT buffer panels.
+Replace that section with the code I provided above.
+The change will:
+
+Calculate a unified scale for both buffer rate panels by finding the minimum and maximum values across both datasets
+Apply the same y-axis range to both panels
+Ensure the axis format is consistent (using the same number of decimal places)
+Handle all edge cases properly (when either one or both datasets are empty)
+With this change, both buffer rate panels will use the exact same y-axis scale, making it much easier to visually compare how they move alongside each other. This will help you identify any differences in behavior between Rollbit and UAT buffer rates at a glance.
+
+The key benefit of this approach is that:
+
+The same value will appear at the same vertical position in both charts
+Changes of the same magnitude will have the same visual appearance in both charts
+It will be immediately obvious when one buffer rate is higher or lower than the other
+Would you like me to make any additional adjustments to this solution?
+
+
+
+
+give me full code
+
+I'll provide the full updated code with the changes to make the UAT buffer rate y-axis range and scale match the Rollbit buffer rate for better comparison.
+
+
+Updated 10-Second Volatility Plot with UAT
+Code 
+I've provided the complete updated code with all the necessary changes to make the UAT buffer rate y-axis match the Rollbit buffer rate for better comparison. Here's what I changed:
+
+Replaced the original y-axis configuration code with a more comprehensive solution that:
+Finds the global minimum and maximum values across both buffer rate datasets
+Creates a unified scale for both panels based on these values
+Applies the same y-axis range to both the Rollbit and UAT buffer rate panels
+Added extensive error handling for all possible scenarios:
+When both dataset
+
+
+
+
 # Save this as optimized_10sec_volatility_with_uat.py
 
 import streamlit as st
@@ -526,58 +590,100 @@ if vol_data is not None and not vol_data.empty:
         range=[0, max(max_vol * 1.1, percentiles['p95'] * 1.1, 5)]
     )
     
-    # Rollbit buffer rate
-    if rollbit_params is not None and not rollbit_params.empty:
-        buffer_min = combined_data['buffer_rate_pct'].min()
-        buffer_max = combined_data['buffer_rate_pct'].max()
-        fig.update_yaxes(
-            title_text="Rollbit Buffer (%)",
-            row=2, col=1,
-            tickformat=".3f",
-            showgrid=True,
-            gridwidth=1,
-            gridcolor='LightGray',
-            range=[buffer_min * 0.95, buffer_max * 1.05] if buffer_max > buffer_min else None
-        )
-    
-    # UAT buffer rate
-    if uat_buffer is not None and not uat_buffer.empty:
-        # Ensure we capture the full range including very small values
+    # Find the min and max values across both buffer rates to create a consistent scale
+    if rollbit_params is not None and not rollbit_params.empty and uat_buffer is not None and not uat_buffer.empty:
+        # Get valid data from both sources
+        valid_rollbit_data = combined_data['buffer_rate_pct'].dropna()
         valid_uat_data = combined_data['uat_buffer_rate_pct'].dropna()
-        if len(valid_uat_data) > 0:
-            uat_buffer_min = max(0, valid_uat_data.min())  # Ensure minimum is at least 0
-            uat_buffer_max = valid_uat_data.max()
+        
+        if len(valid_rollbit_data) > 0 and len(valid_uat_data) > 0:
+            # Find global min and max for consistent scaling
+            buffer_min = min(valid_rollbit_data.min(), valid_uat_data.min())
+            buffer_max = max(valid_rollbit_data.max(), valid_uat_data.max())
             
-            # Add some padding to make sure we see the full range
-            if uat_buffer_min > 0:
-                range_min = uat_buffer_min * 0.9  # 10% below minimum
-            else:
-                range_min = -0.001  # Slightly below 0 to show the axis
-                
-            range_max = uat_buffer_max * 1.1  # 10% above maximum
+            # Add padding to ensure all data points are visible
+            y_min = max(0, buffer_min * 0.95)  # Don't go below 0 unless data is negative
+            y_max = buffer_max * 1.05
             
+            # Apply the same range to both buffer rate panels
             fig.update_yaxes(
-                title_text="UAT Buffer (%)", 
-                row=3, col=1,
-                tickformat=".4f",  # Increased decimal places for small values
+                title_text="Rollbit Buffer (%)",
+                row=2, col=1,
+                tickformat=".4f",
                 showgrid=True,
                 gridwidth=1,
                 gridcolor='LightGray',
-                range=[range_min, range_max],
-                zeroline=True,
-                zerolinewidth=2,
-                zerolinecolor='gray'
+                range=[y_min, y_max]
             )
-        else:
+            
             fig.update_yaxes(
                 title_text="UAT Buffer (%)", 
                 row=3, col=1,
                 tickformat=".4f",
                 showgrid=True,
                 gridwidth=1,
-                gridcolor='LightGray'
+                gridcolor='LightGray',
+                range=[y_min, y_max],
+                zeroline=True,
+                zerolinewidth=2,
+                zerolinecolor='gray'
             )
-    
+        else:
+            # Default handling when one dataset is empty but the other exists
+            if len(valid_rollbit_data) > 0:
+                buffer_min = valid_rollbit_data.min()
+                buffer_max = valid_rollbit_data.max()
+                y_min = max(0, buffer_min * 0.95)
+                y_max = buffer_max * 1.05
+                
+                # Apply to both panels anyway for consistency
+                fig.update_yaxes(title_text="Rollbit Buffer (%)", row=2, col=1, tickformat=".4f", 
+                                range=[y_min, y_max], showgrid=True, gridwidth=1, gridcolor='LightGray')
+                fig.update_yaxes(title_text="UAT Buffer (%)", row=3, col=1, tickformat=".4f", 
+                                range=[y_min, y_max], showgrid=True, gridwidth=1, gridcolor='LightGray')
+            
+            elif len(valid_uat_data) > 0:
+                buffer_min = valid_uat_data.min()
+                buffer_max = valid_uat_data.max()
+                y_min = max(0, buffer_min * 0.95)
+                y_max = buffer_max * 1.05
+                
+                # Apply to both panels anyway for consistency
+                fig.update_yaxes(title_text="Rollbit Buffer (%)", row=2, col=1, tickformat=".4f", 
+                                range=[y_min, y_max], showgrid=True, gridwidth=1, gridcolor='LightGray')
+                fig.update_yaxes(title_text="UAT Buffer (%)", row=3, col=1, tickformat=".4f", 
+                                range=[y_min, y_max], showgrid=True, gridwidth=1, gridcolor='LightGray')
+    else:
+        # Handle the case where one or both datasets are completely empty
+        # Set default ranges
+        y_min = 0
+        y_max = 1  # Default 1% range if no data
+        
+        if rollbit_params is not None and not rollbit_params.empty:
+            valid_rollbit_data = combined_data['buffer_rate_pct'].dropna()
+            if len(valid_rollbit_data) > 0:
+                buffer_min = valid_rollbit_data.min()
+                buffer_max = valid_rollbit_data.max()
+                y_min = max(0, buffer_min * 0.95)
+                y_max = buffer_max * 1.05
+        
+        elif uat_buffer is not None and not uat_buffer.empty:
+            valid_uat_data = combined_data['uat_buffer_rate_pct'].dropna()
+            if len(valid_uat_data) > 0:
+                buffer_min = valid_uat_data.min()
+                buffer_max = valid_uat_data.max()
+                y_min = max(0, buffer_min * 0.95)
+                y_max = buffer_max * 1.05
+        
+        # Apply consistent ranges regardless of which panel has data
+        if rollbit_params is not None:
+            fig.update_yaxes(title_text="Rollbit Buffer (%)", row=2, col=1, tickformat=".4f", 
+                            range=[y_min, y_max], showgrid=True, gridwidth=1, gridcolor='LightGray')
+        
+        if uat_buffer is not None:
+            fig.update_yaxes(title_text="UAT Buffer (%)", row=3, col=1, tickformat=".4f", 
+                            range=[y_min, y_max], showgrid=True, gridwidth=1, gridcolor='LightGray')
+
     # X-axis labels only on bottom
     fig.update_xaxes(title_text="Time (Singapore)", row=num_rows, col=1, tickformat="%H:%M:%S<br>%m/%d")
 
