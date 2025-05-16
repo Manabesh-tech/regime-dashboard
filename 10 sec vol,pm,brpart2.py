@@ -86,8 +86,10 @@ st.write(f"Current time (Singapore): {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
 def fetch_rollbit_parameters_10sec(token, hours=3):
     """Fetch Rollbit parameters with 10-second resolution"""
     try:
-        # 移除 token 名称中的 'PROD'
-        clean_token = token.replace('PROD', '')
+        # Handle Rollbit token format conversion
+        clean_token = token
+        if "PROD/" in token:
+            clean_token = token.replace("PROD/", "/")
         
         now_sg = datetime.now(pytz.timezone('Asia/Singapore'))
         start_time_sg = now_sg - timedelta(hours=hours)
@@ -191,8 +193,11 @@ def get_rollbit_price_data(token, hours=3):
     start_time_str = start_time_sg.strftime("%Y-%m-%d %H:%M:%S")
     end_time_str = now_sg.strftime("%Y-%m-%d %H:%M:%S")
     
-    # Handle the PROD suffix in token names
-    clean_token = token.replace('PROD', '')
+    # Handle the PROD suffix and convert to Rollbit format
+    # If token is like "SOLPROD/USDT", we need "SOL/USDT" for Rollbit
+    clean_token = token
+    if "PROD/" in token:
+        clean_token = token.replace("PROD/", "/")
     
     # Try today's partition first
     query = f"""
@@ -230,7 +235,7 @@ def get_rollbit_price_data(token, hours=3):
                 st.warning(f"Could not fetch yesterday's Rollbit price data: {e}")
         
         if df.empty:
-            st.warning(f"No Rollbit price data found for {token} with source_type=1")
+            st.warning(f"No Rollbit price data found for {clean_token} with source_type=1")
             return None
             
         # Process timestamps
@@ -239,7 +244,7 @@ def get_rollbit_price_data(token, hours=3):
         
         return df
     except Exception as e:
-        st.error(f"Error fetching Rollbit price data for {token}: {e}")
+        st.error(f"Error fetching Rollbit price data for {clean_token}: {e}")
         return None
 
 # Function to calculate Rollbit volatility
@@ -398,14 +403,39 @@ with st.spinner(f"Loading data for {selected_token}..."):
     uat_buffer = fetch_uat_buffer_rates_10sec(selected_token)
     
     # Add this new line to fetch Rollbit price data and calculate volatility
+    # Handle token naming for debugging
+    rollbit_token = selected_token
+    if "PROD/" in selected_token:
+        rollbit_token = selected_token.replace("PROD/", "/")
+    
+    st.info(f"Attempting to fetch Rollbit price data for selected token: '{selected_token}', will query as: '{rollbit_token}' (with source_type=1)")
+    
     rollbit_price_data = get_rollbit_price_data(selected_token)
-    rollbit_vol_data = None
-    if rollbit_price_data is not None and not rollbit_price_data.empty:
+    
+    # Debug information about Rollbit price data
+    if rollbit_price_data is None:
+        st.error("No Rollbit price data returned - check database connection")
+    elif rollbit_price_data.empty:
+        st.error(f"Found 0 Rollbit price records for '{rollbit_token}' with source_type=1")
+    else:
+        st.success(f"Found {len(rollbit_price_data)} Rollbit price records for '{rollbit_token}'")
+        
+        # Show sample of the data for debugging
+        with st.expander("Show Rollbit price data sample"):
+            st.dataframe(rollbit_price_data.head(10))
+            
+        # Try to calculate the volatility
         rollbit_vol_data = calculate_rollbit_volatility(rollbit_price_data)
-        if rollbit_vol_data is not None:
-            st.success(f"Found {len(rollbit_vol_data)} Rollbit volatility records for {selected_token}")
+        if rollbit_vol_data is None or rollbit_vol_data.empty:
+            st.error("Could not calculate Rollbit volatility (insufficient data)")
         else:
-            st.warning("Could not calculate Rollbit volatility (insufficient data)")
+            st.success(f"Successfully calculated {len(rollbit_vol_data)} Rollbit volatility records")
+            with st.expander("Show Rollbit volatility data sample"):
+                st.dataframe(rollbit_vol_data.head(10))
+    
+    # Make sure rollbit_vol_data is initialized if the above fails
+    if 'rollbit_vol_data' not in locals():
+        rollbit_vol_data = None
 
 if vol_data is not None and not vol_data.empty:
     # Convert to percentage
