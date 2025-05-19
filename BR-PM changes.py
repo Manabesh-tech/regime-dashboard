@@ -151,7 +151,6 @@ def create_weekly_stats_table():
         return False
 
 # --- Data Fetching Functions ---
-@st.cache_data(ttl=600)
 def fetch_current_parameters():
     try:
         engine = init_connection()
