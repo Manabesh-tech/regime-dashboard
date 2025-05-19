@@ -10,10 +10,10 @@ import psycopg2
 import pytz
 from sqlalchemy import create_engine
 
-st.set_page_config(page_title="Volatility Plot with Rollbit & UAT", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Volatility Plot with Rollbit & PROD", page_icon="📈", layout="wide")
 
 # --- UI Setup ---
-st.title("Volatility Plot with Rollbit & UAT Buffer Comparison")
+st.title("Volatility Plot with Rollbit & PROD Buffer Comparison")
 
 # Production DB connection
 db_params = {
@@ -30,23 +30,6 @@ engine = create_engine(
 
 conn = psycopg2.connect(**db_params)
 
-# UAT DB connection - DIFFERENT DATABASE
-uat_db_params = {
-    'host': 'aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com',  
-    'port': 5432,
-    'database': 'report_dev',  # Different database
-    'user': 'public_rw',     # Different user
-    'password': 'aTJ92^kl04hllk'  # Different password
-}
-
-try:
-    uat_engine = create_engine(
-        f"postgresql://{uat_db_params['user']}:{uat_db_params['password']}@{uat_db_params['host']}:{uat_db_params['port']}/{uat_db_params['database']}"
-    )
-    uat_connection_status = True
-except Exception as e:
-    st.error(f"Could not establish UAT database connection: {e}")
-    uat_connection_status = False
 
 # Cache token list for longer
 @st.cache_data(ttl=3600)  # Cache for 1 hour
@@ -57,7 +40,7 @@ def fetch_trading_pairs():
     WHERE status in (1,2)
     ORDER BY pair_name
     """
-    df = pd.read_sql_query(query, uat_engine)
+    df = pd.read_sql_query(query, engine)
     return df['pair_name'].tolist()
 
 all_tokens = fetch_trading_pairs()
@@ -131,8 +114,7 @@ def fetch_rollbit_parameters_10sec(token, hours=3):
 @st.cache_data(ttl=60)
 def fetch_uat_buffer_rates_10sec(token, hours=3):
     """Fetch UAT buffer rates with 10-second resolution from UAT DATABASE"""
-    if not uat_connection_status:
-        return pd.DataFrame()
+
     
     try:
         now_sg = datetime.now(pytz.timezone('Asia/Singapore'))
@@ -154,7 +136,7 @@ def fetch_uat_buffer_rates_10sec(token, hours=3):
         ORDER BY created_at
         """
 
-        df = pd.read_sql_query(query, uat_engine)
+        df = pd.read_sql_query(query, engine)
         
         # Debug info
         if df.empty:
@@ -166,7 +148,7 @@ def fetch_uat_buffer_rates_10sec(token, hours=3):
             WHERE created_at >= '{start_str}'::timestamp - INTERVAL '8 hour'
             LIMIT 10
             """
-            available = pd.read_sql_query(check_query, uat_engine)
+            available = pd.read_sql_query(check_query, engine)
             st.info(f"Available tokens in UAT: {available['pair_name'].tolist()}")
         else:
             st.success(f"Found {len(df)} UAT records for {token}")
@@ -212,7 +194,7 @@ def get_raw_price_data(token, hours=3):
     """
     
     try:
-        df = pd.read_sql_query(query, uat_engine)
+        df = pd.read_sql_query(query, engine)
         
         # If we don't have enough data, try yesterday's partition too
         if df.empty or len(df) < 10:
