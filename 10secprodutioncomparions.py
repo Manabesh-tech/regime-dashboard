@@ -34,10 +34,14 @@ conn = psycopg2.connect(**db_params)
 @st.cache_data(ttl=3600)  # Cache for 1 hour
 def fetch_trading_pairs():
     query = """
-    SELECT pair_name 
-    FROM trade_pool_pairs 
-    WHERE status = 1
-    ORDER BY pair_name
+    SELECT 
+        pair_name 
+    FROM 
+        trade_pool_pairs 
+    WHERE 
+        status = 1
+    ORDER BY 
+        pair_name
     """
     df = pd.read_sql_query(query, engine)
     return df['pair_name'].tolist()
@@ -80,16 +84,19 @@ def fetch_rollbit_parameters_10sec(token, hours=3):
         end_str = now_sg.strftime("%Y-%m-%d %H:%M:%S")
 
         query = f"""
-         SELECT 
+        SELECT
             pair_name,
             bust_buffer AS buffer_rate,
             position_multiplier,
             created_at + INTERVAL '8 hour' AS timestamp
-        FROM rollbit_pair_config 
-        WHERE pair_name = '{token}'
-        AND created_at >= '{start_str}'::timestamp - INTERVAL '8 hour'
-        AND created_at <= '{end_str}'::timestamp - INTERVAL '8 hour'
-        ORDER BY created_at
+        FROM 
+            rollbit_pair_config
+        WHERE 
+            pair_name = '{token}'
+            AND created_at >= '{start_str}'::timestamp - INTERVAL '8 hour'
+            AND created_at <= '{end_str}'::timestamp - INTERVAL '8 hour'
+        ORDER BY 
+            created_at
         """
 
         df = pd.read_sql_query(query, engine)
@@ -115,16 +122,19 @@ def fetch_surf_parameters_10sec(token, hours=3):
         end_str = now_sg.strftime("%Y-%m-%d %H:%M:%S")
 
         query = f"""
-         SELECT 
+        SELECT
             pair_name,
-            buffer_rate,
+            lever_config.buffer_rate,
             position_multiplier,
             created_at + INTERVAL '8 hour' AS timestamp
-        FROM trade_pool_pairs_log
-        WHERE pair_name = '{token}'
-        AND created_at >= '{start_str}'::timestamp - INTERVAL '8 hour'
-        AND created_at <= '{end_str}'::timestamp - INTERVAL '8 hour'
-        ORDER BY created_at
+        FROM 
+            trade_pool_pairs_log
+        WHERE 
+            pair_name = '{token}'
+            AND created_at >= '{start_str}'::timestamp - INTERVAL '8 hour'
+            AND created_at <= '{end_str}'::timestamp - INTERVAL '8 hour'
+        ORDER BY 
+            created_at
         """
 
         df = pd.read_sql_query(query, engine)
@@ -153,15 +163,18 @@ def get_volatility_data_10sec(token, hours=3):
     
     # Try today's partition first
     query = f"""
-    SELECT 
+    SELECT
         created_at + INTERVAL '8 hour' AS timestamp,
         final_price
-    FROM public.oracle_price_log_partition_{today_str}
-    WHERE created_at >= '{start_time_str}'::timestamp - INTERVAL '8 hour'
-    AND created_at <= '{end_time_str}'::timestamp - INTERVAL '8 hour'
-    AND source_type = 0
-    AND pair_name = '{token}'
-    ORDER BY timestamp
+    FROM 
+        public.oracle_price_log_partition_{today_str}
+    WHERE 
+        created_at >= '{start_time_str}'::timestamp - INTERVAL '8 hour'
+        AND created_at <= '{end_time_str}'::timestamp - INTERVAL '8 hour'
+        AND source_type = 0
+        AND pair_name = '{token}'
+    ORDER BY 
+        timestamp
     """
     
     try:
@@ -170,15 +183,18 @@ def get_volatility_data_10sec(token, hours=3):
         # If we don't have enough data, try yesterday's partition too
         if df.empty or len(df) < 10:
             query_yesterday = f"""
-            SELECT 
+            SELECT
                 created_at + INTERVAL '8 hour' AS timestamp,
                 final_price
-            FROM public.oracle_price_log_partition_{yesterday_str}
-            WHERE created_at >= '{start_time_str}'::timestamp - INTERVAL '8 hour'
-            AND created_at <= '{end_time_str}'::timestamp - INTERVAL '8 hour'
-            AND source_type = 0
-            AND pair_name = '{token}'
-            ORDER BY timestamp
+            FROM 
+                public.oracle_price_log_partition_{yesterday_str}
+            WHERE 
+                created_at >= '{start_time_str}'::timestamp - INTERVAL '8 hour'
+                AND created_at <= '{end_time_str}'::timestamp - INTERVAL '8 hour'
+                AND source_type = 0
+                AND pair_name = '{token}'
+            ORDER BY 
+                timestamp
             """
             try:
                 df_yesterday = pd.read_sql_query(query_yesterday, engine)
