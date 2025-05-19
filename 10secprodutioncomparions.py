@@ -128,7 +128,7 @@ def fetch_surf_parameters_10sec(token, hours=3):
             position_multiplier,
             created_at + INTERVAL '8 hour' AS timestamp
         FROM 
-            trade_pool_pairs
+            trade_pair_risk_history
         WHERE 
             pair_name = '{token}'
             AND created_at >= '{start_str}'::timestamp - INTERVAL '8 hour'
