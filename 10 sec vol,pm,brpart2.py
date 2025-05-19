@@ -367,35 +367,27 @@ if "20-Second Volatility" in display_options and vol_data_20sec is not None:
     active_charts.append(("20-Second", vol_data_20sec, percentiles_20sec))
 
 if len(active_charts) > 0:
-    # Calculate how many rows we need (vol charts + buffer charts)
-    num_rows = len(active_charts) + 2  # Add 2 for Rollbit and UAT buffer
-    
-    # Create row heights based on number of charts
-    row_heights = [0.3] * len(active_charts) + [0.2, 0.2]  # Volatility charts + buffer charts
-    
-    # Create subplots
+    # 计算需要显示的面板数量
+    num_panels = len(active_charts)  # 波动率面板
+    if rollbit_params is not None and not rollbit_params.empty:
+        num_panels += 1  # Rollbit 面板
+    if uat_buffer is not None and not uat_buffer.empty:
+        num_panels += 1  # UAT 面板
+
+    # 创建标题组件
+    title_parts = [f"{selected_token} Analysis Dashboard<br>"]
+    subtitle_parts = []
+
+    # 创建子图
     fig = make_subplots(
-        rows=num_rows,
+        rows=num_panels,
         cols=1,
         shared_xaxes=True,
         vertical_spacing=0.05,
-        row_heights=row_heights
+        row_heights=[0.3] * len(active_charts) + [0.2] * (num_panels - len(active_charts))
     )
-    
-    # Create hover templates
-    hover_template = (
-        "<b>Time: %{x}</b><br>" +
-        "Volatility: %{customdata[0]:.1f}%<br>" +
-        "Rollbit Buffer: %{customdata[1]:.3f}%<br>" +
-        "UAT Buffer: %{customdata[2]:.3f}%<br>" +
-        "<extra></extra>"
-    )
-    
-    # Create title components
-    title_parts = [f"{selected_token} Analysis Dashboard<br>"]
-    subtitle_parts = []
-    
-    # Add volatility charts
+
+    # 添加波动率图表
     current_row = 1
     for chart_name, vol_data, percentiles in active_charts:
         # Convert to percentage
@@ -415,61 +407,20 @@ if len(active_charts) > 0:
         # Add to subtitle
         subtitle_parts.append(f"{chart_name} Vol: {current_vol:.1f}% ({current_percentile:.0f}th)")
         
-        # Process into combined dataframe
-        combined_data = vol_data_pct.copy()
-        
-        # Add Rollbit data if available
-        if rollbit_params is not None and not rollbit_params.empty:
-            rollbit_params['buffer_rate_pct'] = rollbit_params['buffer_rate'] * 100
-            combined_data = pd.merge(
-                combined_data,
-                rollbit_params[['buffer_rate_pct']],
-                left_index=True,
-                right_index=True,
-                how='left',
-                suffixes=('', '_rollbit')
-            )
-            combined_data['buffer_rate_pct'] = combined_data['buffer_rate_pct'].ffill()
-        else:
-            combined_data['buffer_rate_pct'] = np.nan
-        
-        # Add UAT data if available
-        if uat_buffer is not None and not uat_buffer.empty:
-            uat_buffer['uat_buffer_rate_pct'] = uat_buffer['buffer_rate'] * 100
-            combined_data = pd.merge(
-                combined_data,
-                uat_buffer[['uat_buffer_rate_pct']],
-                left_index=True,
-                right_index=True,
-                how='left'
-            )
-            combined_data['uat_buffer_rate_pct'] = combined_data['uat_buffer_rate_pct'].ffill()
-        else:
-            combined_data['uat_buffer_rate_pct'] = np.nan
-        
-        # Create unified hover data
-        customdata = np.column_stack((
-            combined_data['realized_vol'],
-            combined_data['buffer_rate_pct'].fillna(0),
-            combined_data['uat_buffer_rate_pct'].fillna(0)
-        ))
-        
-        # Add volatility trace
+        # 添加波动率轨迹
         fig.add_trace(
             go.Scatter(
-                x=combined_data.index,
-                y=combined_data['realized_vol'],
+                x=vol_data_pct.index,
+                y=vol_data_pct['realized_vol'],
                 mode='lines',
                 line=dict(color='blue', width=2),
                 name=f"{chart_name} Volatility (%)",
-                customdata=customdata,
-                hovertemplate=hover_template,
                 showlegend=True
             ),
             row=current_row, col=1
         )
         
-        # Add percentile lines
+        # 添加百分位线
         percentile_lines = [
             ('p25', '#2ECC71', '25th'),
             ('p50', '#3498DB', '50th'),
@@ -489,7 +440,7 @@ if len(active_charts) > 0:
                 row=current_row, col=1
             )
         
-        # Update y-axis range
+        # 更新 y 轴范围
         fig.update_yaxes(
             title_text=f"{chart_name} Volatility (%)",
             row=current_row, col=1,
@@ -500,18 +451,10 @@ if len(active_charts) > 0:
         )
         
         current_row += 1
-    
-    # Add buffer rate charts
-    # Panel 1: Rollbit Buffer Rate
+
+    # 添加 Rollbit 面板（如果有数据）
     if rollbit_params is not None and not rollbit_params.empty:
         rollbit_params['buffer_rate_pct'] = rollbit_params['buffer_rate'] * 100
-        
-        # Create unified hover data
-        customdata_rollbit = np.column_stack((
-            np.zeros(len(rollbit_params)),  # Placeholder for volatility
-            rollbit_params['buffer_rate_pct'],
-            np.zeros(len(rollbit_params))   # Placeholder for UAT buffer
-        ))
         
         fig.add_trace(
             go.Scatter(
@@ -521,39 +464,32 @@ if len(active_charts) > 0:
                 line=dict(color='darkgreen', width=3),
                 marker=dict(size=4),
                 name="Rollbit Buffer Rate (%)",
-                customdata=customdata_rollbit,
-                hovertemplate=hover_template,
                 showlegend=True
             ),
             row=current_row, col=1
         )
         latest_rollbit_buffer = rollbit_params['buffer_rate_pct'].iloc[-1]
         subtitle_parts.append(f"Rollbit Buffer: {latest_rollbit_buffer:.3f}%")
-    else:
-        fig.add_annotation(
-            x=0.5,
-            y=0.5,
-            text="No Rollbit data available",
-            showarrow=False,
-            font=dict(size=12),
-            xref=f"x{current_row} domain",
-            yref=f"y{current_row} domain",
-            row=current_row, col=1
+        
+        fig.update_yaxes(
+            title_text="Rollbit Buffer (%)",
+            row=current_row, col=1,
+            tickformat=".4f",
+            showgrid=True,
+            gridwidth=1,
+            gridcolor='LightGray',
+            range=[0, 0.075]
         )
+        current_row += 1
+    else:
         latest_rollbit_buffer = None
-    
-    current_row += 1
-    
-    # Panel 2: UAT Buffer Rate
+
+    # 添加 UAT 面板（如果有数据）
     if uat_buffer is not None and not uat_buffer.empty:
         uat_buffer['uat_buffer_rate_pct'] = uat_buffer['buffer_rate'] * 100
         
-        # Create unified hover data
-        customdata_uat = np.column_stack((
-            np.zeros(len(uat_buffer)),  # Placeholder for volatility
-            np.zeros(len(uat_buffer)),  # Placeholder for Rollbit buffer
-            uat_buffer['uat_buffer_rate_pct']
-        ))
+        # 确保 UAT 数据的时间索引正确
+        uat_buffer = uat_buffer.sort_index()
         
         fig.add_trace(
             go.Scatter(
@@ -563,68 +499,37 @@ if len(active_charts) > 0:
                 line=dict(color='purple', width=3),
                 marker=dict(size=4),
                 name="UAT Buffer Rate (%)",
-                customdata=customdata_uat,
-                hovertemplate=hover_template,
                 showlegend=True,
-                connectgaps=False  # Don't connect gaps in data
+                connectgaps=False
             ),
             row=current_row, col=1
         )
         
-        # Get the latest non-null value
         latest_uat_values = uat_buffer['uat_buffer_rate_pct'].dropna()
         latest_uat_buffer = latest_uat_values.iloc[-1] if len(latest_uat_values) > 0 else None
         
         if latest_uat_buffer is not None:
             subtitle_parts.append(f"UAT Buffer: {latest_uat_buffer:.3f}%")
-    else:
-        fig.add_annotation(
-            x=0.5,
-            y=0.5,
-            text="No UAT data available",
-            showarrow=False,
-            font=dict(size=12),
-            xref=f"x{current_row} domain",
-            yref=f"y{current_row} domain",
-            row=current_row, col=1
+        
+        fig.update_yaxes(
+            title_text="UAT Buffer (%)",
+            row=current_row, col=1,
+            tickformat=".4f",
+            showgrid=True,
+            gridwidth=1,
+            gridcolor='LightGray',
+            range=[0, 0.075],
+            zeroline=True,
+            zerolinewidth=2,
+            zerolinecolor='gray'
         )
+    else:
         latest_uat_buffer = None
-    
-    # Find the min and max values across both buffer rates to create a consistent scale
-    buffer_min = 0
-    buffer_max = 0.075  # Fixed maximum at 7.5 basis points
-    
-    # Update y-axes for buffer charts
-    fig.update_yaxes(
-        title_text="Rollbit Buffer (%)",
-        row=num_rows-1, col=1,
-        tickformat=".4f",
-        showgrid=True,
-        gridwidth=1,
-        gridcolor='LightGray',
-        range=[buffer_min, buffer_max]
-    )
-    
-    fig.update_yaxes(
-        title_text="UAT Buffer (%)", 
-        row=num_rows, col=1,
-        tickformat=".4f",
-        showgrid=True,
-        gridwidth=1,
-        gridcolor='LightGray',
-        range=[buffer_min, buffer_max],  # Same exact range as Rollbit panel
-        zeroline=True,
-        zerolinewidth=2,
-        zerolinecolor='gray'
-    )
-    
-    # Complete the title
-    title_text = title_parts[0] + f"<sub>{' | '.join(subtitle_parts)}</sub>"
-    
-    # Update layout
+
+    # 更新布局
     fig.update_layout(
-        title=title_text,
-        height=200 * num_rows,  # Dynamic height based on number of rows
+        title=title_parts[0] + f"<sub>{' | '.join(subtitle_parts)}</sub>",
+        height=200 * num_panels,
         showlegend=True,
         legend=dict(
             orientation="h",
@@ -640,19 +545,11 @@ if len(active_charts) > 0:
             bgcolor="white",
             bordercolor="black",
             font_size=12
-        ),
-        xaxis=dict(
-            showspikes=True,
-            spikemode="across",
-            spikesnap="cursor",
-            spikethickness=2,
-            spikecolor="gray",
-            spikedash="solid"
         )
     )
-    
-    # Update all x-axes to have spikes
-    for i in range(1, num_rows + 1):
+
+    # 更新所有 x 轴
+    for i in range(1, num_panels + 1):
         fig.update_xaxes(
             showspikes=True,
             spikemode="across",
@@ -665,10 +562,15 @@ if len(active_charts) > 0:
             gridcolor='LightGray',
             row=i, col=1
         )
-    
-    # X-axis labels only on bottom
-    fig.update_xaxes(title_text="Time (Singapore)", row=num_rows, col=1, tickformat="%H:%M:%S<br>%m/%d")
-    
+
+    # 只在最后一个面板显示 x 轴标签
+    fig.update_xaxes(
+        title_text="Time (Singapore)",
+        row=num_panels,
+        col=1,
+        tickformat="%H:%M:%S<br>%m/%d"
+    )
+
     st.plotly_chart(fig, use_container_width=True)
     
     # Add chart descriptions
