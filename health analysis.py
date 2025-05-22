@@ -328,18 +328,14 @@ class ExchangeAnalyzer:
                 progress_bar.progress(0.67 + (i) / len(pairs_to_analyze) / 3)  # Final third for processing
                 status_text.text(f"Analyzing {pair} ({i+1}/{len(pairs_to_analyze)})")
                 
-                # Skip if we don't have data for both exchanges
-                if pair not in pair_data or len(pair_data[pair]) != 2:
-                    continue
-                
-                # Process data for both exchanges
-                coin_key = pair.replace('/', '_')
-                for exchange in exchanges_to_compare:
-                    if exchange in pair_data[pair]:
-                        self._process_price_data(pair_data[pair][exchange], 'timestamp', 'price', coin_key, exchange)
-                        
-                        # For coin health analysis, process OHLC data (only for 5000 points)
+                # Process data for any exchange that has data (not requiring both)
+                if pair in pair_data:
+                    coin_key = pair.replace('/', '_')
+                    for exchange in exchanges_to_compare:
                         if exchange in pair_data[pair]:
+                            self._process_price_data(pair_data[pair][exchange], 'timestamp', 'price', coin_key, exchange)
+                            
+                            # For coin health analysis, process OHLC data (only for 5000 points)
                             self._process_coin_health_data(pair_data[pair][exchange], 'timestamp', 'price', coin_key, exchange)
             
             # Final progress update
@@ -586,12 +582,11 @@ class ExchangeAnalyzer:
         for point_count in self.point_counts:
             comparison_data = []
             
-            # Get all coins that have data for both exchanges for any metric
+            # Get all coins that have data for ANY exchange for any metric
             all_coins = set()
             for metric in self.metrics:
                 for coin, exchanges in self.exchange_data[metric][point_count].items():
-                    if primary_exchange in exchanges and secondary_exchange in exchanges:
-                        all_coins.add(coin)
+                    all_coins.add(coin)
             
             # For each coin, calculate relative performance for each metric
             for coin in all_coins:
@@ -599,55 +594,61 @@ class ExchangeAnalyzer:
                 relative_scores = []
                 
                 for metric in self.metrics:
-                    # Check if we have data for both exchanges for this metric
-                    if (coin in self.exchange_data[metric][point_count] and
-                        primary_exchange in self.exchange_data[metric][point_count][coin] and
-                        secondary_exchange in self.exchange_data[metric][point_count][coin]):
+                    # Check if we have data for this coin and metric
+                    if coin in self.exchange_data[metric][point_count]:
+                        exchanges = self.exchange_data[metric][point_count][coin]
                         
-                        primary_value = self.exchange_data[metric][point_count][coin][primary_exchange]
-                        secondary_value = self.exchange_data[metric][point_count][coin][secondary_exchange]
+                        primary_value = exchanges.get(primary_exchange, None)
+                        secondary_value = exchanges.get(secondary_exchange, None)
                         
-                        # Calculate absolute and percentage difference
-                        abs_diff = secondary_value - primary_value
-                        pct_diff = (abs_diff / primary_value * 100) if primary_value != 0 else 0
-                        
-                        # Calculate relative performance score (100 means equal to primary, >100 means better)
-                        if metric == 'trend_strength':
-                            # For trend_strength, lower is better, so inverse the ratio
-                            if secondary_value == 0:
-                                # Edge case
-                                relative_score = 100
-                            else:
-                                relative_score = (primary_value / secondary_value) * 100
-                        else:
-                            # For all other metrics, higher is better
-                            if primary_value == 0:
-                                # Edge case
-                                relative_score = 100 if secondary_value == 0 else 200
-                            else:
-                                relative_score = (secondary_value / primary_value) * 100
-                        
-                        relative_scores.append(relative_score)
-                        
-                        # Add to the row
+                        # Add values to the row (even if one is None)
                         row[f'{self.metric_short_names[metric]} {primary_exchange.upper()}'] = primary_value
                         row[f'{self.metric_short_names[metric]} {secondary_exchange.upper()}'] = secondary_value
-                        row[f'{self.metric_short_names[metric]} Diff'] = abs_diff
-                        row[f'{self.metric_short_names[metric]} Diff %'] = pct_diff
-                        row[f'{self.metric_short_names[metric]} Score'] = relative_score
+                        
+                        # Only calculate differences and scores if both values exist
+                        if primary_value is not None and secondary_value is not None:
+                            # Calculate absolute and percentage difference
+                            abs_diff = secondary_value - primary_value
+                            pct_diff = (abs_diff / primary_value * 100) if primary_value != 0 else 0
+                            
+                            # Calculate relative performance score (100 means equal to primary, >100 means better)
+                            if metric == 'trend_strength':
+                                # For trend_strength, lower is better, so inverse the ratio
+                                if secondary_value == 0:
+                                    relative_score = 100
+                                else:
+                                    relative_score = (primary_value / secondary_value) * 100
+                            else:
+                                # For all other metrics, lower is better (reversed from previous logic)
+                                if primary_value == 0:
+                                    relative_score = 100 if secondary_value == 0 else 0
+                                else:
+                                    relative_score = (primary_value / secondary_value) * 100
+                            
+                            relative_scores.append(relative_score)
+                            
+                            row[f'{self.metric_short_names[metric]} Diff'] = abs_diff
+                            row[f'{self.metric_short_names[metric]} Diff %'] = pct_diff
+                            row[f'{self.metric_short_names[metric]} Score'] = relative_score
+                        else:
+                            # If either value is missing, set diff and score to None
+                            row[f'{self.metric_short_names[metric]} Diff'] = None
+                            row[f'{self.metric_short_names[metric]} Diff %'] = None
+                            row[f'{self.metric_short_names[metric]} Score'] = None
                 
-                # Calculate overall relative score (average of individual scores)
+                # Calculate overall relative score (average of individual scores where both exist)
                 if relative_scores:
                     row['Overall Score'] = sum(relative_scores) / len(relative_scores)
                 else:
-                    row['Overall Score'] = 100  # Default to "equal" if no metrics
+                    row['Overall Score'] = None  # No comparison possible
                 
                 comparison_data.append(row)
             
-            # Create DataFrame and sort by relative score (highest first)
+            # Create DataFrame and sort by relative score (highest first, None values last)
             if comparison_data:
                 comparison_df = pd.DataFrame(comparison_data)
-                comparison_df = comparison_df.sort_values('Overall Score', ascending=False)
+                # Sort with None values at the end
+                comparison_df = comparison_df.sort_values('Overall Score', ascending=False, na_position='last')
                 comparison_results[point_count] = comparison_df
             else:
                 comparison_results[point_count] = None
