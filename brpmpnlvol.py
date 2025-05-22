@@ -450,7 +450,7 @@ def fetch_current_parameters_batch(pair_names, _cache_key=None):
         query = f"""
         SELECT
             pair_name,
-            (leverage_config::jsonb->0->>'buffer_rate')::numeric AS buffer_rate,
+            buffer_rate,
             position_multiplier
         FROM
             public.trade_pool_pairs

@@ -216,7 +216,7 @@ def fetch_current_parameters(pair_name):
     try:
         query = f"""
         SELECT
-            (leverage_config::jsonb->0->>'buffer_rate')::numeric AS buffer_rate,
+            buffer_rate,
             position_multiplier,
             max_leverage,
             rate_multiplier,
@@ -284,7 +284,7 @@ def fetch_parameters_for_multiple_pairs(pair_names):
         query = f"""
         SELECT
             pair_name,
-            (leverage_config::jsonb->0->>'buffer_rate')::numeric AS buffer_rate,
+            buffer_rate,
             position_multiplier,
             max_leverage,
             rate_multiplier,
