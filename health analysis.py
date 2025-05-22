@@ -831,17 +831,21 @@ class ExchangeAnalyzer:
 # Setup sidebar with simplified options
 with st.sidebar:
     st.header("Analysis Parameters")
-    all_pairs = [
-            "PEPE/USDT", "PAXG/USDT", "DOGE/USDT", "BTC/USDT", "EOS/USDT",
-            "BNB/USDT", "MERL/USDT", "FHE/USDT", "IP/USDT", "ORCA/USDT",
-            "TRUMP/USDT", "LIBRA/USDT", "AI16Z/USDT", "OM/USDT", "TRX/USDT",
-            "S/USDT", "PI/USDT", "JUP/USDT", "BABY/USDT", "PARTI/USDT",
-            "ADA/USDT", "HYPE/USDT", "VIRTUAL/USDT", "SUI/USDT", "SATS/USDT",
-            "XRP/USDT", "ORDI/USDT", "WIF/USDT", "VANA/USDT", "PENGU/USDT",
-            "VINE/USDT", "GRIFFAIN/USDT", "MEW/USDT", "POPCAT/USDT", "FARTCOIN/USDT",
-            "TON/USDT", "MELANIA/USDT", "SOL/USDT", "PNUT/USDT", "CAKE/USDT",
-            "TST/USDT", "ETH/USDT"
-        ]
+    
+    # 从数据库获取交易对列表
+    try:
+        query = """
+        SELECT pair_name 
+        FROM trade_pool_pairs 
+        WHERE status in (1,2)
+        ORDER BY pair_name
+        """
+        all_pairs_df = pd.read_sql_query(query, conn)
+        all_pairs = all_pairs_df['pair_name'].tolist()
+    except Exception as e:
+        st.error(f"获取交易对列表失败: {e}")
+        # 如果数据库查询失败，使用默认列表作为备份
+        all_pairs = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
     
     # Initialize session state for selections if not present
     if 'selected_pairs' not in st.session_state:
