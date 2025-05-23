@@ -43,18 +43,20 @@ def manual_buffer_rate_tab():
         coeff2 = st.number_input("Coefficient 2", min_value=0.0, max_value=10.0, value=3.0, step=0.5)
     
     with col5:
-        min_buffer = st.number_input("Min Buffer", min_value=0.0, max_value=10.0, value=4.0, step=0.1)
+        min_buffer = st.number_input("Min Buffer", min_value=0.0, max_value=10.0, value=4.5, step=0.1)
         max_buffer = st.number_input("Max Buffer", min_value=0.0, max_value=10.0, value=9.0, step=0.1)
     
     # Calculation for different final volatilities
-    final_vols = np.linspace(0, 100, 21)
+    final_vols = [3, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
     expected_buffers = []
     
     for final_vol in final_vols:
         # Exact equation: 
-        # Expected surf buffer = min(max( initial vol + coeff1 ( final vol-initial vol)+ coeff2( final vol-initial vol)^2 , min buffer), max buffer)
+        # Expected surf buffer = min(max( initial buffer + coeff1 ( final vol-initial vol)+ coeff2( final vol-initial vol)^2 , min buffer), max buffer)
         delta_vol = final_vol - init_vol
-        expected_buf = init_vol + coeff1 * delta_vol + coeff2 * (delta_vol ** 2)
+        
+        # Calculate expected buffer
+        expected_buf = init_buffer + coeff1 * delta_vol + coeff2 * (delta_vol ** 2)
         
         # Apply min and max constraints
         expected_buf = min(max(expected_buf, min_buffer), max_buffer)
@@ -231,8 +233,7 @@ def automatic_buffer_rate_tab():
     df_results = pd.DataFrame(results)
     
     # Sort by 50th percentile to get ranks
-    df_results['50_pctile_rank'] = df_results['50_pctile'].rank(method='dense', ascending=True)
-    df_results['50_pctile_rank'] = df_results['50_pctile_rank'].apply(int)
+    df_results['50_pctile_rank'] = df_results['50_pctile'].rank(method='dense', ascending=True).astype(int)
     
     # Scale init buffer between 4 and 6 while maintaining ranks
     max_rank = df_results['50_pctile_rank'].max()
@@ -250,10 +251,10 @@ def automatic_buffer_rate_tab():
     })
     
     styled_df = display_df.style.format({
-        '50th %ile Vol': '{:d}%',
-        '25th %ile Vol': '{:d}%',
-        '75th %ile Vol': '{:d}%',
-        '95th %ile Vol': '{:d}%',
+        '50th %ile Vol': '{:.2f}%',
+        '25th %ile Vol': '{:.2f}%',
+        '75th %ile Vol': '{:.2f}%',
+        '95th %ile Vol': '{:.2f}%',
         'Volatility Rank': '{:d}',
         'Init Buffer': '{:.2f}'
     })
