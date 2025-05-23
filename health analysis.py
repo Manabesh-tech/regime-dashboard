@@ -335,7 +335,7 @@ class ExchangeAnalyzer:
                         if exchange in pair_data[pair]:
                             self._process_price_data(pair_data[pair][exchange], 'timestamp', 'price', coin_key, exchange)
                             
-                            # For coin health analysis, process OHLC data (only for 5000 points)
+                            # For coin health analysis, process OHLC data for different timeframes
                             self._process_coin_health_data(pair_data[pair][exchange], 'timestamp', 'price', coin_key, exchange)
             
             # Final progress update
@@ -364,7 +364,7 @@ class ExchangeAnalyzer:
             return None
     
     def _process_coin_health_data(self, data, timestamp_col, price_col, coin_key, exchange):
-        """Process price data for coin health analysis - doji candles and choppiness."""
+        """Process price data for coin health analysis - doji candles and choppiness for different timeframes."""
         try:
             # Extract price data and timestamps
             filtered_df = data.copy()
@@ -377,65 +377,79 @@ class ExchangeAnalyzer:
                 'price': prices
             }).dropna()
             
-            if len(df) < 5000:  # Need at least 5000 points
+            if len(df) < 100:  # Need at least some data points
                 return
             
-            # Use the most recent 5000 points
-            df = df.head(5000).copy()
+            # Sort by timestamp to get chronological order
             df = df.sort_values('timestamp').reset_index(drop=True)
             
-            # Create 5-second OHLC candles
-            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            # Set timestamp as index for resampling
             df.set_index('timestamp', inplace=True)
             
-            # Resample to 5-second intervals
-            ohlc = df['price'].resample('5S').ohlc()
-            ohlc = ohlc.dropna()
-            
-            if len(ohlc) == 0:
-                return
-            
-            # Calculate doji percentage
-            doji_count = 0
-            total_candles = len(ohlc)
-            
-            for _, candle in ohlc.iterrows():
-                open_price = candle['open']
-                high_price = candle['high']
-                low_price = candle['low']
-                close_price = candle['close']
-                
-                # Calculate body and total candle length
-                body_length = abs(close_price - open_price)
-                total_length = high_price - low_price
-                
-                # Avoid division by zero
-                if total_length > 0:
-                    body_percentage = (body_length / total_length) * 100
-                    
-                    # Doji: body < 30% of total candle length
-                    if body_percentage < 30:
-                        doji_count += 1
-            
-            doji_percentage = (doji_count / total_candles) * 100 if total_candles > 0 else 0
-            
-            # Get choppiness for 5000 points (already calculated in main analysis)
-            choppiness_5000 = None
-            if (coin_key in self.exchange_data['choppiness'][5000] and 
-                exchange in self.exchange_data['choppiness'][5000][coin_key]):
-                choppiness_5000 = self.exchange_data['choppiness'][5000][coin_key][exchange]
-            
-            # Store coin health data
-            if coin_key not in self.coin_health_data:
-                self.coin_health_data[coin_key] = {}
-            
-            self.coin_health_data[coin_key][exchange] = {
-                'doji_percentage': doji_percentage,
-                'choppiness_5000': choppiness_5000,
-                'total_candles': total_candles,
-                'doji_count': doji_count
+            # Define timeframes to analyze
+            timeframes = {
+                '10min': 10,  # 10 minutes
+                '20min': 20   # 20 minutes
             }
             
+            # Store coin health data for different timeframes
+            if coin_key not in self.coin_health_data:
+                self.coin_health_data[coin_key] = {}
+            if exchange not in self.coin_health_data[coin_key]:
+                self.coin_health_data[coin_key][exchange] = {}
+            
+            for timeframe_name, minutes in timeframes.items():
+                # Get data for the specified timeframe (most recent X minutes)
+                cutoff_time = df.index.max() - pd.Timedelta(minutes=minutes)
+                timeframe_df = df[df.index >= cutoff_time]
+                
+                if len(timeframe_df) == 0:
+                    continue
+                
+                # Create 5-second OHLC candles for this timeframe
+                ohlc = timeframe_df['price'].resample('5S').ohlc()
+                ohlc = ohlc.dropna()
+                
+                if len(ohlc) == 0:
+                    continue
+                
+                # Calculate doji percentage
+                doji_count = 0
+                total_candles = len(ohlc)
+                
+                for _, candle in ohlc.iterrows():
+                    open_price = candle['open']
+                    high_price = candle['high']
+                    low_price = candle['low']
+                    close_price = candle['close']
+                    
+                    # Calculate body and total candle length
+                    body_length = abs(close_price - open_price)
+                    total_length = high_price - low_price
+                    
+                    # Avoid division by zero
+                    if total_length > 0:
+                        body_percentage = (body_length / total_length) * 100
+                        
+                        # Doji: body < 30% of total candle length
+                        if body_percentage < 30:
+                            doji_count += 1
+                
+                doji_percentage = (doji_count / total_candles) * 100 if total_candles > 0 else 0
+                
+                # Calculate choppiness for this timeframe using the tick data
+                choppiness_value = self._calculate_choppiness(timeframe_df['price'], min(20, len(timeframe_df) // 10))
+                
+                # Store the results
+                self.coin_health_data[coin_key][exchange][timeframe_name] = {
+                    'doji_percentage': doji_percentage,
+                    'choppiness': choppiness_value,
+                    'total_candles': total_candles,
+                    'doji_count': doji_count,
+                    'timeframe_start': cutoff_time,
+                    'timeframe_end': df.index.max()
+                }
+                
         except Exception as e:
             st.error(f"Error processing coin health data for {coin_key}: {e}")
     
@@ -783,13 +797,15 @@ class ExchangeAnalyzer:
         
         return None
 
-    def create_coin_health_table(self):
-        """Create coin health analysis table with doji percentage and choppiness."""
+    def create_coin_health_table(self, timeframe):
+        """Create coin health analysis table with doji percentage and choppiness for specified timeframe."""
         if not self.coin_health_data:
             return None
         
-        # Collect all coins that have any health data
+        # Get all coins from BOTH the coin health data AND the main exchange data
         all_coins = set()
+        
+        # Add coins from coin health data
         for coin_key in self.coin_health_data.keys():
             all_coins.add(coin_key)
         
@@ -798,29 +814,42 @@ class ExchangeAnalyzer:
         
         for coin_key in sorted(all_coins):
             coin_name = coin_key.replace('_', '/')
-            exchanges = self.coin_health_data[coin_key]
             
             row = {'Coin': coin_name}
             
             # Rollbit data
-            if 'rollbit' in exchanges:
-                rollbit_data = exchanges['rollbit']
-                row['Rollbit Doji %'] = round(rollbit_data['doji_percentage'], 2)
-                row['Rollbit Choppiness'] = round(rollbit_data['choppiness_5000'], 2) if rollbit_data['choppiness_5000'] is not None else None
-            else:
-                row['Rollbit Doji %'] = None
-                row['Rollbit Choppiness'] = None
+            rollbit_doji = None
+            rollbit_chop = None
+            
+            # Get data for specified timeframe
+            if (coin_key in self.coin_health_data and 
+                'rollbit' in self.coin_health_data[coin_key] and 
+                timeframe in self.coin_health_data[coin_key]['rollbit']):
+                rollbit_data = self.coin_health_data[coin_key]['rollbit'][timeframe]
+                rollbit_doji = round(rollbit_data['doji_percentage'], 2)
+                rollbit_chop = round(rollbit_data['choppiness'], 2)
+            
+            row['Rollbit Doji %'] = rollbit_doji
+            row['Rollbit Choppiness'] = rollbit_chop
             
             # Surf data
-            if 'surf' in exchanges:
-                surf_data = exchanges['surf']
-                row['Surf Doji %'] = round(surf_data['doji_percentage'], 2)
-                row['Surf Choppiness'] = round(surf_data['choppiness_5000'], 2) if surf_data['choppiness_5000'] is not None else None
-            else:
-                row['Surf Doji %'] = None
-                row['Surf Choppiness'] = None
+            surf_doji = None
+            surf_chop = None
             
-            health_data.append(row)
+            # Get data for specified timeframe
+            if (coin_key in self.coin_health_data and 
+                'surf' in self.coin_health_data[coin_key] and 
+                timeframe in self.coin_health_data[coin_key]['surf']):
+                surf_data = self.coin_health_data[coin_key]['surf'][timeframe]
+                surf_doji = round(surf_data['doji_percentage'], 2)
+                surf_chop = round(surf_data['choppiness'], 2)
+            
+            row['Surf Doji %'] = surf_doji
+            row['Surf Choppiness'] = surf_chop
+            
+            # Only add row if there's at least some data
+            if any([rollbit_doji is not None, rollbit_chop is not None, surf_doji is not None, surf_chop is not None]):
+                health_data.append(row)
         
         if health_data:
             health_df = pd.DataFrame(health_data)
@@ -1140,54 +1169,110 @@ if submit_button:
             # Coin Health Analysis Tab
             with tab3:
                 st.header("Coin Health Analysis (5 sec OHLC)")
-                st.write("Analysis based on 5000 ticks converted to 5-second OHLC candles")
+                st.write("Analysis based on 5-second OHLC candles over different timeframes")
                 
-                health_table = analyzer.create_coin_health_table()
+                # Create subtabs for different timeframes
+                timeframe_tabs = st.tabs(["10 Minutes", "20 Minutes"])
                 
-                if health_table is not None:
-                    st.subheader("Doji Candles & Choppiness Analysis")
-                    st.write("**Doji Candle**: A candle where the body (|close - open|) is less than 30% of the total candle length (high - low)")
+                with timeframe_tabs[0]:
+                    st.subheader("10-Minute Analysis")
+                    st.write("Analysis of the most recent 10 minutes of data using 5-second candles")
                     
-                    # Display the main table with sorting capability
-                    st.dataframe(
-                        health_table,
-                        height=600,
-                        use_container_width=True,
-                        column_config={
-                            "Rollbit Doji %": st.column_config.NumberColumn(
-                                "Rollbit Doji %",
-                                help="Percentage of 5-second candles that are doji candles",
-                                format="%.2f"
-                            ),
-                            "Surf Doji %": st.column_config.NumberColumn(
-                                "Surf Doji %",
-                                help="Percentage of 5-second candles that are doji candles",
-                                format="%.2f"
-                            ),
-                            "Rollbit Choppiness": st.column_config.NumberColumn(
-                                "Rollbit Choppiness",
-                                help="Choppiness index calculated from 5000 ticks",
-                                format="%.2f"
-                            ),
-                            "Surf Choppiness": st.column_config.NumberColumn(
-                                "Surf Choppiness",
-                                help="Choppiness index calculated from 5000 ticks",
-                                format="%.2f"
-                            )
-                        }
-                    )
+                    health_table_10min = analyzer.create_coin_health_table('10min')
                     
-                    # Download button for health analysis
-                    csv = health_table.to_csv(index=False).encode('utf-8')
-                    st.download_button(
-                        label="Download Coin Health Analysis CSV",
-                        data=csv,
-                        file_name=f"coin_health_analysis.csv",
-                        mime="text/csv"
-                    )
+                    if health_table_10min is not None:
+                        st.write("**Doji Candle**: A candle where the body (|close - open|) is less than 30% of the total candle length (high - low)")
+                        
+                        # Display the main table with sorting capability
+                        st.dataframe(
+                            health_table_10min,
+                            height=600,
+                            use_container_width=True,
+                            column_config={
+                                "Rollbit Doji %": st.column_config.NumberColumn(
+                                    "Rollbit Doji %",
+                                    help="Percentage of 5-second candles that are doji candles in 10 minutes",
+                                    format="%.2f"
+                                ),
+                                "Surf Doji %": st.column_config.NumberColumn(
+                                    "Surf Doji %",
+                                    help="Percentage of 5-second candles that are doji candles in 10 minutes",
+                                    format="%.2f"
+                                ),
+                                "Rollbit Choppiness": st.column_config.NumberColumn(
+                                    "Rollbit Choppiness",
+                                    help="Choppiness index calculated from 10 minutes of data",
+                                    format="%.2f"
+                                ),
+                                "Surf Choppiness": st.column_config.NumberColumn(
+                                    "Surf Choppiness",
+                                    help="Choppiness index calculated from 10 minutes of data",
+                                    format="%.2f"
+                                )
+                            }
+                        )
+                        
+                        # Download button for 10min analysis
+                        csv_10min = health_table_10min.to_csv(index=False).encode('utf-8')
+                        st.download_button(
+                            label="Download 10-Minute Analysis CSV",
+                            data=csv_10min,
+                            file_name=f"coin_health_analysis_10min.csv",
+                            mime="text/csv"
+                        )
+                        
+                    else:
+                        st.warning("No coin health data available for 10-minute analysis.")
+                
+                with timeframe_tabs[1]:
+                    st.subheader("20-Minute Analysis")
+                    st.write("Analysis of the most recent 20 minutes of data using 5-second candles")
                     
-                else:
-                    st.warning("No coin health data available. Make sure the analysis has been run and 5000+ data points are available.")
+                    health_table_20min = analyzer.create_coin_health_table('20min')
+                    
+                    if health_table_20min is not None:
+                        st.write("**Doji Candle**: A candle where the body (|close - open|) is less than 30% of the total candle length (high - low)")
+                        
+                        # Display the main table with sorting capability
+                        st.dataframe(
+                            health_table_20min,
+                            height=600,
+                            use_container_width=True,
+                            column_config={
+                                "Rollbit Doji %": st.column_config.NumberColumn(
+                                    "Rollbit Doji %",
+                                    help="Percentage of 5-second candles that are doji candles in 20 minutes",
+                                    format="%.2f"
+                                ),
+                                "Surf Doji %": st.column_config.NumberColumn(
+                                    "Surf Doji %",
+                                    help="Percentage of 5-second candles that are doji candles in 20 minutes",
+                                    format="%.2f"
+                                ),
+                                "Rollbit Choppiness": st.column_config.NumberColumn(
+                                    "Rollbit Choppiness",
+                                    help="Choppiness index calculated from 20 minutes of data",
+                                    format="%.2f"
+                                ),
+                                "Surf Choppiness": st.column_config.NumberColumn(
+                                    "Surf Choppiness",
+                                    help="Choppiness index calculated from 20 minutes of data",
+                                    format="%.2f"
+                                )
+                            }
+                        )
+                        
+                        # Download button for 20min analysis
+                        csv_20min = health_table_20min.to_csv(index=False).encode('utf-8')
+                        st.download_button(
+                            label="Download 20-Minute Analysis CSV",
+                            data=csv_20min,
+                            file_name=f"coin_health_analysis_20min.csv",
+                            mime="text/csv"
+                        )
+                        
+                    else:
+                        st.warning("No coin health data available for 20-minute analysis.")
         else:
             st.error("Failed to analyze data. Please try again with different parameters.")
 
@@ -1205,6 +1290,8 @@ This dashboard analyzes cryptocurrency prices between Rollbit and Surf exchanges
 The dashboard compares these metrics and provides rankings and visualizations for various point counts (500, 1500, 2500, and 5000).
 
 **New: Coin Health Analysis**
+- **10-Minute Analysis**: Doji candles and choppiness over the last 10 minutes
+- **20-Minute Analysis**: Doji candles and choppiness over the last 20 minutes
 - **Doji Candles**: 5-second candles where body < 30% of total length
 - Shows market indecision and potential reversal points
 """)
