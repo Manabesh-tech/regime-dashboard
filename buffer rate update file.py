@@ -104,7 +104,7 @@ def fetch_trading_pairs():
     df = pd.read_sql_query(query, engine)
     return df['pair_name'].tolist()
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=1800)
 def calculate_volatilities(hours=0.5):
     all_tokens = fetch_trading_pairs()
     results = []
