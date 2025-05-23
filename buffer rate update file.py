@@ -203,10 +203,10 @@ def calculate_volatilities(hours=3):
             # Calculate percentiles
             percentiles = {
                 'pair': token,
-                '25_pctile': int(np.percentile(vol_pct, 25)),
-                '50_pctile': int(np.percentile(vol_pct, 50)),
-                '75_pctile': int(np.percentile(vol_pct, 75)),
-                '95_pctile': int(np.percentile(vol_pct, 95))
+                '25_pctile': round(np.percentile(vol_pct, 25), 2),
+                '50_pctile': round(np.percentile(vol_pct, 50), 2),
+                '75_pctile': round(np.percentile(vol_pct, 75), 2),
+                '95_pctile': round(np.percentile(vol_pct, 95), 2)
             }
             
             results.append(percentiles)
