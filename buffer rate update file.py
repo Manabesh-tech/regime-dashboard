@@ -53,7 +53,7 @@ def manual_buffer_rate_tab():
     for final_vol in final_vols:
         # Exact equation: 
         # Expected surf buffer = min(max( initial buffer + coeff1 ( final vol-initial vol)+ coeff2( final vol-initial vol)^2 , min buffer), max buffer)
-        delta_vol = final_vol - init_vol
+        delta_vol = (final_vol - init_vol)/100
         
         # Calculate expected buffer
         expected_buf = init_buffer + coeff1 * delta_vol + coeff2 * (delta_vol ** 2)
