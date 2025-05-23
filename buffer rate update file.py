@@ -237,7 +237,7 @@ def automatic_buffer_rate_tab():
     
     # Scale init buffer between 4 and 6 while maintaining ranks
     max_rank = df_results['50_pctile_rank'].max()
-    df_results['init_buffer'] = 4 + (df_results['50_pctile_rank'] - 1) * (5.5 - 3.8) / (max_rank - 1)
+    df_results['init_buffer'] = 3.8 + (df_results['50_pctile_rank'] - 1) * (5.5 - 3.8) / (max_rank - 1)
     
     # Display results
     display_df = df_results.rename(columns={
