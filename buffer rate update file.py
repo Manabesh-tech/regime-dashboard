@@ -51,14 +51,14 @@ def manual_buffer_rate_tab():
     expected_buffers = []
     
     for final_vol in final_vols:
-        # Calculation as per the given equation
-        expected_buf = min(
-            max(
-                init_vol + coeff1 * (final_vol - init_vol) + coeff2 * (final_vol - init_vol)**2, 
-                min_buffer
-            ), 
-            max_buffer
-        )
+        # Exact equation: 
+        # Expected surf buffer = min(max( initial vol + coeff1 ( final vol-initial vol)+ coeff2( final vol-initial vol)^2 , min buffer), max buffer)
+        delta_vol = final_vol - init_vol
+        expected_buf = init_vol + coeff1 * delta_vol + coeff2 * (delta_vol ** 2)
+        
+        # Apply min and max constraints
+        expected_buf = min(max(expected_buf, min_buffer), max_buffer)
+        
         expected_buffers.append(expected_buf)
     
     # Create Plotly figure using Plotly Express
@@ -231,7 +231,8 @@ def automatic_buffer_rate_tab():
     df_results = pd.DataFrame(results)
     
     # Sort by 50th percentile to get ranks
-    df_results['50_pctile_rank'] = df_results['50_pctile'].rank(method='dense').astype(int)
+    df_results['50_pctile_rank'] = df_results['50_pctile'].rank(method='dense', ascending=True)
+    df_results['50_pctile_rank'] = df_results['50_pctile_rank'].apply(int)
     
     # Scale init buffer between 4 and 6 while maintaining ranks
     max_rank = df_results['50_pctile_rank'].max()
