@@ -231,7 +231,7 @@ def automatic_buffer_rate_tab():
     df_results = pd.DataFrame(results)
     
     # Sort by 50th percentile to get ranks
-    df_results['50_pctile_rank'] = df_results['50_pctile'].rank(method='dense')
+    df_results['50_pctile_rank'] = df_results['50_pctile'].rank(method='dense').astype(int)
     
     # Scale init buffer between 4 and 6 while maintaining ranks
     max_rank = df_results['50_pctile_rank'].max()
@@ -253,6 +253,7 @@ def automatic_buffer_rate_tab():
         '25th %ile Vol': '{:d}%',
         '75th %ile Vol': '{:d}%',
         '95th %ile Vol': '{:d}%',
+        'Volatility Rank': '{:d}',
         'Init Buffer': '{:.2f}'
     })
     
