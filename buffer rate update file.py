@@ -105,7 +105,7 @@ def fetch_trading_pairs():
     return df['pair_name'].tolist()
 
 @st.cache_data(ttl=300)
-def calculate_volatilities(hours=1):
+def calculate_volatilities(hours=0.5):
     all_tokens = fetch_trading_pairs()
     results = []
     
@@ -222,8 +222,8 @@ def calculate_volatilities(hours=1):
 def automatic_buffer_rate_tab():
     st.header("Volatility and Buffer Rate Update")
     
-    # Calculate 1-hour volatilities
-    results = calculate_volatilities(hours=1)
+    # Calculate 30 min volatilities
+    results = calculate_volatilities(hours=0.5)
     
     if not results:
         st.error("Could not fetch volatility data")
