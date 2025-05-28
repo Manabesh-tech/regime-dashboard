@@ -237,8 +237,6 @@ class EnhancedDepthTierAnalyzer:
         self.point_time_ranges = {point: None for point in self.point_counts}
 
         # Define depth tiers
-
-        # Define depth tiers
         self.depth_tier_columns = [
             'price_1', 'price_2', 'price_3', 'price_4', 'price_5',
             'price_6', 'price_7', 'price_8', 'price_9', 'price_10',
@@ -285,7 +283,6 @@ class EnhancedDepthTierAnalyzer:
         self.metrics = [
             'direction_changes',   # Frequency of price direction reversals (%)
             'choppiness',          # Measures price oscillation within a range
-            'doji_percentage',     # Percentage of doji candles
             'trend_strength'       # Measures directional strength
         ]
 
@@ -293,7 +290,6 @@ class EnhancedDepthTierAnalyzer:
         self.metric_display_names = {
             'direction_changes': 'Direction Changes (%)',
             'choppiness': 'Choppiness',
-            'doji_percentage': '% Doji',
             'trend_strength': 'Trend Strength'
         }
 
@@ -308,6 +304,9 @@ class EnhancedDepthTierAnalyzer:
         
         # New: Store validity rate data
         self.validity_rates = {point: {} for point in self.point_counts}
+        
+        # Initialize coin health data structure for OHLC analysis
+        self.coin_health_data = {}
 
     def fetch_and_analyze(self, pair_name, hours=24, progress_bar=None, use_replication=True, time_intervals=12):
         """Fetch data and calculate metrics for each depth tier with time-based analysis
@@ -443,10 +442,16 @@ class EnhancedDepthTierAnalyzer:
                 columns = ['pair_name', 'created_at', 'timestamp_sgt'] + self.depth_tier_columns
                 all_df = pd.DataFrame(all_data, columns=columns)
                 
+                # Process coin health data using 5-second OHLC (new)
+                if progress_bar:
+                    progress_bar.progress(0.35, text="Calculating coin health metrics with 5-second OHLC candles...")
+                
+                self.coin_health_data = self._process_coin_health_data(all_df, 'timestamp_sgt', self.depth_tier_columns)
+                
                 # Process each point count using the pre-fetched data
                 for i, point_count in enumerate(self.point_counts):
                     if progress_bar:
-                        progress_bar.progress((i / len(self.point_counts)) * 0.6 + 0.3,
+                        progress_bar.progress((i / len(self.point_counts)) * 0.5 + 0.4,
                                               text=f"Processing {point_count} points...")
 
                     if len(all_df) >= point_count:
@@ -610,6 +615,128 @@ class EnhancedDepthTierAnalyzer:
             st.error(traceback.format_exc())
             return False
 
+    def _process_coin_health_data(self, data, timestamp_sgt_col, depth_tier_columns):
+        """Process coin health data using 5-second OHLC candles for different timeframes.
+        
+        Args:
+            data: DataFrame with timestamp and price data
+            timestamp_sgt_col: Column name for Singapore timestamp
+            depth_tier_columns: Columns for different depth tiers
+        
+        Returns:
+            Dict with OHLC analysis results for different timeframes
+        """
+        try:
+            # Create copy of the DataFrame
+            df = data.copy()
+            
+            # Ensure timestamp column exists
+            if timestamp_sgt_col not in df.columns:
+                return {}
+            
+            # Convert timestamp to pandas datetime
+            df[timestamp_sgt_col] = pd.to_datetime(df[timestamp_sgt_col])
+            
+            # Set timestamp as index for resampling
+            df = df.set_index(timestamp_sgt_col)
+            
+            # Define timeframes to analyze
+            timeframes = {
+                '10min': 10,  # 10 minutes
+                '20min': 20   # 20 minutes
+            }
+            
+            # Initialize results
+            results = {}
+            
+            # Process each depth tier
+            for column in depth_tier_columns:
+                if column not in df.columns:
+                    continue
+                
+                tier = self.depth_tier_values[column]
+                results[tier] = {}
+                
+                # Convert to numeric
+                prices = pd.to_numeric(df[column], errors='coerce')
+                # Filter out zeros and NaN
+                prices = prices[prices > 0].dropna()
+                
+                if len(prices) < 100:  # Need enough data points
+                    continue
+                
+                # Process each timeframe
+                for timeframe_name, minutes in timeframes.items():
+                    # Get data for the specified timeframe (most recent X minutes)
+                    cutoff_time = prices.index.max() - pd.Timedelta(minutes=minutes)
+                    timeframe_data = prices[prices.index >= cutoff_time]
+                    
+                    if len(timeframe_data) < 30:  # Need at least 30 points for meaningful analysis
+                        continue
+                    
+                    # Create 5-second OHLC candles
+                    ohlc = timeframe_data.resample('5S').ohlc()
+                    ohlc = ohlc.dropna()
+                    
+                    if len(ohlc) < 10:  # Need at least 10 candles
+                        continue
+                    
+                    # Calculate doji percentage
+                    doji_count = 0
+                    total_candles = len(ohlc)
+                    
+                    for _, candle in ohlc.iterrows():
+                        open_price = candle['open']
+                        high_price = candle['high']
+                        low_price = candle['low']
+                        close_price = candle['close']
+                        
+                        # Calculate body and total candle length
+                        body_length = abs(close_price - open_price)
+                        total_length = high_price - low_price
+                        
+                        # Avoid division by zero
+                        if total_length > 0:
+                            body_percentage = (body_length / total_length) * 100
+                            
+                            # Doji: body < 30% of total candle length
+                            if body_percentage < 30:
+                                doji_count += 1
+                    
+                    doji_percentage = (doji_count / total_candles) * 100 if total_candles > 0 else 0
+                    
+                    # Calculate choppiness for 5000 tick window
+                    choppiness_5000 = None
+                    if len(prices) >= 5000:
+                        sample = prices.iloc[:5000]
+                        window = min(20, 5000 // 10)
+                        
+                        diff = sample.diff().abs()
+                        sum_abs_changes = diff.rolling(window, min_periods=1).sum()
+                        price_range = sample.rolling(window, min_periods=1).max() - sample.rolling(window, min_periods=1).min()
+                        
+                        # Avoid division by zero
+                        epsilon = 1e-10
+                        choppiness_values = 100 * sum_abs_changes / (price_range + epsilon)
+                        choppiness_values = np.minimum(choppiness_values, 1000)  # Cap extreme values
+                        choppiness_5000 = choppiness_values.mean()
+                    
+                    # Store results
+                    results[tier][timeframe_name] = {
+                        'doji_percentage': doji_percentage,
+                        'doji_count': doji_count,
+                        'total_candles': total_candles,
+                        'choppiness_5000': choppiness_5000,
+                        'timeframe_start': cutoff_time,
+                        'timeframe_end': prices.index.max()
+                    }
+            
+            return results
+            
+        except Exception as e:
+            print(f"Error processing coin health data: {e}")
+            return {}
+
     def _calculate_metrics(self, df, price_col, point_count):
         """Calculate raw metrics without any normalization or scoring"""
         try:
@@ -647,37 +774,6 @@ class EnhancedDepthTierAnalyzer:
             # Calculate mean choppiness
             choppiness = choppiness_values.mean()
 
-            # Calculate % Doji
-            # For each pair of consecutive prices, treat them as close and previous close (simulating candle data)
-            # In a proper candle, we would need open, high, low, close - but we only have price points
-            # So we'll simulate candles from consecutive price points
-            
-            # Get consecutive price points
-            price_pairs = pd.DataFrame({
-                'prev': prices.shift(1),
-                'current': prices
-            }).dropna()
-            
-            if len(price_pairs) > 0:
-                # Calculate body and range for each simulated candle
-                price_pairs['body'] = (price_pairs['current'] - price_pairs['prev']).abs()
-                price_pairs['range'] = price_pairs[['current', 'prev']].max(axis=1) - price_pairs[['current', 'prev']].min(axis=1)
-                
-                # Add small epsilon to avoid division by zero
-                epsilon = 1e-10
-                price_pairs['range'] = price_pairs['range'] + epsilon
-                
-                # Calculate body to range ratio
-                price_pairs['body_range_ratio'] = price_pairs['body'] / price_pairs['range']
-                
-                # Count candles where the body is less than 30% of the range (doji definition)
-                doji_count = (price_pairs['body_range_ratio'] < 0.3).sum()
-                
-                # Calculate doji percentage
-                doji_percentage = (doji_count / len(price_pairs) * 100)
-            else:
-                doji_percentage = 0
-
             # Trend strength
             net_change = (prices - prices.shift(window)).abs()
             trend_strength = (net_change / (sum_abs_changes + epsilon)).dropna().mean()
@@ -685,7 +781,6 @@ class EnhancedDepthTierAnalyzer:
             return {
                 'direction_changes': direction_change_pct,
                 'choppiness': choppiness,
-                'doji_percentage': doji_percentage,
                 'trend_strength': trend_strength
             }
 
@@ -720,12 +815,52 @@ class EnhancedDepthTierAnalyzer:
             df = df.sort_values('choppiness', ascending=False)
         else:
             # If choppiness is not available, try another metric
-            for metric in ['direction_changes', 'doji_percentage']:
+            for metric in ['direction_changes']:
                 if metric in df.columns:
                     df = df.sort_values(metric, ascending=False)
                     break
 
         return df
+        
+    def _create_coin_health_table(self, timeframe):
+        """Create a table showing coin health metrics for each depth tier.
+        
+        Args:
+            timeframe: The timeframe to use (e.g. '10min', '20min')
+            
+        Returns:
+            DataFrame with coin health metrics
+        """
+        if not self.coin_health_data:
+            return None
+            
+        rows = []
+        
+        # Create rows for each tier
+        for tier, tier_data in self.coin_health_data.items():
+            if timeframe not in tier_data:
+                continue
+                
+            health_data = tier_data[timeframe]
+            
+            # Create row
+            row = {
+                'Tier': tier,
+                'Doji %': round(health_data['doji_percentage'], 2),
+                'Doji Count': health_data['doji_count'],
+                'Total Candles': health_data['total_candles'],
+                'Choppiness (5000)': round(health_data['choppiness_5000'], 2) if health_data['choppiness_5000'] is not None else None
+            }
+            
+            rows.append(row)
+            
+        # Create DataFrame and sort by doji percentage
+        if rows:
+            df = pd.DataFrame(rows)
+            df = df.sort_values('Doji %', ascending=False)
+            return df
+            
+        return None
 
 # Enhanced table display function with time highest percentage and validity rate
 def create_point_count_table(analyzer, point_count):
@@ -759,7 +894,7 @@ def create_point_count_table(analyzer, point_count):
     display_df = df.copy()
 
     # Select only the columns we want to display
-    display_columns = ['Tier', 'validity_rate', 'time_highest_choppiness', 'choppiness', 'direction_changes', 'doji_percentage', 'trend_strength']
+    display_columns = ['Tier', 'validity_rate', 'time_highest_choppiness', 'choppiness', 'direction_changes', 'trend_strength']
     
     # Filter to columns that exist in the dataframe
     available_columns = [col for col in display_columns if col in display_df.columns]
@@ -771,7 +906,6 @@ def create_point_count_table(analyzer, point_count):
         'time_highest_choppiness': '% Time Highest Choppiness',
         'direction_changes': 'Direction Changes (%)',
         'choppiness': 'Choppiness',
-        'doji_percentage': '% Doji',
         'trend_strength': 'Trend Strength'
     }
     
@@ -782,7 +916,7 @@ def create_point_count_table(analyzer, point_count):
     # Format numeric columns with appropriate decimal places
     for col in display_df.columns:
         if col != 'Tier':
-            if col in ['Validity Rate (%)', '% Time Highest Choppiness', '% Doji']:
+            if col in ['Validity Rate (%)', '% Time Highest Choppiness']:
                 display_df[col] = display_df[col].apply(
                     lambda x: f"{x:.1f}%" if not pd.isna(x) else "0.0%"
                 )
@@ -807,9 +941,6 @@ def create_point_count_table(analyzer, point_count):
     
     if '% Time Highest Choppiness' in display_df.columns:
         explanation_text += '<p style="margin: 5px 0;"><strong>% Time Highest Choppiness</strong>: Percentage of time intervals where this tier had the highest choppiness value compared to other tiers</p>'
-    
-    # Add % Doji explanation
-    explanation_text += '<p style="margin: 5px 0;"><strong>% Doji</strong>: Percentage of price changes that are extremely small (near-zero movement)</p>'
             
     explanation_text += '</div>'
     st.markdown(explanation_text, unsafe_allow_html=True)
@@ -900,12 +1031,11 @@ def main():
         - **% Time Highest Choppiness:** Percentage of time this tier had the highest choppiness
         - **Choppiness:** Oscillation intensity within price range
         - **Direction Changes (%):** Frequency of price direction reversals
-        - **% Doji:** Percentage of price patterns where the body is less than 30% of the total range (doji candle pattern)
         - **Trend Strength:** Lower values indicate more choppy/mean-reverting behavior
         """)
 
-        # Set up tabs for results - updated to match point counts
-        tabs = st.tabs(["500 POINTS", "1,500 POINTS", "2,500 POINTS", "5,000 POINTS"])
+        # Set up tabs for results - updated to include coin health analysis
+        tabs = st.tabs(["500 POINTS", "1,500 POINTS", "2,500 POINTS", "5,000 POINTS", "COIN HEALTH ANALYSIS"])
 
         # Create progress bar
         progress_bar = st.progress(0, text="Starting analysis...")
@@ -946,6 +1076,55 @@ def main():
 
             with tabs[3]:
                 create_point_count_table(analyzer, 5000)
+                
+            # Coin Health Analysis Tab
+            with tabs[4]:
+                st.header("Coin Health Analysis with 5-second OHLC Candles")
+                
+                # Create subtabs for different timeframes
+                health_subtabs = st.tabs(["10 Minutes", "20 Minutes"])
+                
+                with health_subtabs[0]:
+                    st.subheader("10-Minute OHLC Analysis")
+                    
+                    # Create health table for 10-minute timeframe
+                    health_table_10min = analyzer._create_coin_health_table('10min')
+                    
+                    if health_table_10min is not None:
+                        st.markdown("""
+                        **Doji Candle**: A candle where the body (|close - open|) is less than 30% of the total candle length (high - low).
+                        Higher percentages of doji candles indicate more price indecision and potential reversal points.
+                        """)
+                        
+                        # Display the health table
+                        st.dataframe(
+                            health_table_10min,
+                            use_container_width=True,
+                            height=min(800, 100 + (len(health_table_10min) * 35))
+                        )
+                    else:
+                        st.info("No coin health data available for 10-minute timeframe.")
+                
+                with health_subtabs[1]:
+                    st.subheader("20-Minute OHLC Analysis")
+                    
+                    # Create health table for 20-minute timeframe
+                    health_table_20min = analyzer._create_coin_health_table('20min')
+                    
+                    if health_table_20min is not None:
+                        st.markdown("""
+                        **Doji Candle**: A candle where the body (|close - open|) is less than 30% of the total candle length (high - low).
+                        Higher percentages of doji candles indicate more price indecision and potential reversal points.
+                        """)
+                        
+                        # Display the health table
+                        st.dataframe(
+                            health_table_20min,
+                            use_container_width=True,
+                            height=min(800, 100 + (len(health_table_20min) * 35))
+                        )
+                    else:
+                        st.info("No coin health data available for 20-minute timeframe.")
 
             # Show analysis completion time in Singapore timezone
             analysis_end_time = datetime.now(singapore_tz).strftime("%Y-%m-%d %H:%M:%S")
