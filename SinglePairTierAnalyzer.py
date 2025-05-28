@@ -285,7 +285,7 @@ class EnhancedDepthTierAnalyzer:
         self.metrics = [
             'direction_changes',   # Frequency of price direction reversals (%)
             'choppiness',          # Measures price oscillation within a range
-            'tick_atr_pct',        # ATR %
+            'doji_percentage',     # Percentage of doji candles
             'trend_strength'       # Measures directional strength
         ]
 
@@ -293,7 +293,7 @@ class EnhancedDepthTierAnalyzer:
         self.metric_display_names = {
             'direction_changes': 'Direction Changes (%)',
             'choppiness': 'Choppiness',
-            'tick_atr_pct': 'Tick ATR %',
+            'doji_percentage': '% Doji',
             'trend_strength': 'Trend Strength'
         }
 
@@ -581,8 +581,6 @@ class EnhancedDepthTierAnalyzer:
                                     # Add time highest percentage only for 5000 points
                                     if point_count == 5000 and tier in self.time_highest_choppiness[point_count]:
                                         tier_results[tier]['time_highest_choppiness'] = self.time_highest_choppiness[point_count][tier]
-                                    
-                                    # We're no longer calculating winrate
 
                         # Convert to DataFrame and sort appropriately
                         if point_count == 5000:
@@ -624,7 +622,7 @@ class EnhancedDepthTierAnalyzer:
             # Take only the needed number of points
             prices = prices.iloc[:point_count].copy()
 
-            # Calculate mean price for ATR percentage calculation
+            # Calculate mean price for reference
             mean_price = prices.mean()
 
             # Direction changes
@@ -649,9 +647,36 @@ class EnhancedDepthTierAnalyzer:
             # Calculate mean choppiness
             choppiness = choppiness_values.mean()
 
-            # Tick ATR
-            tick_atr = price_changes.abs().mean()
-            tick_atr_pct = (tick_atr / mean_price) * 100
+            # Calculate % Doji
+            # For each pair of consecutive prices, treat them as close and previous close (simulating candle data)
+            # In a proper candle, we would need open, high, low, close - but we only have price points
+            # So we'll simulate candles from consecutive price points
+            
+            # Get consecutive price points
+            price_pairs = pd.DataFrame({
+                'prev': prices.shift(1),
+                'current': prices
+            }).dropna()
+            
+            if len(price_pairs) > 0:
+                # Calculate body and range for each simulated candle
+                price_pairs['body'] = (price_pairs['current'] - price_pairs['prev']).abs()
+                price_pairs['range'] = price_pairs[['current', 'prev']].max(axis=1) - price_pairs[['current', 'prev']].min(axis=1)
+                
+                # Add small epsilon to avoid division by zero
+                epsilon = 1e-10
+                price_pairs['range'] = price_pairs['range'] + epsilon
+                
+                # Calculate body to range ratio
+                price_pairs['body_range_ratio'] = price_pairs['body'] / price_pairs['range']
+                
+                # Count candles where the body is less than 30% of the range (doji definition)
+                doji_count = (price_pairs['body_range_ratio'] < 0.3).sum()
+                
+                # Calculate doji percentage
+                doji_percentage = (doji_count / len(price_pairs) * 100)
+            else:
+                doji_percentage = 0
 
             # Trend strength
             net_change = (prices - prices.shift(window)).abs()
@@ -660,15 +685,13 @@ class EnhancedDepthTierAnalyzer:
             return {
                 'direction_changes': direction_change_pct,
                 'choppiness': choppiness,
-                'tick_atr_pct': tick_atr_pct,
+                'doji_percentage': doji_percentage,
                 'trend_strength': trend_strength
             }
 
         except Exception as e:
             print(f"Error calculating metrics: {e}")
             return None
-            
-    # The winrate calculation method has been removed
 
     def _create_results_table(self, tier_results, sort_by='choppiness'):
         """Create a results table including time highest percentages
@@ -697,7 +720,7 @@ class EnhancedDepthTierAnalyzer:
             df = df.sort_values('choppiness', ascending=False)
         else:
             # If choppiness is not available, try another metric
-            for metric in ['direction_changes', 'tick_atr_pct']:
+            for metric in ['direction_changes', 'doji_percentage']:
                 if metric in df.columns:
                     df = df.sort_values(metric, ascending=False)
                     break
@@ -736,7 +759,7 @@ def create_point_count_table(analyzer, point_count):
     display_df = df.copy()
 
     # Select only the columns we want to display
-    display_columns = ['Tier', 'validity_rate', 'time_highest_choppiness', 'choppiness', 'direction_changes', 'tick_atr_pct', 'trend_strength']
+    display_columns = ['Tier', 'validity_rate', 'time_highest_choppiness', 'choppiness', 'direction_changes', 'doji_percentage', 'trend_strength']
     
     # Filter to columns that exist in the dataframe
     available_columns = [col for col in display_columns if col in display_df.columns]
@@ -748,7 +771,7 @@ def create_point_count_table(analyzer, point_count):
         'time_highest_choppiness': '% Time Highest Choppiness',
         'direction_changes': 'Direction Changes (%)',
         'choppiness': 'Choppiness',
-        'tick_atr_pct': 'Tick ATR %',
+        'doji_percentage': '% Doji',
         'trend_strength': 'Trend Strength'
     }
     
@@ -759,13 +782,9 @@ def create_point_count_table(analyzer, point_count):
     # Format numeric columns with appropriate decimal places
     for col in display_df.columns:
         if col != 'Tier':
-            if col in ['Validity Rate (%)', '% Time Highest Choppiness']:
+            if col in ['Validity Rate (%)', '% Time Highest Choppiness', '% Doji']:
                 display_df[col] = display_df[col].apply(
                     lambda x: f"{x:.1f}%" if not pd.isna(x) else "0.0%"
-                )
-            elif col == 'Tick ATR %':
-                display_df[col] = display_df[col].apply(
-                    lambda x: f"{x:.4f}" if not pd.isna(x) else "N/A"
                 )
             elif col == 'Trend Strength':
                 display_df[col] = display_df[col].apply(
@@ -788,6 +807,9 @@ def create_point_count_table(analyzer, point_count):
     
     if '% Time Highest Choppiness' in display_df.columns:
         explanation_text += '<p style="margin: 5px 0;"><strong>% Time Highest Choppiness</strong>: Percentage of time intervals where this tier had the highest choppiness value compared to other tiers</p>'
+    
+    # Add % Doji explanation
+    explanation_text += '<p style="margin: 5px 0;"><strong>% Doji</strong>: Percentage of price changes that are extremely small (near-zero movement)</p>'
             
     explanation_text += '</div>'
     st.markdown(explanation_text, unsafe_allow_html=True)
@@ -878,7 +900,7 @@ def main():
         - **% Time Highest Choppiness:** Percentage of time this tier had the highest choppiness
         - **Choppiness:** Oscillation intensity within price range
         - **Direction Changes (%):** Frequency of price direction reversals
-        - **Tick ATR %:** Average tick-to-tick price change percentage
+        - **% Doji:** Percentage of price patterns where the body is less than 30% of the total range (doji candle pattern)
         - **Trend Strength:** Lower values indicate more choppy/mean-reverting behavior
         """)
 
