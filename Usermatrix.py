@@ -8,6 +8,9 @@ import psycopg2
 import warnings
 import pytz
 from plotly.subplots import make_subplots
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+import os
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
@@ -19,7 +22,6 @@ st.set_page_config(
     layout="wide"
 )
 
-# Configure database
 def init_db_connection():
     # DB parameters
     db_params = {
@@ -31,20 +33,25 @@ def init_db_connection():
     }
     
     try:
-        conn = psycopg2.connect(
-            host=db_params['host'],
-            port=db_params['port'],
-            database=db_params['database'],
-            user=db_params['user'],
-            password=db_params['password']
+        # Create SQLAlchemy engine
+        engine = create_engine(
+            f"postgresql://{db_params['user']}:{db_params['password']}@{db_params['host']}:{db_params['port']}/{db_params['database']}",
+            pool_size=5,  # Connection pool size
+            max_overflow=10,  # Maximum overflow connections
+            pool_timeout=30,  # Connection timeout
+            pool_recycle=1800  # Connection recycle time (30 minutes)
         )
-        return conn, db_params
+        
+        # Create session factory
+        Session = sessionmaker(bind=engine)
+        
+        return engine, Session, db_params
     except Exception as e:
-        st.error(f"Database connection error: {e}")
-        return None, db_params
+        st.error(f"数据库连接错误: {e}")
+        return None, None, db_params
 
 # Initialize connection
-conn, db_params = init_db_connection()
+engine, Session, db_params = init_db_connection()
 
 # Initialize session state for PnL values
 if 'daily_pnl' not in st.session_state:
@@ -129,7 +136,7 @@ def fetch_daily_pnl():
     """
     
     try:
-        result = pd.read_sql(query, conn)
+        result = pd.read_sql(query, engine)
         if not result.empty:
             return result.iloc[0]['总平台盈亏扣除返佣']
         return 0
@@ -177,7 +184,7 @@ def fetch_all_time_pnl():
     """
     
     try:
-        result = pd.read_sql(query, conn)
+        result = pd.read_sql(query, engine)
         if not result.empty:
             return result.iloc[0]['总平台盈亏扣除返佣']
         return 0
@@ -284,7 +291,7 @@ def fetch_live_trades():
     """
     
     try:
-        df = pd.read_sql(query, conn)
+        df = pd.read_sql(query, engine)
         return df
     except Exception as e:
         st.error(f"Error fetching live trades: {e}")
@@ -368,7 +375,7 @@ def fetch_trading_metrics():
     """
     
     try:
-        df = pd.read_sql(query, conn)
+        df = pd.read_sql(query, engine)
         
         # Calculate derived metrics
         df['profit_factor'] = df.apply(
@@ -467,7 +474,7 @@ def fetch_user_trade_details_v4(user_id):
     """
     
     try:
-        df = pd.read_sql(query, conn)
+        df = pd.read_sql(query, engine)
         
         # Add post-processing calculations
         df['pre_profit_share_exit'] = None
@@ -521,7 +528,7 @@ def fetch_users_per_day():
     """
     
     try:
-        df = pd.read_sql(query, conn)
+        df = pd.read_sql(query, engine)
         date_counts = df.groupby('date').size().reset_index(name='new_users')
         return date_counts
     except Exception as e:
