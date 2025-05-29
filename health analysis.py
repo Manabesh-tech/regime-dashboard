@@ -106,19 +106,6 @@ def check_connection_health():
         st.error(f"数据库连接健康检查失败: {e}")
         return False
 
-# 定期清理空闲连接
-def cleanup_idle_connections():
-    try:
-        with get_db_session() as session:
-            session.execute(text("""
-                SELECT pg_terminate_backend(pid) 
-                FROM pg_stat_activity 
-                WHERE state = 'idle in transaction' 
-                AND pid <> pg_backend_pid()
-            """))
-    except Exception as e:
-        st.error(f"清理空闲连接失败: {e}")
-
 # Initialize connection
 engine, Session, db_params = init_db_connection()
 
