@@ -843,7 +843,7 @@ def main():
     # Explanation of metrics
     st.markdown("""
     **Key Metrics:**
-    - **Win Rate:** Percentage of windows where this tier had the highest choppiness
+    - **Win Rate:**Percentage of windows where this tier had the highest choppiness
     - **Validity Rate:** Percentage of exchange's data points that have valid data for this tier
     - **Efficiency Score:** Win Rate % × Validity Rate % ÷ 100
     - **Current Choppiness:** Most recent choppiness value using 20-tick rolling window
