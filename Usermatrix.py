@@ -41,6 +41,7 @@ def init_db_connection():
             pool_recycle=1800,  # 连接回收时间(30分钟)
             pool_pre_ping=True,  # 使用连接前先测试连接是否有效
             pool_use_lifo=True,  # 使用后进先出,减少空闲连接
+            isolation_level="AUTOCOMMIT",  # 设置自动提交
             echo=False  # 不打印 SQL 语句
         )
         
@@ -59,10 +60,6 @@ def get_db_session():
     session = Session()
     try:
         yield session
-        session.commit()
-    except Exception as e:
-        session.rollback()
-        raise e
     finally:
         session.close()
 
