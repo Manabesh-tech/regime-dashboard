@@ -572,7 +572,7 @@ if not check_connection_health():
     st.stop()
 
 # Main title
-st.title("User Trading Behavior Analysis Dashboard")
+st.title("User Trading Behavior Analysis Dashboard!")
 st.caption("This dashboard analyzes trading patterns and behaviors for users")
 
 # Set up the timezone
