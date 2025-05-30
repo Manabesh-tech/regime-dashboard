@@ -21,7 +21,7 @@ try:
         f"postgresql+psycopg2://{db_config['user']}:{db_config['password']}"
         f"@{db_config['host']}:{db_config['port']}/{db_config['database']}"
     )
-    engine = create_engine(db_uri)
+    engine = create_engine(db_uri,    isolation_level="AUTOCOMMIT")
 except Exception as e:
     st.error(f"Error connecting to the database: {e}")
     st.stop()

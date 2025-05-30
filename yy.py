@@ -37,6 +37,7 @@ def init_db_connection():
             user=db_params['user'],
             password=db_params['password']
         )
+        conn.autocommit = True
         return conn, db_params
     except Exception as e:
         st.error(f"Database connection error: {e}")

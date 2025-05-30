@@ -20,7 +20,8 @@ db_params = {
 }
 
 engine = create_engine(
-    f"postgresql://{db_params['user']}:{db_params['password']}@{db_params['host']}:{db_params['port']}/{db_params['database']}"
+    f"postgresql://{db_params['user']}:{db_params['password']}@{db_params['host']}:{db_params['port']}/{db_params['database']}",
+    isolation_level="AUTOCOMMIT"
 )
 
 # Cache token list

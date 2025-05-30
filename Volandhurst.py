@@ -47,6 +47,7 @@ try:
         user=db_params['user'],
         password=db_params['password']
     )
+    conn.autocommit = True
 except Exception as e:
     st.error(f"Error connecting to the database: {e}")
     st.stop()

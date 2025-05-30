@@ -24,7 +24,14 @@ db_params = {
 # Function to connect to database
 def connect_to_db():
     try:
-        conn = psycopg2.connect(**db_params)
+        conn = psycopg2.connect(
+            host=db_params['host'],
+            port=db_params['port'],
+            database=db_params['database'],
+            user=db_params['user'],
+            password=db_params['password'],
+        )
+        conn.autocommit = True
         return conn
     except Exception as e:
         st.error(f"Error connecting to database: {e}")

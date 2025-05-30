@@ -25,12 +25,12 @@ st.cache_data.clear()
 def init_db_connection():
     # DB parameters - these should be stored in Streamlit secrets in production
     db_params = {
-    'host': 'aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com',
-    'port': 5432,
-    'database': 'report_dev',
-    'user': 'public_rw',
-    'password': 'aTJ92^kl04hllk'
-}
+        'host': 'aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com',
+        'port': 5432,
+        'database': 'report_dev',
+        'user': 'public_rw',
+        'password': 'aTJ92^kl04hllk'
+    }
     
     try:
         conn = psycopg2.connect(
@@ -38,8 +38,9 @@ def init_db_connection():
             port=db_params['port'],
             database=db_params['database'],
             user=db_params['user'],
-            password=db_params['password']
+            password=db_params['password'],
         )
+        conn.autocommit = True
         return conn, db_params
     except Exception as e:
         st.error(f"Database connection error: {e}")
