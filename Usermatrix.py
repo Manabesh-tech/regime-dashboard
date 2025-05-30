@@ -16,7 +16,7 @@ warnings.filterwarnings('ignore')
 
 # Set page config
 st.set_page_config(
-    page_title="User Trading Behavior Analysis",
+    page_title="User Trading Behavior Analysis！",
     page_icon="📊",
     layout="wide"
 )
