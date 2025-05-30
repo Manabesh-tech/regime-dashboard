@@ -64,7 +64,17 @@ def get_engine():
         
         # Construct connection URL
         db_url = f"postgresql://{user}:{password}@{host}:{port}/{database}"
-        return create_engine(db_url, pool_size=5, max_overflow=10)
+        return create_engine(
+            db_url,
+            isolation_level="AUTOCOMMIT",  # 设置自动提交模式
+            pool_size=5,  # 连接池大小
+            max_overflow=10,  # 最大溢出连接数
+            pool_timeout=30,  # 连接超时时间
+            pool_recycle=1800,  # 连接回收时间(30分钟)
+            pool_pre_ping=True,  # 使用连接前先测试连接是否有效
+            pool_use_lifo=True,  # 使用后进先出,减少空闲连接
+            echo=False  # 不打印 SQL 语句
+        )
     except Exception as e:
         st.error(f"Error creating database engine: {e}")
         return None
@@ -96,9 +106,39 @@ PREDEFINED_PAIRS = [
 
 # Get available pairs from the database
 def get_available_pairs():
-    """Fallback to predefined pairs instead of querying the database"""
-    # Due to database connection issues, we'll use the predefined list
-    return PREDEFINED_PAIRS
+    """从数据库获取可用的交易对列表
+    
+    Returns:
+        list: 交易对列表，如果数据库查询失败则返回预定义的交易对列表
+    """
+    try:
+        with get_session() as session:
+            if not session:
+                st.warning("数据库连接失败，使用预定义的交易对列表")
+                return PREDEFINED_PAIRS
+                
+            # 从 trade_pool_pairs 表获取状态为 1 或 2 的交易对
+            query = text("""
+                SELECT DISTINCT pair_name 
+                FROM trade_pool_pairs
+                WHERE status IN (1, 2)
+                ORDER BY pair_name
+            """)
+            
+            # 执行查询
+            result = session.execute(query)
+            # 去掉交易对名称中的 "/USDT" 后缀
+            pairs = [row[0].replace('/USDT', '') for row in result]
+            
+            if pairs:
+                return pairs
+            else:
+                st.warning("未找到可用的交易对，使用预定义的交易对列表")
+                return PREDEFINED_PAIRS
+                
+    except Exception as e:
+        st.error(f"获取交易对列表时出错: {str(e)}")
+        return PREDEFINED_PAIRS
 
 def _calculate_trend_strength(prices, window):
     """Calculate average Trend Strength - measures the directional strength of price movements.
