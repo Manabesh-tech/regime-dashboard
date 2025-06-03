@@ -15,7 +15,7 @@ select *from rollbit_pair_config rpc ;
 select all_bid,all_ask from oracle_order_book_level_price_data_partition_v5_20250526;
 
 //query surf exchange all_bid,all_ask 
-select all_bid,all_ask  from oracle_exchange_price_partition_v1_20250526;
+select all_bid,all_ask  from oracle_exchange_price_partition_v1_20250526 where pair_name='LPT';
 
 
 //query exchange_fee
