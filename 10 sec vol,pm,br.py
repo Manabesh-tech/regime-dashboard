@@ -10,7 +10,7 @@ import psycopg2
 import pytz
 from sqlalchemy import create_engine
 
-st.set_page_config(page_title="10sec Volatility Plot with Rollbit", page_icon="📈", layout="wide")
+st.set_page_config(page_title="10sec Volatility Plot with Rollbit!", page_icon="📈", layout="wide")
 
 # --- UI Setup ---
 st.title("10-Second Volatility Plot with Rollbit")
