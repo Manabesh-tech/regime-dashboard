@@ -231,7 +231,7 @@ def automatic_buffer_rate_tab():
     st.header("Volatility and Buffer Rate Update")
     
     # Calculate 30 min volatilities
-    results = calculate_volatilities(hours=0.5)
+    results = calculate_volatilities(hours=1/6)
     
     if not results:
         st.error("Could not fetch volatility data")
