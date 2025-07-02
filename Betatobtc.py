@@ -22,7 +22,17 @@ try:
         f"postgresql+psycopg2://{db_config['user']}:{db_config['password']}"
         f"@{db_config['host']}:{db_config['port']}/{db_config['database']}"
     )
-    engine = create_engine(db_uri)
+    engine = create_engine(
+        db_uri,
+        isolation_level="AUTOCOMMIT",  # 设置自动提交模式
+        pool_size=5,  # 连接池大小
+        max_overflow=10,  # 最大溢出连接数
+        pool_timeout=30,  # 连接超时时间
+        pool_recycle=1800,  # 连接回收时间(30分钟)
+        pool_pre_ping=True,  # 使用连接前先测试连接是否有效
+        pool_use_lifo=True,  # 使用后进先出,减少空闲连接
+        echo=False  # 不打印 SQL 语句
+    )
 except Exception as e:
     st.error(f"Error connecting to the database: {e}")
     st.stop()

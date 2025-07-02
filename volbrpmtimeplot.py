@@ -26,11 +26,12 @@ db_params = {
 }
 
 engine = create_engine(
-    f"postgresql://{db_params['user']}:{db_params['password']}@{db_params['host']}:{db_params['port']}/{db_params['database']}"
+    f"postgresql://{db_params['user']}:{db_params['password']}@{db_params['host']}:{db_params['port']}/{db_params['database']}",    isolation_level="AUTOCOMMIT",  # 设置自动提交模式
+
 )
 
 conn = psycopg2.connect(**db_params)
-
+conn.autocommit = True
 # Cache token list for longer
 @st.cache_data(ttl=3600)  # Cache for 1 hour
 def fetch_trading_pairs():

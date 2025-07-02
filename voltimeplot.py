@@ -26,12 +26,13 @@ db_params = {
 
 # Create SQLAlchemy engine for pandas
 engine = create_engine(
-    f"postgresql://{db_params['user']}:{db_params['password']}@{db_params['host']}:{db_params['port']}/{db_params['database']}"
+    f"postgresql://{db_params['user']}:{db_params['password']}@{db_params['host']}:{db_params['port']}/{db_params['database']}",    isolation_level="AUTOCOMMIT",  # 设置自动提交模式
+
 )
 
 # Keep psycopg2 connection for cursor operations
 conn = psycopg2.connect(**db_params)
-
+conn.autocommit = True
 # Get available tokens
 def fetch_trading_pairs():
     query = """

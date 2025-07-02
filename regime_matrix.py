@@ -20,7 +20,7 @@ tab1, tab2, tab3, tab4 = st.tabs(["Matrix View", "Pair-Specific Summary Table", 
 def get_database_connection():
     db_config = st.secrets["database"]
     db_uri = f"postgresql+psycopg2://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
-    return create_engine(db_uri)
+    return create_engine(db_uri,isolation_level="AUTOCOMMIT")
 
 engine = get_database_connection()
 

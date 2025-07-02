@@ -4,9 +4,11 @@ import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime, timedelta
-import psycopg2
 import warnings
 import pytz
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import sessionmaker, scoped_session
+from contextlib import contextmanager
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
@@ -33,20 +35,76 @@ def init_db_connection():
     }
     
     try:
-        conn = psycopg2.connect(
-            host=db_params['host'],
-            port=db_params['port'],
-            database=db_params['database'],
-            user=db_params['user'],
-            password=db_params['password']
+        # 创建 SQLAlchemy engine 并配置连接池
+        engine = create_engine(
+            f"postgresql://{db_params['user']}:{db_params['password']}@{db_params['host']}:{db_params['port']}/{db_params['database']}",
+            isolation_level="AUTOCOMMIT",  # 设置自动提交模式
+            pool_size=5,  # 连接池大小
+            max_overflow=10,  # 最大溢出连接数
+            pool_timeout=30,  # 连接超时时间
+            pool_recycle=1800,  # 连接回收时间(30分钟)
+            pool_pre_ping=True,  # 使用连接前先测试连接是否有效
+            pool_use_lifo=True,  # 使用后进先出,减少空闲连接
+            echo=False  # 不打印 SQL 语句
         )
-        return conn, db_params
+        
+        # 使用 scoped_session 确保线程安全
+        session_factory = sessionmaker(bind=engine)
+        Session = scoped_session(session_factory)
+        
+        return engine, Session, db_params
     except Exception as e:
-        st.error(f"Database connection error: {e}")
-        return None, db_params
+        st.error(f"数据库连接错误: {e}")
+        return None, None, db_params
+
+# 使用上下文管理器确保事务正确关闭
+@contextmanager
+def get_db_session():
+    session = Session()
+    try:
+        yield session
+    finally:
+        session.close()
+
+# 修改查询函数
+@st.cache_data(ttl=60)
+def fetch_data(query):
+    try:
+        with get_db_session() as session:
+            result = session.execute(text(query))
+            return result.fetchall()
+    except Exception as e:
+        st.error(f"查询错误: {e}")
+        return None
+
+# 使用 pandas 的查询函数
+@st.cache_data(ttl=60)
+def fetch_data_as_df(_query):
+    """
+    执行 SQL 查询并返回 DataFrame
+    
+    Args:
+        _query: SQL 查询语句 (TextClause 对象)
+    """
+    try:
+        with get_db_session() as session:
+            return pd.read_sql_query(_query, session.connection())
+    except Exception as e:
+        st.error(f"查询错误: {e}")
+        return None
+
+# 添加连接健康检查
+def check_connection_health():
+    try:
+        with get_db_session() as session:
+            session.execute(text("SELECT 1"))
+            return True
+    except Exception as e:
+        st.error(f"数据库连接健康检查失败: {e}")
+        return False
 
 # Initialize connection
-conn, db_params = init_db_connection()
+engine, Session, db_params = init_db_connection()
 
 # Main title
 st.title("Crypto Exchange Analysis Dashboard")
@@ -113,7 +171,7 @@ class ExchangeAnalyzer:
         # Initialize coin health data structure
         self.coin_health_data = {}
 
-    def _get_partition_tables(self, conn, start_date, end_date):
+    def _get_partition_tables(self, engine, start_date, end_date):
         """
         Get list of partition tables that need to be queried based on date range.
         Returns a list of table names (oracle_price_log_partition_YYYYMMDD)
@@ -157,31 +215,33 @@ class ExchangeAnalyzer:
         # Debug info
         st.write(f"Looking for tables: {table_names}")
         
-        # Verify which tables actually exist in the database
-        cursor = conn.cursor()
-        existing_tables = []
-        
-        for table in table_names:
-            # Check if table exists
-            cursor.execute("""
-                SELECT EXISTS (
-                    SELECT FROM information_schema.tables 
-                    WHERE table_schema = 'public' 
-                    AND table_name = %s
-                );
-            """, (table,))
-            
-            if cursor.fetchone()[0]:
-                existing_tables.append(table)
-        
-        cursor.close()
-        
-        st.write(f"Found existing tables: {existing_tables}")
-        
-        if not existing_tables:
-            st.warning(f"No partition tables found for the date range {start_date.date()} to {end_date.date()}")
-        
-        return existing_tables
+        # 使用新的连接方式查询
+        try:
+            with get_db_session() as session:
+                existing_tables = []
+                
+                for table in table_names:
+                    # Check if table exists
+                    result = session.execute(text("""
+                        SELECT EXISTS (
+                            SELECT FROM information_schema.tables 
+                            WHERE table_schema = 'public' 
+                            AND table_name = :table_name
+                        );
+                    """), {"table_name": table})
+                    
+                    if result.scalar():
+                        existing_tables.append(table)
+                
+                st.write(f"Found existing tables: {existing_tables}")
+                
+                if not existing_tables:
+                    st.warning(f"No partition tables found for the date range {start_date.date()} to {end_date.date()}")
+                
+                return existing_tables
+        except Exception as e:
+            st.error(f"获取分区表失败: {e}")
+            return []
 
     def _build_query_for_partition_tables(self, tables, pair_name, start_time, end_time, exchange):
         """
@@ -241,12 +301,12 @@ class ExchangeAnalyzer:
         complete_query = " UNION ".join(union_parts) + " ORDER BY timestamp DESC"
         return complete_query
 
-    def fetch_and_analyze(self, conn, pairs_to_analyze, hours=24):
+    def fetch_and_analyze(self, engine, pairs_to_analyze, hours=24):
         """
         Fetch data for Surf and Rollbit, analyze metrics, and calculate rankings.
         
         Args:
-            conn: Database connection
+            engine: SQLAlchemy engine
             pairs_to_analyze: List of coin pairs to analyze
             hours: Hours to look back for data retrieval
         """
@@ -269,13 +329,13 @@ class ExchangeAnalyzer:
         
         try:
             # Get relevant partition tables for this time range
-            partition_tables = self._get_partition_tables(conn, start_time, end_time)
+            partition_tables = self._get_partition_tables(engine, start_time, end_time)
             
             if not partition_tables:
                 # If no tables found, try looking one day earlier (for edge cases)
                 st.warning("No tables found for the specified range, trying to look back one more day...")
                 alt_start_time = (now - timedelta(hours=hours+24)).strftime("%Y-%m-%d %H:%M:%S")
-                partition_tables = self._get_partition_tables(conn, alt_start_time, end_time)
+                partition_tables = self._get_partition_tables(engine, alt_start_time, end_time)
                 
                 if not partition_tables:
                     st.error("No data tables available for the selected time range, even with extended lookback.")
@@ -315,11 +375,12 @@ class ExchangeAnalyzer:
                     query = all_queries[pair][exchange]
                     if query:
                         try:
-                            df = pd.read_sql_query(query, conn)
-                            if len(df) > 0:
-                                pair_data[pair][exchange] = df
-                            else:
-                                st.warning(f"No data found for {exchange.upper()}_{pair}")
+                            with get_db_session() as session:
+                                df = pd.read_sql_query(text(query), session.connection())
+                                if len(df) > 0:
+                                    pair_data[pair][exchange] = df
+                                else:
+                                    st.warning(f"No data found for {exchange.upper()}_{pair}")
                         except Exception as e:
                             st.error(f"Database query error for {exchange.upper()}_{pair}: {e}")
             
@@ -864,17 +925,23 @@ with st.sidebar:
     
     # 从数据库获取交易对列表
     try:
-        query = """
+        query = text("""
         SELECT pair_name 
         FROM trade_pool_pairs 
         WHERE status in (1,2)
         ORDER BY pair_name
-        """
-        all_pairs_df = pd.read_sql_query(query, conn)
-        all_pairs = all_pairs_df['pair_name'].tolist()
+        """)
+        # 使用新的 fetch_data_as_df 函数替代 pd.read_sql_query
+        all_pairs_df = fetch_data_as_df(query)
+        if all_pairs_df is not None:
+            all_pairs = all_pairs_df['pair_name'].tolist()
+        else:
+            # 如果查询失败,使用默认列表
+            all_pairs = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+            st.warning("使用默认交易对列表")
     except Exception as e:
         st.error(f"获取交易对列表失败: {e}")
-        # 如果数据库查询失败，使用默认列表作为备份
+        # 如果数据库查询失败,使用默认列表作为备份
         all_pairs = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
     
     # Initialize session state for selections if not present
@@ -938,10 +1005,10 @@ if submit_button:
     # Clear cache at start of analysis to ensure fresh data
     st.cache_data.clear()
     
-    if not conn:
-        st.error("Database connection not available.")
+    if not engine:
+        st.error("数据库连接不可用")
     elif not pairs:
-        st.error("Please enter at least one pair to analyze.")
+        st.error("请至少选择一个交易对进行分析")
     else:
         # Initialize analyzer
         analyzer = ExchangeAnalyzer()
@@ -951,7 +1018,7 @@ if submit_button:
         
         with st.spinner("Fetching and analyzing data..."):
             results = analyzer.fetch_and_analyze(
-                conn=conn,
+                engine=engine,
                 pairs_to_analyze=pairs,
                 hours=hours
             )

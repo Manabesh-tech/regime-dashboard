@@ -4,22 +4,23 @@ import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime, timedelta
-import psycopg2
 import warnings
 import pytz
 from plotly.subplots import make_subplots
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import sessionmaker, scoped_session
+from contextlib import contextmanager
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
 
 # Set page config
 st.set_page_config(
-    page_title="User Trading Behavior Analysis",
+    page_title="User Trading Behavior Analysis！",
     page_icon="📊",
     layout="wide"
 )
 
-# Configure database
 def init_db_connection():
     # DB parameters
     db_params = {
@@ -31,20 +32,39 @@ def init_db_connection():
     }
     
     try:
-        conn = psycopg2.connect(
-            host=db_params['host'],
-            port=db_params['port'],
-            database=db_params['database'],
-            user=db_params['user'],
-            password=db_params['password']
+        # 创建 SQLAlchemy engine 并配置连接池
+        engine = create_engine(
+            f"postgresql://{db_params['user']}:{db_params['password']}@{db_params['host']}:{db_params['port']}/{db_params['database']}",
+            pool_size=5,  # 连接池大小
+            max_overflow=10,  # 最大溢出连接数
+            pool_timeout=30,  # 连接超时时间
+            pool_recycle=1800,  # 连接回收时间(30分钟)
+            pool_pre_ping=True,  # 使用连接前先测试连接是否有效
+            pool_use_lifo=True,  # 使用后进先出,减少空闲连接
+            isolation_level="AUTOCOMMIT",  # 设置自动提交
+            echo=False  # 不打印 SQL 语句
         )
-        return conn, db_params
+        
+        # 使用 scoped_session 确保线程安全
+        session_factory = sessionmaker(bind=engine)
+        Session = scoped_session(session_factory)
+        
+        return engine, Session, db_params
     except Exception as e:
-        st.error(f"Database connection error: {e}")
-        return None, db_params
+        st.error(f"数据库连接错误: {e}")
+        return None, None, db_params
+
+# 使用上下文管理器确保事务正确关闭
+@contextmanager
+def get_db_session():
+    session = Session()
+    try:
+        yield session
+    finally:
+        session.close()
 
 # Initialize connection
-conn, db_params = init_db_connection()
+engine, Session, db_params = init_db_connection()
 
 # Initialize session state for PnL values
 if 'daily_pnl' not in st.session_state:
@@ -55,7 +75,7 @@ if 'all_time_pnl' not in st.session_state:
 # Function to fetch daily PnL
 @st.cache_data(ttl=60)  # Cache for 1 minute for live data
 def fetch_daily_pnl():
-    query = """
+    query = text("""
     WITH DailyTradeData AS (
         SELECT
             DATE("public"."trade_fill_fresh"."created_at" + INTERVAL '+8 hours') AS "日期",
@@ -126,13 +146,14 @@ def fetch_daily_pnl():
     ORDER BY
         t."日期" DESC
     LIMIT 1
-    """
+    """)
     
     try:
-        result = pd.read_sql(query, conn)
-        if not result.empty:
-            return result.iloc[0]['总平台盈亏扣除返佣']
-        return 0
+        with get_db_session() as session:
+            result = pd.read_sql_query(query, session.connection())
+            if not result.empty:
+                return result.iloc[0]['总平台盈亏扣除返佣']
+            return 0
     except Exception as e:
         st.error(f"Error fetching daily PnL: {e}")
         return 0
@@ -140,7 +161,7 @@ def fetch_daily_pnl():
 # Function to fetch all-time PnL
 @st.cache_data(ttl=60)  # Cache for 1 minute for live data
 def fetch_all_time_pnl():
-    query = """
+    query = text("""
     SELECT
       -- Sum of (Platform PnL + Flat Fee Revenue + Funding Fee PnL + SL Fees) - Profit Share Rebates
       (
@@ -174,13 +195,14 @@ def fetch_all_time_pnl():
        FROM public.user_cashbooks st
        WHERE st."remark" = '给邀请人返佣'
          AND CONCAT(st.account_id, '') NOT IN ('383645340185311232', '383645323663947776', '384014230417035264', '384014656596699136','384015011585812480','384015271796238336','384015526326947840')) AS "总平台盈亏扣除返佣"
-    """
+    """)
     
     try:
-        result = pd.read_sql(query, conn)
-        if not result.empty:
-            return result.iloc[0]['总平台盈亏扣除返佣']
-        return 0
+        with get_db_session() as session:
+            result = pd.read_sql_query(query, session.connection())
+            if not result.empty:
+                return result.iloc[0]['总平台盈亏扣除返佣']
+            return 0
     except Exception as e:
         st.error(f"Error fetching all-time PnL: {e}")
         return 0
@@ -188,7 +210,7 @@ def fetch_all_time_pnl():
 # Function to fetch live trades
 @st.cache_data(ttl=30)  # Cache for 30 seconds for live data
 def fetch_live_trades():
-    query = """
+    query = text("""
     SELECT
       id,
       pair_name,
@@ -281,11 +303,12 @@ def fetch_live_trades():
     ORDER BY
       created_at DESC
     LIMIT 100
-    """
+    """)
     
     try:
-        df = pd.read_sql(query, conn)
-        return df
+        with get_db_session() as session:
+            df = pd.read_sql_query(query, session.connection())
+            return df
     except Exception as e:
         st.error(f"Error fetching live trades: {e}")
         return None
@@ -293,7 +316,7 @@ def fetch_live_trades():
 # Function to fetch trading metrics
 @st.cache_data(ttl=600)
 def fetch_trading_metrics():
-    query = """
+    query = text("""
     WITH CombinedResults AS (
         SELECT
             t.taker_account_id,
@@ -365,22 +388,23 @@ def fetch_trading_metrics():
     )
     SELECT * FROM CombinedResults
     ORDER BY total_trades DESC;
-    """
+    """)
     
     try:
-        df = pd.read_sql(query, conn)
-        
-        # Calculate derived metrics
-        df['profit_factor'] = df.apply(
-            lambda x: abs(x['total_profit']) / abs(x['total_loss']) if x['total_loss'] != 0 else 
-                     (float('inf') if x['total_profit'] > 0 else 0), 
-            axis=1
-        )
-        
-        # Count number of different pairs traded
-        df['num_pairs'] = df['traded_pairs'].apply(lambda x: len(x.split(',')) if isinstance(x, str) else 0)
-        
-        return df
+        with get_db_session() as session:
+            df = pd.read_sql_query(query, session.connection())
+            
+            # Calculate derived metrics
+            df['profit_factor'] = df.apply(
+                lambda x: abs(x['total_profit']) / abs(x['total_loss']) if x['total_loss'] != 0 else 
+                         (float('inf') if x['total_profit'] > 0 else 0), 
+                axis=1
+            )
+            
+            # Count number of different pairs traded
+            df['num_pairs'] = df['traded_pairs'].apply(lambda x: len(x.split(',')) if isinstance(x, str) else 0)
+            
+            return df
     except Exception as e:
         st.error(f"Error fetching trading metrics: {e}")
         return None
@@ -388,7 +412,7 @@ def fetch_trading_metrics():
 # Function to fetch detailed trade data for a specific user
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_user_trade_details_v4(user_id):
-    query = f"""
+    query = text(f"""
     SELECT
       pair_name,
       taker_way,
@@ -464,43 +488,44 @@ def fetch_user_trade_details_v4(user_id):
     ORDER BY
       created_at DESC
     LIMIT 1000
-    """
+    """)
     
     try:
-        df = pd.read_sql(query, conn)
-        
-        # Add post-processing calculations
-        df['pre_profit_share_exit'] = None
-        df['post_profit_share_exit'] = None
-        df['percent_distance'] = None
-        df['matched_entry_price'] = None
-        
-        # For exit trades, calculate pre/post profit share prices
-        exit_mask = df['position_action'] == 'Exit'
-        
-        # Match entry prices for exits and calculate % distance
-        for idx, row in df[exit_mask].iterrows():
-            # Find the most recent entry for this pair
-            entry_trades = df[(df['pair_name'] == row['pair_name']) & 
-                            (df['position_action'] == 'Entry') & 
-                            (df['created_at'] < row['created_at'])]
+        with get_db_session() as session:
+            df = pd.read_sql_query(query, session.connection())
             
-            if not entry_trades.empty:
-                entry_price = entry_trades.iloc[0]['entry_exit_price']
-                df.loc[idx, 'matched_entry_price'] = entry_price
+            # Add post-processing calculations
+            df['pre_profit_share_exit'] = None
+            df['post_profit_share_exit'] = None
+            df['percent_distance'] = None
+            df['matched_entry_price'] = None
+            
+            # For exit trades, calculate pre/post profit share prices
+            exit_mask = df['position_action'] == 'Exit'
+            
+            # Match entry prices for exits and calculate % distance
+            for idx, row in df[exit_mask].iterrows():
+                # Find the most recent entry for this pair
+                entry_trades = df[(df['pair_name'] == row['pair_name']) & 
+                                (df['position_action'] == 'Entry') & 
+                                (df['created_at'] < row['created_at'])]
                 
-                # Calculate % distance: (Pbefore - Pentry) / Pentry * 100
-                exit_price = row['entry_exit_price']
-                if entry_price != 0:
-                    if row['size'] != 0:
-                        pre_profit_share_price = exit_price - (row['profit_share'] / row['size'])
-                        df.loc[idx, 'pre_profit_share_exit'] = pre_profit_share_price
-                        df.loc[idx, 'post_profit_share_exit'] = exit_price
-                        df.loc[idx, 'percent_distance'] = round(((pre_profit_share_price - entry_price) / entry_price) * 100, 2)
-                    else:
-                        df.loc[idx, 'percent_distance'] = round(((exit_price - entry_price) / entry_price) * 100, 2)
-        
-        return df
+                if not entry_trades.empty:
+                    entry_price = entry_trades.iloc[0]['entry_exit_price']
+                    df.loc[idx, 'matched_entry_price'] = entry_price
+                    
+                    # Calculate % distance: (Pbefore - Pentry) / Pentry * 100
+                    exit_price = row['entry_exit_price']
+                    if entry_price != 0:
+                        if row['size'] != 0:
+                            pre_profit_share_price = exit_price - (row['profit_share'] / row['size'])
+                            df.loc[idx, 'pre_profit_share_exit'] = pre_profit_share_price
+                            df.loc[idx, 'post_profit_share_exit'] = exit_price
+                            df.loc[idx, 'percent_distance'] = round(((pre_profit_share_price - entry_price) / entry_price) * 100, 2)
+                        else:
+                            df.loc[idx, 'percent_distance'] = round(((exit_price - entry_price) / entry_price) * 100, 2)
+            
+            return df
     except Exception as e:
         st.error(f"Error fetching trade details for user {user_id}: {e}")
         return None
@@ -508,7 +533,7 @@ def fetch_user_trade_details_v4(user_id):
 # Function to count users per day
 @st.cache_data(ttl=600)
 def fetch_users_per_day():
-    query = """
+    query = text("""
     SELECT
       DATE(MIN(created_at) + INTERVAL '8 hour') AS date,
       CONCAT(taker_account_id, '') AS user_id_str
@@ -518,18 +543,36 @@ def fetch_users_per_day():
       user_id_str
     ORDER BY
       date;
-    """
+    """)
     
     try:
-        df = pd.read_sql(query, conn)
-        date_counts = df.groupby('date').size().reset_index(name='new_users')
-        return date_counts
+        with get_db_session() as session:
+            df = pd.read_sql_query(query, session.connection())
+            date_counts = df.groupby('date').size().reset_index(name='new_users')
+            return date_counts
     except Exception as e:
         st.error(f"Error fetching users per day: {e}")
         return None
 
+
+# 添加连接健康检查
+def check_connection_health():
+    try:
+        with get_db_session() as session:
+            session.execute(text("SELECT 1"))
+            return True
+    except Exception as e:
+        st.error(f"数据库连接健康检查失败: {e}")
+        return False
+
+
+# 检查连接健康状态
+if not check_connection_health():
+    st.error("数据库连接不可用，请检查连接配置")
+    st.stop()
+
 # Main title
-st.title("User Trading Behavior Analysis Dashboard")
+st.title("User Trading Behavior Analysis Dashboard!")
 st.caption("This dashboard analyzes trading patterns and behaviors for users")
 
 # Set up the timezone

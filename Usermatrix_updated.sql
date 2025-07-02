@@ -47,6 +47,7 @@ def get_connection():
         user=st.secrets["db_user"],
         password=st.secrets["db_password"]
     )
+    conn.autocommit = True
     return conn
 
 # Function to execute queries
