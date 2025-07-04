@@ -20,3 +20,13 @@ select all_bid,all_ask  from oracle_exchange_price_partition_v1_20250526 where p
 
 //query exchange_fee
 select * from oracle_exchange_fee;
+
+
+
+uat_db_params = {
+    'host': 'aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com',
+    'port': 5432,
+    'database': 'report_dev',  # Different database
+    'user': 'public_rw',     # Different user
+    'password': 'aTJ92^kl04hllk'  # Different password
+}
