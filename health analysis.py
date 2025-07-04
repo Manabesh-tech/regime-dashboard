@@ -1122,51 +1122,55 @@ if submit_button:
                                 st.subheader(f"Top and Bottom Performers")
                                 
                                 # Top 10 and bottom 10 coins
-                                top_10 = df.nlargest(10, 'Overall Score')
-                                bottom_10 = df.nsmallest(10, 'Overall Score')
-                                
-                                # Combined visualization
-                                fig = go.Figure()
-                                
-                                # Add top 10
-                                fig.add_trace(go.Bar(
-                                    x=top_10['Coin'],
-                                    y=top_10['Overall Score'],
-                                    name='Top Performers',
-                                    marker_color='green'
-                                ))
-                                
-                                # Add bottom 10
-                                fig.add_trace(go.Bar(
-                                    x=bottom_10['Coin'],
-                                    y=bottom_10['Overall Score'],
-                                    name='Bottom Performers',
-                                    marker_color='red'
-                                ))
-                                
-                                # Add reference line at 100
-                                fig.add_shape(
-                                    type="line",
-                                    x0=-0.5,
-                                    y0=100,
-                                    x1=len(top_10) + len(bottom_10) - 0.5,
-                                    y1=100,
-                                    line=dict(
-                                        color="black",
-                                        width=2,
-                                        dash="dash",
+                                df_valid = df.copy()
+                                # 确保'Overall Score'列存在且为数值型
+                                if 'Overall Score' in df_valid.columns:
+                                    df_valid['Overall Score'] = pd.to_numeric(df_valid['Overall Score'], errors='coerce')
+                                    df_valid = df_valid.dropna(subset=['Overall Score'])
+                                else:
+                                    df_valid = pd.DataFrame(columns=df.columns)
+                                if not df_valid.empty:
+                                    top_10 = df_valid.nlargest(10, 'Overall Score')
+                                    bottom_10 = df_valid.nsmallest(10, 'Overall Score')
+                                    # Combined visualization
+                                    fig = go.Figure()
+                                    # Add top 10
+                                    fig.add_trace(go.Bar(
+                                        x=top_10['Coin'],
+                                        y=top_10['Overall Score'],
+                                        name='Top Performers',
+                                        marker_color='green'
+                                    ))
+                                    # Add bottom 10
+                                    fig.add_trace(go.Bar(
+                                        x=bottom_10['Coin'],
+                                        y=bottom_10['Overall Score'],
+                                        name='Bottom Performers',
+                                        marker_color='red'
+                                    ))
+                                    # Add reference line at 100
+                                    fig.add_shape(
+                                        type="line",
+                                        x0=-0.5,
+                                        y0=100,
+                                        x1=len(top_10) + len(bottom_10) - 0.5,
+                                        y1=100,
+                                        line=dict(
+                                            color="black",
+                                            width=2,
+                                            dash="dash",
+                                        )
                                     )
-                                )
-                                
-                                fig.update_layout(
-                                    title=f"SURF Performance Relative to ROLLBIT (100 = Equal)",
-                                    xaxis_title="Coin",
-                                    yaxis_title="Relative Performance Score",
-                                    barmode='group',
-                                    height=500
-                                )
-                                
-                                st.plotly_chart(fig, use_container_width=True)
+                                    fig.update_layout(
+                                        title=f"SURF Performance Relative to ROLLBIT (100 = Equal)",
+                                        xaxis_title="Coin",
+                                        yaxis_title="Relative Performance Score",
+                                        barmode='group',
+                                        height=500
+                                    )
+                                    st.plotly_chart(fig, use_container_width=True)
+                                else:
+                                    st.warning("无有效的Overall Score数据，无法绘制Top/Bottom 10图表。")
                                 
                                 # Add metric-by-metric analysis
                                 col1, col2 = st.columns(2)
