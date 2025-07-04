@@ -1181,26 +1181,28 @@ if submit_button:
                                     
                                     if point_count in results['individual_rankings']['rollbit']:
                                         # Create subtabs for each metric
-                                        metric_tabs_primary = st.tabs([analyzer.metric_display_names[m] for m in analyzer.metrics 
-                                                              if m in results['individual_rankings']['rollbit'][point_count]])
-                                        
-                                        for j, metric in enumerate([m for m in analyzer.metrics if m in results['individual_rankings']['rollbit'][point_count]]):
-                                            with metric_tabs_primary[j]:
-                                                metric_df = results['individual_rankings']['rollbit'][point_count][metric]
-                                                if not metric_df.empty:
-                                                    st.dataframe(metric_df, height=300, use_container_width=True)
-                                                    
-                                                    # Bar chart of top 10
-                                                    top_10_metric = metric_df.head(10)
-                                                    fig = px.bar(
-                                                        top_10_metric, 
-                                                        x='Coin', 
-                                                        y='Value',
-                                                        title=f"Top 10 by {analyzer.metric_display_names[metric]}",
-                                                        color='Rank',
-                                                        color_continuous_scale='Viridis_r'
-                                                    )
-                                                    st.plotly_chart(fig, use_container_width=True)
+                                        tab_labels = [analyzer.metric_display_names[m] for m in analyzer.metrics 
+                                                     if m in results['individual_rankings']['rollbit'][point_count]]
+                                        if tab_labels:
+                                            metric_tabs_primary = st.tabs(tab_labels)
+                                            for j, metric in enumerate([m for m in analyzer.metrics if m in results['individual_rankings']['rollbit'][point_count]]):
+                                                with metric_tabs_primary[j]:
+                                                    metric_df = results['individual_rankings']['rollbit'][point_count][metric]
+                                                    if not metric_df.empty:
+                                                        st.dataframe(metric_df, height=300, use_container_width=True)
+                                                        # Bar chart of top 10
+                                                        top_10_metric = metric_df.head(10)
+                                                        fig = px.bar(
+                                                            top_10_metric, 
+                                                            x='Coin', 
+                                                            y='Value',
+                                                            title=f"Top 10 by {analyzer.metric_display_names[metric]}",
+                                                            color='Rank',
+                                                            color_continuous_scale='Viridis_r'
+                                                        )
+                                                        st.plotly_chart(fig, use_container_width=True)
+                                        else:
+                                            st.warning(f"ROLLBIT在{point_count}点没有可用的指标排名数据")
                                     else:
                                         st.warning(f"No ranking data available for ROLLBIT at {point_count} points")
                                 
@@ -1210,26 +1212,28 @@ if submit_button:
                                     
                                     if point_count in results['individual_rankings']['surf']:
                                         # Create subtabs for each metric
-                                        metric_tabs_secondary = st.tabs([analyzer.metric_display_names[m] for m in analyzer.metrics 
-                                                              if m in results['individual_rankings']['surf'][point_count]])
-                                        
-                                        for j, metric in enumerate([m for m in analyzer.metrics if m in results['individual_rankings']['surf'][point_count]]):
-                                            with metric_tabs_secondary[j]:
-                                                metric_df = results['individual_rankings']['surf'][point_count][metric]
-                                                if not metric_df.empty:
-                                                    st.dataframe(metric_df, height=300, use_container_width=True)
-                                                    
-                                                    # Bar chart of top 10
-                                                    top_10_metric = metric_df.head(10)
-                                                    fig = px.bar(
-                                                        top_10_metric, 
-                                                        x='Coin', 
-                                                        y='Value',
-                                                        title=f"Top 10 by {analyzer.metric_display_names[metric]}",
-                                                        color='Rank',
-                                                        color_continuous_scale='Viridis_r'
-                                                    )
-                                                    st.plotly_chart(fig, use_container_width=True)
+                                        tab_labels = [analyzer.metric_display_names[m] for m in analyzer.metrics 
+                                                     if m in results['individual_rankings']['surf'][point_count]]
+                                        if tab_labels:
+                                            metric_tabs_secondary = st.tabs(tab_labels)
+                                            for j, metric in enumerate([m for m in analyzer.metrics if m in results['individual_rankings']['surf'][point_count]]):
+                                                with metric_tabs_secondary[j]:
+                                                    metric_df = results['individual_rankings']['surf'][point_count][metric]
+                                                    if not metric_df.empty:
+                                                        st.dataframe(metric_df, height=300, use_container_width=True)
+                                                        # Bar chart of top 10
+                                                        top_10_metric = metric_df.head(10)
+                                                        fig = px.bar(
+                                                            top_10_metric, 
+                                                            x='Coin', 
+                                                            y='Value',
+                                                            title=f"Top 10 by {analyzer.metric_display_names[metric]}",
+                                                            color='Rank',
+                                                            color_continuous_scale='Viridis_r'
+                                                        )
+                                                        st.plotly_chart(fig, use_container_width=True)
+                                        else:
+                                            st.warning(f"SURF在{point_count}点没有可用的指标排名数据")
                                     else:
                                         st.warning(f"No ranking data available for SURF at {point_count} points")
                             else:
