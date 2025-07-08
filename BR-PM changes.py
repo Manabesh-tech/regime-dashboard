@@ -170,7 +170,9 @@ def fetch_current_parameters():
             pair_name,
             buffer_rate,
             position_multiplier,
-            max_leverage
+            max_leverage,
+            rate_multiplier,
+            rate_exponent
         FROM
             public.trade_pool_pairs
         WHERE
@@ -181,6 +183,8 @@ def fetch_current_parameters():
         df = pd.read_sql(query, engine)
         if not df.empty:
             df['max_leverage'] = df['max_leverage'].fillna(100)
+            df['rate_multiplier'] = df['rate_multiplier'].fillna(1.0)
+            df['rate_exponent'] = df['rate_exponent'].fillna(1.0)
         return df if not df.empty else None
     except Exception as e:
         st.error(f"Error fetching current parameters: {e}")
@@ -207,6 +211,28 @@ def fetch_rollbit_parameters():
             # Ensure we have bust_buffer to use as buffer_rate
             if 'bust_buffer' in df.columns and 'buffer_rate' not in df.columns:
                 df['buffer_rate'] = df['bust_buffer']
+            
+            # Fill missing values with defaults
+            if 'rate_multiplier' not in df.columns:
+                df['rate_multiplier'] = 1.0
+            else:
+                df['rate_multiplier'] = df['rate_multiplier'].fillna(1.0)
+                
+            if 'rate_exponent' not in df.columns:
+                df['rate_exponent'] = 1.0
+            else:
+                df['rate_exponent'] = df['rate_exponent'].fillna(1.0)
+            
+            # Fill missing values with defaults
+            if 'rate_multiplier' not in df.columns:
+                df['rate_multiplier'] = 1.0
+            else:
+                df['rate_multiplier'] = df['rate_multiplier'].fillna(1.0)
+                
+            if 'rate_exponent' not in df.columns:
+                df['rate_exponent'] = 1.0
+            else:
+                df['rate_exponent'] = df['rate_exponent'].fillna(1.0)
             
         return df if not df.empty else None
     except Exception as e:
@@ -332,7 +358,7 @@ def update_weekly_spread_stats(market_data_df):
         current_spreads = calculate_current_spreads(market_data_df)
         
         # Fetch existing stats
-        existing_stats_df = fetch_spread_weekly_stats()
+        existing_stats_df = fetch_weekly_spread_stats()
         existing_stats = {}
         
         if existing_stats_df is not None and not existing_stats_df.empty:
@@ -518,6 +544,10 @@ def render_complete_parameter_table(params_df, market_data_df, baselines_df, wee
             'token_type': 'Major' if is_major(pair_name) else 'Altcoin',
             'buffer_rate': row['buffer_rate'],
             'position_multiplier': row['position_multiplier'],
+            'rate_multiplier': row['rate_multiplier'],
+            'rate_exponent': row['rate_exponent'],
+            'rate_multiplier': row['rate_multiplier'],
+            'rate_exponent': row['rate_exponent'],
             'current_spread': current_spread,
             'baseline_spread': baseline_spread,
             'weekly_min': weekly_min,
@@ -566,6 +596,18 @@ def render_complete_parameter_table(params_df, market_data_df, baselines_df, wee
         'Position Multiplier': sorted_df['position_multiplier'].apply(
             lambda x: f"{x:,.0f}" if not pd.isna(x) else "N/A"
         ),
+        'Rate Multiplier': sorted_df['rate_multiplier'].apply(
+            lambda x: f"{x:.4f}" if not pd.isna(x) else "N/A"
+        ),
+        'Rate Exponent': sorted_df['rate_exponent'].apply(
+            lambda x: f"{x:.4f}" if not pd.isna(x) else "N/A"
+        ),
+        'Rate Multiplier': sorted_df['rate_multiplier'].apply(
+            lambda x: f"{x:.4f}" if not pd.isna(x) else "N/A"
+        ),
+        'Rate Exponent': sorted_df['rate_exponent'].apply(
+            lambda x: f"{x:.4f}" if not pd.isna(x) else "N/A"
+        ),
         'Max Leverage': sorted_df['max_leverage'].apply(
             lambda x: f"{x:.0f}x" if not pd.isna(x) else "N/A"
         )
@@ -593,8 +635,8 @@ def render_rollbit_comparison(params_df, rollbit_df):
     
     # Merge the dataframes on pair_name
     merged_df = pd.merge(
-        params_df[['pair_name', 'buffer_rate', 'position_multiplier']], 
-        rollbit_df[['pair_name', 'buffer_rate', 'position_multiplier']], 
+        params_df[['pair_name', 'buffer_rate', 'position_multiplier', 'rate_multiplier', 'rate_exponent']], 
+        rollbit_df[['pair_name', 'buffer_rate', 'position_multiplier', 'rate_multiplier', 'rate_exponent']], 
         on='pair_name', 
         how='inner',
         suffixes=('', '_rollbit')
@@ -604,74 +646,168 @@ def render_rollbit_comparison(params_df, rollbit_df):
         st.info("No matching pairs found for Rollbit comparison.")
         return
     
-    # Buffer Rate Comparison
-    st.markdown("### Buffer Rate Comparison")
+    # Create tabs for different parameter comparisons
+    comp_tabs = st.tabs(["Buffer Rate", "Position Multiplier", "Rate Multiplier", "Rate Exponent"])
     
-    # Create buffer rate comparison table
-    buffer_df = pd.DataFrame({
-        'Pair': merged_df['pair_name'],
-        'Type': merged_df['pair_name'].apply(lambda x: 'Major' if is_major(x) else 'Altcoin'),
-        'SURF Buffer': merged_df['buffer_rate'].apply(
-            lambda x: f"{x*100:.3f}%" if not pd.isna(x) else "N/A"
-        ),
-        'Rollbit Buffer': merged_df['buffer_rate_rollbit'].apply(
-            lambda x: f"{x*100:.3f}%" if not pd.isna(x) else "N/A"
-        )
-    })
+    with comp_tabs[0]:  # Buffer Rate Comparison
+        st.markdown("### Buffer Rate Comparison")
+        
+        # Create buffer rate comparison table
+        buffer_df = pd.DataFrame({
+            'Pair': merged_df['pair_name'],
+            'Type': merged_df['pair_name'].apply(lambda x: 'Major' if is_major(x) else 'Altcoin'),
+            'SURF Buffer': merged_df['buffer_rate'].apply(
+                lambda x: f"{x*100:.3f}%" if not pd.isna(x) else "N/A"
+            ),
+            'Rollbit Buffer': merged_df['buffer_rate_rollbit'].apply(
+                lambda x: f"{x*100:.3f}%" if not pd.isna(x) else "N/A"
+            )
+        })
+        
+        # Add buffer ratio column
+        buffer_ratio = []
+        for _, row in merged_df.iterrows():
+            if (not check_null_or_zero(row['buffer_rate']) and 
+                not check_null_or_zero(row['buffer_rate_rollbit'])):
+                ratio = safe_division(row['buffer_rate'], row['buffer_rate_rollbit'], None)
+                buffer_ratio.append(f"{ratio:.2f}x" if ratio is not None else "N/A")
+            else:
+                buffer_ratio.append("N/A")
+        
+        buffer_df['Buffer Ratio (SURF/Rollbit)'] = buffer_ratio
+        
+        # Display buffer rate comparison
+        st.dataframe(buffer_df, use_container_width=True)
+        
+        st.markdown("""
+        **Buffer Ratio Interpretation:**
+        - Values > 1: SURF is more conservative (higher buffer rate)
+        - Values < 1: SURF is more aggressive (lower buffer rate)
+        - Values = 1: Both platforms have similar buffer rates
+        """)
     
-    # Add buffer ratio column
-    buffer_ratio = []
-    for _, row in merged_df.iterrows():
-        if (not check_null_or_zero(row['buffer_rate']) and 
-            not check_null_or_zero(row['buffer_rate_rollbit'])):
-            ratio = safe_division(row['buffer_rate'], row['buffer_rate_rollbit'], None)
-            buffer_ratio.append(f"{ratio:.2f}x" if ratio is not None else "N/A")
-        else:
-            buffer_ratio.append("N/A")
+    with comp_tabs[1]:  # Position Multiplier Comparison
+        st.markdown("### Position Multiplier Comparison")
+        
+        # Create position multiplier comparison table
+        position_df = pd.DataFrame({
+            'Pair': merged_df['pair_name'],
+            'Type': merged_df['pair_name'].apply(lambda x: 'Major' if is_major(x) else 'Altcoin'),
+            'SURF Position Mult.': merged_df['position_multiplier'].apply(
+                lambda x: f"{x:,.0f}" if not pd.isna(x) else "N/A"
+            ),
+            'Rollbit Position Mult.': merged_df['position_multiplier_rollbit'].apply(
+                lambda x: f"{x:,.0f}" if not pd.isna(x) else "N/A"
+            )
+        })
+        
+        # Add position ratio column
+        position_ratio = []
+        for _, row in merged_df.iterrows():
+            if (not check_null_or_zero(row['position_multiplier']) and 
+                not check_null_or_zero(row['position_multiplier_rollbit'])):
+                ratio = safe_division(row['position_multiplier'], row['position_multiplier_rollbit'], None)
+                position_ratio.append(f"{ratio:.2f}x" if ratio is not None else "N/A")
+            else:
+                position_ratio.append("N/A")
+        
+        position_df['Position Ratio (SURF/Rollbit)'] = position_ratio
+        
+        # Display position multiplier comparison
+        st.dataframe(position_df, use_container_width=True)
+        
+        st.markdown("""
+        **Position Ratio Interpretation:**
+        - Values > 1: SURF allows larger positions relative to Rollbit
+        - Values < 1: SURF allows smaller positions relative to Rollbit  
+        - Values = 1: Both platforms have similar position multipliers
+        """)
     
-    buffer_df['Buffer Ratio'] = buffer_ratio
+    with comp_tabs[2]:  # Rate Multiplier Comparison
+        st.markdown("### Rate Multiplier Comparison")
+        
+        # Create rate multiplier comparison table
+        rate_mult_df = pd.DataFrame({
+            'Pair': merged_df['pair_name'],
+            'Type': merged_df['pair_name'].apply(lambda x: 'Major' if is_major(x) else 'Altcoin'),
+            'SURF Rate Mult.': merged_df['rate_multiplier'].apply(
+                lambda x: f"{x:.4f}" if not pd.isna(x) else "N/A"
+            ),
+            'Rollbit Rate Mult.': merged_df['rate_multiplier_rollbit'].apply(
+                lambda x: f"{x:.4f}" if not pd.isna(x) else "N/A"
+            )
+        })
+        
+        # Add rate multiplier ratio column
+        rate_mult_ratio = []
+        for _, row in merged_df.iterrows():
+            if (not check_null_or_zero(row['rate_multiplier']) and 
+                not check_null_or_zero(row['rate_multiplier_rollbit'])):
+                ratio = safe_division(row['rate_multiplier'], row['rate_multiplier_rollbit'], None)
+                rate_mult_ratio.append(f"{ratio:.4f}x" if ratio is not None else "N/A")
+            else:
+                rate_mult_ratio.append("N/A")
+        
+        rate_mult_df['Rate Mult. Ratio (SURF/Rollbit)'] = rate_mult_ratio
+        
+        # Display rate multiplier comparison
+        st.dataframe(rate_mult_df, use_container_width=True)
+        
+        st.markdown("""
+        **Rate Multiplier Interpretation:**
+        - Higher values: More aggressive rate scaling
+        - Lower values: More conservative rate scaling
+        - Rate multiplier affects how quickly rates change with market conditions
+        """)
     
-    # Display buffer rate comparison
-    st.dataframe(buffer_df, use_container_width=True)
+    with comp_tabs[3]:  # Rate Exponent Comparison
+        st.markdown("### Rate Exponent Comparison")
+        
+        # Create rate exponent comparison table
+        rate_exp_df = pd.DataFrame({
+            'Pair': merged_df['pair_name'],
+            'Type': merged_df['pair_name'].apply(lambda x: 'Major' if is_major(x) else 'Altcoin'),
+            'SURF Rate Exp.': merged_df['rate_exponent'].apply(
+                lambda x: f"{x:.4f}" if not pd.isna(x) else "N/A"
+            ),
+            'Rollbit Rate Exp.': merged_df['rate_exponent_rollbit'].apply(
+                lambda x: f"{x:.4f}" if not pd.isna(x) else "N/A"
+            )
+        })
+        
+        # Add rate exponent ratio column
+        rate_exp_ratio = []
+        for _, row in merged_df.iterrows():
+            if (not check_null_or_zero(row['rate_exponent']) and 
+                not check_null_or_zero(row['rate_exponent_rollbit'])):
+                ratio = safe_division(row['rate_exponent'], row['rate_exponent_rollbit'], None)
+                rate_exp_ratio.append(f"{ratio:.4f}x" if ratio is not None else "N/A")
+            else:
+                rate_exp_ratio.append("N/A")
+        
+        rate_exp_df['Rate Exp. Ratio (SURF/Rollbit)'] = rate_exp_ratio
+        
+        # Display rate exponent comparison
+        st.dataframe(rate_exp_df, use_container_width=True)
+        
+        st.markdown("""
+        **Rate Exponent Interpretation:**
+        - Values > 1: Non-linear rate scaling (exponential growth)
+        - Values = 1: Linear rate scaling
+        - Values < 1: Logarithmic rate scaling (diminishing returns)
+        - Rate exponent controls the shape of the rate curve
+        """)
     
-    # Position Multiplier Comparison
-    st.markdown("### Position Multiplier Comparison")
-    
-    # Create position multiplier comparison table
-    position_df = pd.DataFrame({
-        'Pair': merged_df['pair_name'],
-        'Type': merged_df['pair_name'].apply(lambda x: 'Major' if is_major(x) else 'Altcoin'),
-        'SURF Position Mult.': merged_df['position_multiplier'].apply(
-            lambda x: f"{x:,.0f}" if not pd.isna(x) else "N/A"
-        ),
-        'Rollbit Position Mult.': merged_df['position_multiplier_rollbit'].apply(
-            lambda x: f"{x:,.0f}" if not pd.isna(x) else "N/A"
-        )
-    })
-    
-    # Add position ratio column
-    position_ratio = []
-    for _, row in merged_df.iterrows():
-        if (not check_null_or_zero(row['position_multiplier']) and 
-            not check_null_or_zero(row['position_multiplier_rollbit'])):
-            ratio = safe_division(row['position_multiplier'], row['position_multiplier_rollbit'], None)
-            position_ratio.append(f"{ratio:.2f}x" if ratio is not None else "N/A")
-        else:
-            position_ratio.append("N/A")
-    
-    position_df['Position Ratio'] = position_ratio
-    
-    # Display position multiplier comparison
-    st.dataframe(position_df, use_container_width=True)
-    
-    # Add explanation
+    # Add overall comparison summary
+    st.markdown("---")
+    st.markdown("### Summary")
     st.markdown("""
-    ### Understanding the Comparison
+    This comparison shows how SURF's risk parameters compare to Rollbit's for matching trading pairs:
     
-    This tab compares SURF's current parameters with Rollbit's parameters for matching tokens:
-    
-    - **Buffer Ratio**: SURF buffer rate ÷ Rollbit buffer rate. Values > 1 mean SURF is more conservative.
-    - **Position Ratio**: SURF position multiplier ÷ Rollbit position multiplier. Values > 1 mean SURF allows larger positions.
+    - **Buffer Rate**: Risk buffer for position management
+    - **Position Multiplier**: Maximum position size multiplier
+    - **Rate Multiplier**: Scaling factor for rate calculations
+    - **Rate Exponent**: Non-linear scaling parameter for rate curves
     
     *Note: "N/A" is displayed when either SURF or Rollbit has null, zero, or missing values for comparison.*
     """)
