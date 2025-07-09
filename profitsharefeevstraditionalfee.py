@@ -287,14 +287,14 @@ def create_comparison_table(traditional_data, profit_share_data):
         for volume in volume_levels:
             position_size = volume_amounts[volume]
             traditional_spread = row[volume]
-            traditional_fee = calculate_traditional_fee(traditional_spread, position_size)
+            traditional_fee = calculate_traditional_fee(traditional_spread, position_size)*2
             bet_amount = position_size / ps_params['bet_multiplier']
             
             for price_move in price_moves:
                 close_price = 100 * (1 + price_move / 100)
                 profit_share_fee = calculate_profit_sharing_fee(100, close_price, bet_amount, ps_params)
                 
-                difference = profit_share_fee - traditional_fee*2
+                difference = profit_share_fee - traditional_fee
                 is_ps_more_expensive = difference > 0
                 
                 results.append({
@@ -302,7 +302,7 @@ def create_comparison_table(traditional_data, profit_share_data):
                     'Volume': volume,
                     'Position Size': position_size,
                     'Price Move (%)': price_move,
-                    'Traditional Fee ($)': traditional_fee*2,
+                    'Traditional Fee ($)': traditional_fee,
                     'Profit Share Fee ($)': profit_share_fee,
                     'Difference ($)': difference,
                     'PS More Expensive': is_ps_more_expensive,
