@@ -107,32 +107,44 @@ def fetch_streamlit_data():
             
             engine = sqlalchemy.create_engine(connection_string)
             
-            # Query to get profit share parameters from trade_pool_pairs table
+            # First get the traditional spreads pair names to match against
+            spreads_query = """
+            SELECT DISTINCT pair_name
+            FROM oracle_exchange_spread 
+            WHERE source = 'binanceFuture'
+                AND time_group = (SELECT MAX(time_group) FROM oracle_exchange_spread)
+            """
+            spreads_pairs = pd.read_sql(spreads_query, engine)['pair_name'].tolist()
+            
+            # Now get profit share parameters with matching pair names
+            # Join trade_pool_pairs with the pairs table to get pair names
             query = """
             SELECT 
-                single_user_pair_name as "Pair",
-                pnl_base_rate as "Base Rate",
-                rate_multiplier as "Rate Multiplier", 
-                rate_exponent as "Rate Exponent",
-                position_multiplier as "Position Multiplier",
+                p.pair_name as "Pair",
+                tpp.pnl_base_rate / 100.0 as "Base Rate",
+                tpp.rate_multiplier as "Rate Multiplier", 
+                tpp.rate_exponent as "Rate Exponent",
+                tpp.position_multiplier as "Position Multiplier",
                 1 as "Bet Multiplier",
-                funding_fee as "Buffer Rate"
-            FROM trade_pool_pairs 
-            WHERE created_at = (SELECT MAX(created_at) FROM trade_pool_pairs)
-            ORDER BY single_user_pair_name;
-            """
+                tpp.funding_fee as "Buffer Rate"
+            FROM trade_pool_pairs tpp
+            JOIN pairs p ON tpp.pair_id = p.pair_id
+            WHERE tpp.created_at = (SELECT MAX(created_at) FROM trade_pool_pairs)
+                AND p.pair_name IN ({})
+            ORDER BY p.pair_name;
+            """.format(','.join([f"'{pair}'" for pair in spreads_pairs]))
             
             df = pd.read_sql(query, engine)
             
             # Convert columns to proper data types
-            df["Base Rate"] = df["Base Rate"] / 100  # Convert to decimal (e.g., 35 -> 0.35)
-            df["Buffer Rate"] = df["Buffer Rate"]  # Keep as is
             df["Rate Multiplier"] = df["Rate Multiplier"].astype(int)
             df["Rate Exponent"] = df["Rate Exponent"].astype(int) 
             df["Position Multiplier"] = df["Position Multiplier"].astype(int)
             df["Bet Multiplier"] = df["Bet Multiplier"].astype(int)
             
-            st.success(f"✅ Successfully loaded {len(df)} pairs from database (latest created_at)")
+            st.success(f"✅ Successfully loaded {len(df)} matching pairs from database")
+            st.info(f"📊 Matched pairs: {', '.join(df['Pair'].tolist())}")
+            
             return df
         
     except Exception as e:
