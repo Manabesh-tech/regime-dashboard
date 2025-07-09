@@ -28,8 +28,8 @@ volume_amounts = {'1k': 1000, '5k': 5000, '10k': 10000, '20k': 20000}
 
 # Functions
 @st.cache_data(ttl=300)  # Cache for 5 minutes
-def fetch_traditional_spreads():
-    """Fetch traditional spreads from database"""
+def fetch_metabase_data():
+    """Fetch traditional spreads from Metabase"""
     try:
         # Get database connection details from secrets
         metabase_config = st.secrets.get("metabase", {})
@@ -66,18 +66,28 @@ def fetch_traditional_spreads():
             """
             
             df = pd.read_sql(query, engine)
-            st.success(f"✅ Successfully loaded {len(df)} traditional spread pairs from database")
+            st.success(f"✅ Successfully loaded {len(df)} pairs from database (latest time_group)")
             return df
         
+        # Fallback to API if database connection fails
+        if "api_url" in metabase_config:
+            headers = {
+                "Authorization": f"Bearer {metabase_config.get('api_key', '')}",
+                "Content-Type": "application/json"
+            }
+            response = requests.get(metabase_config["api_url"], headers=headers)
+            if response.status_code == 200:
+                return pd.DataFrame(response.json())
+        
     except Exception as e:
-        st.error(f"❌ Error fetching traditional spreads: {str(e)}")
+        st.error(f"❌ Error fetching Metabase data: {str(e)}")
         st.info("🔄 Falling back to mock data")
         return get_mock_traditional_data()
     
     return get_mock_traditional_data()
 
 @st.cache_data(ttl=300)
-def fetch_profit_share_params():
+def fetch_streamlit_data():
     """Fetch profit share parameters from database"""
     try:
         # Get database connection details from secrets
@@ -105,9 +115,36 @@ def fetch_profit_share_params():
                 AND time_group = (SELECT MAX(time_group) FROM oracle_exchange_spread)
             ORDER BY pair_name
             """
-            spreads_pairs = pd.read_sql(spreads_query, engine)['pair_name'].tolist()
+            spreads_pairs_df = pd.read_sql(spreads_query, engine)
+            spreads_pairs = spreads_pairs_df['pair_name'].tolist()
             
-            # Now get profit share parameters ONLY for pairs that exist in traditional spreads
+            # DEBUG: Show traditional pairs
+            st.info(f"🔍 Traditional pairs found: {len(spreads_pairs)}")
+            st.info(f"📋 First 10 traditional pairs: {spreads_pairs[:10]}")
+            
+            # Get profit-share pairs (remove created_at filter)
+            profit_pairs_query = """
+            SELECT DISTINCT pair_name 
+            FROM trade_pool_pairs 
+            ORDER BY pair_name
+            """
+            profit_pairs_df = pd.read_sql(profit_pairs_query, engine)
+            profit_pairs = profit_pairs_df['pair_name'].tolist()
+            
+            # DEBUG: Show profit-share pairs
+            st.info(f"🔍 Profit-share pairs found: {len(profit_pairs)}")
+            st.info(f"📋 First 10 profit-share pairs: {profit_pairs[:10]}")
+            
+            # Find matching pairs
+            matching_pairs = list(set(spreads_pairs).intersection(set(profit_pairs)))
+            st.info(f"🎯 Matching pairs: {len(matching_pairs)}")
+            st.info(f"📋 Matching pairs: {matching_pairs[:10] if len(matching_pairs) > 10 else matching_pairs}")
+            
+            if len(matching_pairs) == 0:
+                st.error("❌ No matching pairs found - this shouldn't happen!")
+                return get_mock_profit_share_data()
+            
+            # Now get profit share parameters ONLY for matching pairs (remove created_at filter)
             query = """
             SELECT 
                 pair_name as "Pair",
@@ -118,8 +155,9 @@ def fetch_profit_share_params():
                 1 as "Bet Multiplier",
                 funding_fee as "Buffer Rate"
             FROM trade_pool_pairs
+            WHERE pair_name IN ({})
             ORDER BY pair_name;
-            """.format(','.join([f"'{pair}'" for pair in spreads_pairs]))
+            """.format(','.join([f"'{pair}'" for pair in matching_pairs]))
             
             df = pd.read_sql(query, engine)
             
@@ -131,7 +169,7 @@ def fetch_profit_share_params():
             df["Bet Multiplier"] = df["Bet Multiplier"].astype(int)
             df["Buffer Rate"] = df["Buffer Rate"].astype(float)
             
-            st.success(f"✅ Successfully loaded {len(df)} profit-share parameters from database")
+            st.success(f"✅ Successfully loaded {len(df)} matching pairs from database")
             if len(df) > 0:
                 st.info(f"📊 Matched pairs: {', '.join(df['Pair'].tolist())}")
             else:
@@ -149,29 +187,37 @@ def fetch_profit_share_params():
 def get_mock_traditional_data():
     """Mock traditional spread data based on screenshots"""
     return pd.DataFrame([
-        {'pair_name': '1000BONK/USDT', '1k': 0.58, '5k': 1.49, '10k': 2.61, '20k': 4.13},
-        {'pair_name': 'AAVE/USDT', '1k': 0.39, '5k': 0.65, '10k': 1.29, '20k': 2.02},
-        {'pair_name': 'ADA/USDT', '1k': 1.67, '5k': 1.71, '10k': 1.86, '20k': 1.98},
-        {'pair_name': 'AI16Z/USDT', '1k': 7.36, '5k': 8.35, '10k': 11.92, '20k': 15.96},
-        {'pair_name': 'ARB/USDT', '1k': 3.25, '5k': 3.3, '10k': 3.87, '20k': 4.55},
-        {'pair_name': 'AVAX/USDT', '1k': 0.54, '5k': 0.64, '10k': 0.96, '20k': 1.53},
-        {'pair_name': 'BNB/USDT', '1k': 0.15, '5k': 0.15, '10k': 0.15, '20k': 0.15},
-        {'pair_name': 'BTC/USDT', '1k': 0.0092, '5k': 0.0092, '10k': 0.0092, '20k': 0.011},
-        {'pair_name': 'DOGE/USDT', '1k': 0.58, '5k': 0.63, '10k': 0.7, '20k': 0.8}
+        {'pair_name': '1000BONK/USDT', '1k': 1.01, '5k': 2.31, '10k': 3.11, '20k': 4.53},
+        {'pair_name': 'AAVE/USDT', '1k': 0.34, '5k': 0.57, '10k': 0.91, '20k': 1.48},
+        {'pair_name': 'ADA/USDT', '1k': 1.69, '5k': 1.69, '10k': 1.89, '20k': 1.97},
+        {'pair_name': 'AI16Z/USDT', '1k': 6.52, '5k': 7.83, '10k': 10.13, '20k': 14.24},
+        {'pair_name': 'ARB/USDT', '1k': 2.96, '5k': 3.08, '10k': 3.7, '20k': 4.75},
+        {'pair_name': 'AVAX/USDT', '1k': 0.63, '5k': 0.75, '10k': 1.01, '20k': 1.47},
+        {'pair_name': 'BNB/USDT', '1k': 0.15, '5k': 0.15, '10k': 0.17, '20k': 0.23},
+        {'pair_name': 'BTC/USDT', '1k': 0.0092, '5k': 0.0092, '10k': 0.0092, '20k': 0.0092},
+        {'pair_name': 'DOGE/USDT', '1k': 0.58, '5k': 0.65, '10k': 0.66, '20k': 0.8},
+        {'pair_name': 'ENA/USDT', '1k': 3.78, '5k': 3.78, '10k': 4.13, '20k': 4.7},
+        {'pair_name': 'ETH/USDT', '1k': 0.038, '5k': 0.045, '10k': 0.038, '20k': 0.038},
+        {'pair_name': 'FARTCOIN/USDT', '1k': 1.04, '5k': 1.93, '10k': 2.8, '20k': 4.31},
+        {'pair_name': 'HYPE/USDT', '1k': 0.35, '5k': 1.36, '10k': 2.11, '20k': 3.45}
     ])
 
 def get_mock_profit_share_data():
     """Mock profit share parameters based on screenshots"""
     return pd.DataFrame([
-        {'Pair': '1000BONK/USDT', 'Base Rate': 0.001, 'Rate Multiplier': 500, 'Rate Exponent': 2, 'Position Multiplier': 2, 'Bet Multiplier': 1, 'Buffer Rate': 0.008},
-        {'Pair': 'AAVE/USDT', 'Base Rate': 0.001, 'Rate Multiplier': 500, 'Rate Exponent': 2, 'Position Multiplier': 2, 'Bet Multiplier': 1, 'Buffer Rate': 0.008},
-        {'Pair': 'ADA/USDT', 'Base Rate': 0.001, 'Rate Multiplier': 500, 'Rate Exponent': 2, 'Position Multiplier': 2, 'Bet Multiplier': 1, 'Buffer Rate': 0.008},
-        {'Pair': 'AI16Z/USDT', 'Base Rate': 0.001, 'Rate Multiplier': 500, 'Rate Exponent': 2, 'Position Multiplier': 2, 'Bet Multiplier': 1, 'Buffer Rate': 0.008},
-        {'Pair': 'ARB/USDT', 'Base Rate': 0.001, 'Rate Multiplier': 500, 'Rate Exponent': 2, 'Position Multiplier': 2, 'Bet Multiplier': 1, 'Buffer Rate': 0.008},
-        {'Pair': 'AVAX/USDT', 'Base Rate': 0.001, 'Rate Multiplier': 500, 'Rate Exponent': 2, 'Position Multiplier': 2, 'Bet Multiplier': 1, 'Buffer Rate': 0.008},
-        {'Pair': 'BNB/USDT', 'Base Rate': 0.001, 'Rate Multiplier': 500, 'Rate Exponent': 2, 'Position Multiplier': 2, 'Bet Multiplier': 1, 'Buffer Rate': 0.008},
-        {'Pair': 'BTC/USDT', 'Base Rate': 0.001, 'Rate Multiplier': 500, 'Rate Exponent': 2, 'Position Multiplier': 2, 'Bet Multiplier': 1, 'Buffer Rate': 0.008},
-        {'Pair': 'DOGE/USDT', 'Base Rate': 0.001, 'Rate Multiplier': 500, 'Rate Exponent': 2, 'Position Multiplier': 2, 'Bet Multiplier': 1, 'Buffer Rate': 0.008}
+        {'Pair': '1000BONK/USDT', 'Position Multiplier': 2, 'Buffer Rate': 0.049, 'Rate Multiplier': 1000, 'Rate Exponent': 1, 'Base Rate': 0.1, 'Bet Multiplier': 1},
+        {'Pair': 'AAVE/USDT', 'Position Multiplier': 10, 'Buffer Rate': 0.040, 'Rate Multiplier': 1000, 'Rate Exponent': 1, 'Base Rate': 0.1, 'Bet Multiplier': 1},
+        {'Pair': 'ADA/USDT', 'Position Multiplier': 80, 'Buffer Rate': 0.040, 'Rate Multiplier': 1000, 'Rate Exponent': 1, 'Base Rate': 0.1, 'Bet Multiplier': 1},
+        {'Pair': 'AI16Z/USDT', 'Position Multiplier': 1, 'Buffer Rate': 0.056, 'Rate Multiplier': 1000, 'Rate Exponent': 1, 'Base Rate': 0.1, 'Bet Multiplier': 1},
+        {'Pair': 'ARB/USDT', 'Position Multiplier': 5, 'Buffer Rate': 0.040, 'Rate Multiplier': 1000, 'Rate Exponent': 1, 'Base Rate': 0.1, 'Bet Multiplier': 1},
+        {'Pair': 'AVAX/USDT', 'Position Multiplier': 5, 'Buffer Rate': 0.038, 'Rate Multiplier': 1000, 'Rate Exponent': 1, 'Base Rate': 0.1, 'Bet Multiplier': 1},
+        {'Pair': 'BNB/USDT', 'Position Multiplier': 80, 'Buffer Rate': 0.036, 'Rate Multiplier': 1000, 'Rate Exponent': 1, 'Base Rate': 0.1, 'Bet Multiplier': 1},
+        {'Pair': 'BTC/USDT', 'Position Multiplier': 500, 'Buffer Rate': 0.035, 'Rate Multiplier': 3000, 'Rate Exponent': 1, 'Base Rate': 0.1, 'Bet Multiplier': 1},
+        {'Pair': 'DOGE/USDT', 'Position Multiplier': 80, 'Buffer Rate': 0.037, 'Rate Multiplier': 1000, 'Rate Exponent': 1, 'Base Rate': 0.1, 'Bet Multiplier': 1},
+        {'Pair': 'ENA/USDT', 'Position Multiplier': 5, 'Buffer Rate': 0.050, 'Rate Multiplier': 1000, 'Rate Exponent': 1, 'Base Rate': 0.1, 'Bet Multiplier': 1},
+        {'Pair': 'ETH/USDT', 'Position Multiplier': 100, 'Buffer Rate': 0.035, 'Rate Multiplier': 3000, 'Rate Exponent': 1, 'Base Rate': 0.1, 'Bet Multiplier': 1},
+        {'Pair': 'FARTCOIN/USDT', 'Position Multiplier': 1, 'Buffer Rate': 0.040, 'Rate Multiplier': 1000, 'Rate Exponent': 1, 'Base Rate': 0.1, 'Bet Multiplier': 1},
+        {'Pair': 'HYPE/USDT', 'Position Multiplier': 1, 'Buffer Rate': 0.040, 'Rate Multiplier': 1000, 'Rate Exponent': 1, 'Base Rate': 0.1, 'Bet Multiplier': 1}
     ])
 
 def calculate_traditional_fee(basis_points, position_size):
@@ -192,6 +238,7 @@ def calculate_profit_sharing_fee(open_price, close_price, bet_amount, params):
     price_move_pct = (P_T / P_t) - 1
     abs_price_move_pct = abs(price_move_pct)
     
+    # Handle zero price move case
     if abs_price_move_pct == 0:
         return 0
     
@@ -234,10 +281,10 @@ def create_comparison_table(traditional_data, profit_share_data):
         
         # Profit share parameters
         ps_params = {
-            'base_rate': row.get('Base Rate', 0.001),
-            'rate_multiplier': row.get('Rate Multiplier', 500),
-            'rate_exponent': row.get('Rate Exponent', 2),
-            'position_multiplier': row.get('Position Multiplier', 2),
+            'base_rate': row.get('Base Rate', 0.1),
+            'rate_multiplier': row.get('Rate Multiplier', 1000),
+            'rate_exponent': row.get('Rate Exponent', 1),
+            'position_multiplier': row.get('Position Multiplier', 200),
             'bet_multiplier': row.get('Bet Multiplier', 1)
         }
         
@@ -277,8 +324,8 @@ def main():
     # Load data
     if refresh_data or 'traditional_data' not in st.session_state:
         with st.spinner("Loading data..."):
-            st.session_state.traditional_data = fetch_traditional_spreads()
-            st.session_state.profit_share_data = fetch_profit_share_params()
+            st.session_state.traditional_data = fetch_metabase_data()
+            st.session_state.profit_share_data = fetch_streamlit_data()
     
     traditional_data = st.session_state.traditional_data
     profit_share_data = st.session_state.profit_share_data
