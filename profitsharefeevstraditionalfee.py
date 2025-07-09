@@ -118,8 +118,6 @@ def fetch_profit_share_params():
                 1 as "Bet Multiplier",
                 funding_fee as "Buffer Rate"
             FROM trade_pool_pairs
-            WHERE created_at = (SELECT MAX(created_at) FROM trade_pool_pairs)
-                AND pair_name IN ({})
             ORDER BY pair_name;
             """.format(','.join([f"'{pair}'" for pair in spreads_pairs]))
             
