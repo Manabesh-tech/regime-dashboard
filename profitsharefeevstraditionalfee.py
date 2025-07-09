@@ -88,33 +88,56 @@ def fetch_metabase_data():
 
 @st.cache_data(ttl=300)
 def fetch_streamlit_data():
-    """Fetch profit share parameters from Streamlit"""
+    """Fetch profit share parameters from database"""
     try:
-        # Get Streamlit app URL from secrets
-        streamlit_config = st.secrets.get("streamlit", {})
+        # Get database connection details from secrets
+        metabase_config = st.secrets.get("metabase", {})
         
-        if not streamlit_config:
-            st.warning("Streamlit configuration not found in secrets. Using mock data.")
+        if not metabase_config:
+            st.warning("Metabase configuration not found in secrets. Using mock data.")
             return get_mock_profit_share_data()
         
-        # Try to fetch from Streamlit API
-        url = streamlit_config.get("api_url", "https://regime-dashboard-br-pm-changes.streamlit.app")
-        
-        # Some Streamlit apps expose data through specific endpoints
-        # You might need to modify this based on your app structure
-        response = requests.get(f"{url}/data.json", timeout=10)
-        
-        if response.status_code == 200:
-            data = response.json()
-            return pd.DataFrame(data)
-        else:
-            # Try alternative endpoints
-            response = requests.get(f"{url}/api/parameters", timeout=10)
-            if response.status_code == 200:
-                return pd.DataFrame(response.json())
+        # Direct database connection
+        if "host" in metabase_config:
+            import psycopg2
+            import sqlalchemy
+            
+            # Create connection string
+            connection_string = f"postgresql://{metabase_config['user']}:{metabase_config['password']}@{metabase_config['host']}:{metabase_config['port']}/{metabase_config['database']}"
+            
+            engine = sqlalchemy.create_engine(connection_string)
+            
+            # Query to get profit share parameters from trade_pool_pairs table
+            query = """
+            SELECT 
+                single_user_pair_name as "Pair",
+                pnl_base_rate as "Base Rate",
+                rate_multiplier as "Rate Multiplier", 
+                rate_exponent as "Rate Exponent",
+                position_multiplier as "Position Multiplier",
+                1 as "Bet Multiplier",
+                funding_fee as "Buffer Rate"
+            FROM trade_pool_pairs 
+            WHERE created_at = (SELECT MAX(created_at) FROM trade_pool_pairs)
+            ORDER BY single_user_pair_name;
+            """
+            
+            df = pd.read_sql(query, engine)
+            
+            # Convert columns to proper data types
+            df["Base Rate"] = df["Base Rate"] / 100  # Convert to decimal (e.g., 35 -> 0.35)
+            df["Buffer Rate"] = df["Buffer Rate"]  # Keep as is
+            df["Rate Multiplier"] = df["Rate Multiplier"].astype(int)
+            df["Rate Exponent"] = df["Rate Exponent"].astype(int) 
+            df["Position Multiplier"] = df["Position Multiplier"].astype(int)
+            df["Bet Multiplier"] = df["Bet Multiplier"].astype(int)
+            
+            st.success(f"✅ Successfully loaded {len(df)} pairs from database (latest created_at)")
+            return df
         
     except Exception as e:
-        st.error(f"Error fetching Streamlit data: {str(e)}")
+        st.error(f"❌ Error fetching profit share data from database: {str(e)}")
+        st.info("🔄 Falling back to mock data")
         return get_mock_profit_share_data()
     
     return get_mock_profit_share_data()
