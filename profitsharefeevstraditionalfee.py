@@ -9,6 +9,28 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from sqlalchemy import create_engine
 
+# 全局数据库连接参数
+DB_PARAMS = {
+    'host': 'aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com',
+    'port': 5432,
+    'database': 'replication_report',
+    'user': 'public_replication',
+    'password': '866^FKC4hllk'
+}
+
+# 全局engine
+ENGINE = create_engine(
+    f"postgresql://{DB_PARAMS['user']}:{DB_PARAMS['password']}@{DB_PARAMS['host']}:{DB_PARAMS['port']}/{DB_PARAMS['database']}",
+    isolation_level="AUTOCOMMIT",  # 设置自动提交模式
+    pool_size=5,  # 连接池大小
+    max_overflow=10,  # 最大溢出连接数
+    pool_timeout=30,  # 连接超时时间
+    pool_recycle=1800,  # 连接回收时间(30分钟)
+    pool_pre_ping=True,  # 使用连接前先测试连接是否有效
+    pool_use_lifo=True,  # 使用后进先出,减少空闲连接
+    echo=False  # 不打印 SQL 语句
+)
+
 # Configure page
 st.set_page_config(
     page_title="Profit-Sharing vs Traditional Spread Comparison", 
@@ -32,38 +54,7 @@ volume_amounts = {'1k': 1000, '5k': 5000, '10k': 10000, '20k': 20000}
 def fetch_metabase_data():
     """Fetch traditional spreads from Metabase"""
     try:
-        # Get database connection details from secrets
-        # metabase_config = st.secrets.get("metabase", {})
-        #
-        # if not metabase_config:
-        #     st.warning("Metabase configuration not found in secrets. Using mock data.")
-        #     return get_mock_traditional_data()
-        #
-        # # Direct database connection
-        # if "host" in metabase_config:
-        #     import psycopg2
-        #     import sqlalchemy
-        #
-            # Create connection string
-        db_params = {
-            'host': 'aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com',
-            'port': 5432,
-            'database': 'replication_report',
-            'user': 'public_replication',
-            'password': '866^FKC4hllk'
-        }
-
-        engine = create_engine(
-            f"postgresql://{db_params['user']}:{db_params['password']}@{db_params['host']}:{db_params['port']}/{db_params['database']}",
-            isolation_level="AUTOCOMMIT",  # 设置自动提交模式
-            pool_size=5,  # 连接池大小
-            max_overflow=10,  # 最大溢出连接数
-            pool_timeout=30,  # 连接超时时间
-            pool_recycle=1800,  # 连接回收时间(30分钟)
-            pool_pre_ping=True,  # 使用连接前先测试连接是否有效
-            pool_use_lifo=True,  # 使用后进先出,减少空闲连接
-            echo=False  # 不打印 SQL 语句
-        )
+        # 已用全局ENGINE
         # Exact Metabase query for small volume fees
         query = """
         -- Spreads table with columns: Pair name, volume 1k, volume 5k, volume 10k, volume 20k
@@ -81,19 +72,9 @@ def fetch_metabase_data():
         ORDER BY pair_name;
         """
 
-        df = pd.read_sql(query, engine)
+        df = pd.read_sql(query, ENGINE)
         st.success(f"✅ Successfully loaded {len(df)} pairs from database (latest time_group)")
         return df
-        
-        # Fallback to API if database connection fails
-        if "api_url" in metabase_config:
-            headers = {
-                "Authorization": f"Bearer {metabase_config.get('api_key', '')}",
-                "Content-Type": "application/json"
-            }
-            response = requests.get(metabase_config["api_url"], headers=headers)
-            if response.status_code == 200:
-                return pd.DataFrame(response.json())
         
     except Exception as e:
         st.error(f"❌ Error fetching Metabase data: {str(e)}")
@@ -106,93 +87,77 @@ def fetch_metabase_data():
 def fetch_streamlit_data():
     """Fetch profit share parameters from database"""
     try:
-        # Get database connection details from secrets
-        metabase_config = st.secrets.get("metabase", {})
+        # 已用全局ENGINE
+        # First get the traditional spreads pair names to match against
+        spreads_query = """
+        SELECT DISTINCT pair_name
+        FROM oracle_exchange_spread 
+        WHERE source = 'binanceFuture'
+            AND time_group = (SELECT MAX(time_group) FROM oracle_exchange_spread)
+        ORDER BY pair_name
+        """
+        spreads_pairs_df = pd.read_sql(spreads_query, ENGINE)
+        spreads_pairs = spreads_pairs_df['pair_name'].tolist()
         
-        if not metabase_config:
-            st.warning("Metabase configuration not found in secrets. Using mock data.")
+        # DEBUG: Show traditional pairs
+        st.info(f"🔍 Traditional pairs found: {len(spreads_pairs)}")
+        st.info(f"📋 First 10 traditional pairs: {spreads_pairs[:10]}")
+        
+        # Get profit-share pairs (remove created_at filter)
+        profit_pairs_query = """
+        SELECT DISTINCT pair_name 
+        FROM trade_pool_pairs where status in (1,2)
+        ORDER BY pair_name
+        """
+        profit_pairs_df = pd.read_sql(profit_pairs_query, ENGINE)
+        profit_pairs = profit_pairs_df['pair_name'].tolist()
+        
+        # DEBUG: Show profit-share pairs
+        st.info(f"🔍 Profit-share pairs found: {len(profit_pairs)}")
+        st.info(f"📋 First 10 profit-share pairs: {profit_pairs[:10]}")
+        
+        # Find matching pairs
+        matching_pairs = list(set(spreads_pairs).intersection(set(profit_pairs)))
+        st.info(f"🎯 Matching pairs: {len(matching_pairs)}")
+        st.info(f"📋 Matching pairs: {matching_pairs[:10] if len(matching_pairs) > 10 else matching_pairs}")
+        
+        if len(matching_pairs) == 0:
+            st.error("❌ No matching pairs found - this shouldn't happen!")
             return get_mock_profit_share_data()
         
-        # Direct database connection
-        if "host" in metabase_config:
-            import psycopg2
-            import sqlalchemy
-            
-            # Create connection string
-            connection_string = f"postgresql://{metabase_config['user']}:{metabase_config['password']}@{metabase_config['host']}:{metabase_config['port']}/{metabase_config['database']}"
-            
-            engine = sqlalchemy.create_engine(connection_string)
-            
-            # First get the traditional spreads pair names to match against
-            spreads_query = """
-            SELECT DISTINCT pair_name
-            FROM oracle_exchange_spread 
-            WHERE source = 'binanceFuture'
-                AND time_group = (SELECT MAX(time_group) FROM oracle_exchange_spread)
-            ORDER BY pair_name
-            """
-            spreads_pairs_df = pd.read_sql(spreads_query, engine)
-            spreads_pairs = spreads_pairs_df['pair_name'].tolist()
-            
-            # DEBUG: Show traditional pairs
-            st.info(f"🔍 Traditional pairs found: {len(spreads_pairs)}")
-            st.info(f"📋 First 10 traditional pairs: {spreads_pairs[:10]}")
-            
-            # Get profit-share pairs (remove created_at filter)
-            profit_pairs_query = """
-            SELECT DISTINCT pair_name 
-            FROM trade_pool_pairs 
-            ORDER BY pair_name
-            """
-            profit_pairs_df = pd.read_sql(profit_pairs_query, engine)
-            profit_pairs = profit_pairs_df['pair_name'].tolist()
-            
-            # DEBUG: Show profit-share pairs
-            st.info(f"🔍 Profit-share pairs found: {len(profit_pairs)}")
-            st.info(f"📋 First 10 profit-share pairs: {profit_pairs[:10]}")
-            
-            # Find matching pairs
-            matching_pairs = list(set(spreads_pairs).intersection(set(profit_pairs)))
-            st.info(f"🎯 Matching pairs: {len(matching_pairs)}")
-            st.info(f"📋 Matching pairs: {matching_pairs[:10] if len(matching_pairs) > 10 else matching_pairs}")
-            
-            if len(matching_pairs) == 0:
-                st.error("❌ No matching pairs found - this shouldn't happen!")
-                return get_mock_profit_share_data()
-            
-            # Now get profit share parameters ONLY for matching pairs (remove created_at filter)
-            query = """
-            SELECT 
-                pair_name as "Pair",
-                pnl_base_rate as "Base Rate",
-                rate_multiplier as "Rate Multiplier", 
-                rate_exponent as "Rate Exponent",
-                position_multiplier as "Position Multiplier",
-                1 as "Bet Multiplier",
-                funding_fee as "Buffer Rate"
-            FROM trade_pool_pairs
-            WHERE pair_name IN ({})
-            ORDER BY pair_name;
-            """.format(','.join([f"'{pair}'" for pair in matching_pairs]))
-            
-            df = pd.read_sql(query, engine)
-            
-            # Convert columns to proper data types
-            df["Base Rate"] = df["Base Rate"] / 100.0  # Convert to decimal (e.g., 0.1 -> 0.001)
-            df["Rate Multiplier"] = df["Rate Multiplier"].astype(int)
-            df["Rate Exponent"] = df["Rate Exponent"].astype(int) 
-            df["Position Multiplier"] = df["Position Multiplier"].astype(int)
-            df["Bet Multiplier"] = df["Bet Multiplier"].astype(int)
-            df["Buffer Rate"] = df["Buffer Rate"].astype(float)
-            
-            st.success(f"✅ Successfully loaded {len(df)} matching pairs from database")
-            if len(df) > 0:
-                st.info(f"📊 Matched pairs: {', '.join(df['Pair'].tolist())}")
-            else:
-                st.warning("⚠️ No matching pairs found between traditional spreads and profit-share parameters")
-            
-            return df
+        # Now get profit share parameters ONLY for matching pairs (remove created_at filter)
+        query = """
+        SELECT 
+            pair_name as "Pair",
+            pnl_base_rate as "Base Rate",
+            rate_multiplier as "Rate Multiplier", 
+            rate_exponent as "Rate Exponent",
+            position_multiplier as "Position Multiplier",
+            1 as "Bet Multiplier",
+            funding_fee as "Buffer Rate"
+        FROM trade_pool_pairs
+        WHERE pair_name IN ({})
+        ORDER BY pair_name;
+        """.format(','.join([f"'{pair}'" for pair in matching_pairs]))
         
+        df = pd.read_sql(query, ENGINE)
+        
+        # Convert columns to proper data types
+        df["Base Rate"] = df["Base Rate"] / 100.0  # Convert to decimal (e.g., 0.1 -> 0.001)
+        df["Rate Multiplier"] = df["Rate Multiplier"].astype(int)
+        df["Rate Exponent"] = df["Rate Exponent"].astype(int) 
+        df["Position Multiplier"] = df["Position Multiplier"].astype(int)
+        df["Bet Multiplier"] = df["Bet Multiplier"].astype(int)
+        df["Buffer Rate"] = df["Buffer Rate"].astype(float)
+        
+        st.success(f"✅ Successfully loaded {len(df)} matching pairs from database")
+        if len(df) > 0:
+            st.info(f"📊 Matched pairs: {', '.join(df['Pair'].tolist())}")
+        else:
+            st.warning("⚠️ No matching pairs found between traditional spreads and profit-share parameters")
+        
+        return df
+    
     except Exception as e:
         st.error(f"❌ Error fetching profit share data from database: {str(e)}")
         st.info("🔄 Falling back to mock data")
