@@ -38,7 +38,38 @@ def fetch_metabase_data():
             st.warning("Metabase configuration not found in secrets. Using mock data.")
             return get_mock_traditional_data()
         
-        # Option 1: Direct API call (if you have API endpoint)
+        # Direct database connection
+        if "host" in metabase_config:
+            import psycopg2
+            import sqlalchemy
+            
+            # Create connection string
+            connection_string = f"postgresql://{metabase_config['user']}:{metabase_config['password']}@{metabase_config['host']}:{metabase_config['port']}/{metabase_config['database']}"
+            
+            engine = sqlalchemy.create_engine(connection_string)
+            
+            # Exact Metabase query for small volume fees
+            query = """
+            -- Spreads table with columns: Pair name, volume 1k, volume 5k, volume 10k, volume 20k
+            SELECT 
+                pair_name,
+                MAX(CASE WHEN amount::numeric = 1000 THEN fee::numeric * 10000 END) AS "1k",
+                MAX(CASE WHEN amount::numeric = 5000 THEN fee::numeric * 10000 END) AS "5k",
+                MAX(CASE WHEN amount::numeric = 10000 THEN fee::numeric * 10000 END) AS "10k",
+                MAX(CASE WHEN amount::numeric = 20000 THEN fee::numeric * 10000 END) AS "20k"
+            FROM oracle_exchange_spread 
+            WHERE source = 'binanceFuture'
+                AND time_group = (SELECT MAX(time_group) FROM oracle_exchange_spread)
+                AND amount::numeric IN (1000, 5000, 10000, 20000)
+            GROUP BY pair_name
+            ORDER BY pair_name;
+            """
+            
+            df = pd.read_sql(query, engine)
+            st.success(f"✅ Successfully loaded {len(df)} pairs from database (latest time_group)")
+            return df
+        
+        # Fallback to API if database connection fails
         if "api_url" in metabase_config:
             headers = {
                 "Authorization": f"Bearer {metabase_config.get('api_key', '')}",
@@ -48,23 +79,9 @@ def fetch_metabase_data():
             if response.status_code == 200:
                 return pd.DataFrame(response.json())
         
-        # Option 2: Database connection (if you have direct DB access)
-        if "database_url" in metabase_config:
-            import psycopg2
-            import sqlalchemy
-            
-            engine = sqlalchemy.create_engine(metabase_config["database_url"])
-            query = """
-            SELECT pair_name, "1k", "5k", "10k", "20k" 
-            FROM small_volume_fee_table
-            """
-            return pd.read_sql(query, engine)
-        
-        # Option 3: Web scraping (if needed)
-        # This would require additional setup based on your Metabase structure
-        
     except Exception as e:
-        st.error(f"Error fetching Metabase data: {str(e)}")
+        st.error(f"❌ Error fetching Metabase data: {str(e)}")
+        st.info("🔄 Falling back to mock data")
         return get_mock_traditional_data()
     
     return get_mock_traditional_data()
@@ -344,15 +361,45 @@ def main():
     # Visualizations
     st.subheader("📊 Visualizations")
     
-    # Chart 1: Fee comparison by price move
+    # Chart 1: Fee comparison by price move with traditional fee overlay
     fig1 = px.line(
         filtered_df,
         x='Price Move (%)',
         y='Profit Share Fee ($)',
         color='Pair',
         facet_col='Volume',
-        title="Profit Share Fees by Price Move"
+        title="Profit Share Fees vs Traditional Fees by Price Move"
     )
+    
+    # Add traditional fee as horizontal lines for each pair and volume
+    for pair in selected_pairs:
+        for i, volume in enumerate(['1k', '5k', '10k', '20k']):
+            if volume in selected_volumes:
+                # Get traditional fee for this pair and volume
+                pair_data = filtered_df[(filtered_df['Pair'] == pair) & (filtered_df['Volume'] == volume)]
+                if not pair_data.empty:
+                    traditional_fee = pair_data['Traditional Fee ($)'].iloc[0]
+                    
+                    # Add horizontal line for traditional fee
+                    fig1.add_hline(
+                        y=traditional_fee,
+                        line_dash="solid",
+                        line_color="black",
+                        line_width=2,
+                        opacity=0.8,
+                        col=i+1,  # Column index for facet
+                        annotation_text=f"{pair} Traditional: ${traditional_fee:.3f}",
+                        annotation_position="top right",
+                        annotation_font_size=8
+                    )
+    
+    # Update layout for better visibility
+    fig1.update_layout(
+        showlegend=True,
+        height=600,
+        title_text="Profit Share Fees vs Traditional Fees by Price Move<br><sub>Black lines show traditional fees (constant regardless of price move)</sub>"
+    )
+    
     st.plotly_chart(fig1, use_container_width=True)
     
     # Chart 2: Difference heatmap
