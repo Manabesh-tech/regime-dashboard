@@ -143,7 +143,7 @@ def fetch_streamlit_data():
         df = pd.read_sql(query, ENGINE)
         
         # Convert columns to proper data types
-        df["Base Rate"] = df["Base Rate"] / 100.0  # Convert to decimal (e.g., 0.1 -> 0.001)
+        df["Base Rate"] = df["Base Rate"]  # Convert to decimal (e.g., 0.1 -> 0.001)
         df["Rate Multiplier"] = df["Rate Multiplier"].astype(int)
         df["Rate Exponent"] = df["Rate Exponent"].astype(int) 
         df["Position Multiplier"] = df["Position Multiplier"].astype(int)
@@ -188,17 +188,7 @@ def get_mock_profit_share_data():
     return pd.DataFrame([
         {'Pair': '1000BONK/USDT', 'Position Multiplier': 2, 'Buffer Rate': 0.049, 'Rate Multiplier': 1000, 'Rate Exponent': 1, 'Base Rate': 0.1, 'Bet Multiplier': 1},
         {'Pair': 'AAVE/USDT', 'Position Multiplier': 10, 'Buffer Rate': 0.040, 'Rate Multiplier': 1000, 'Rate Exponent': 1, 'Base Rate': 0.1, 'Bet Multiplier': 1},
-        {'Pair': 'ADA/USDT', 'Position Multiplier': 80, 'Buffer Rate': 0.040, 'Rate Multiplier': 1000, 'Rate Exponent': 1, 'Base Rate': 0.1, 'Bet Multiplier': 1},
-        {'Pair': 'AI16Z/USDT', 'Position Multiplier': 1, 'Buffer Rate': 0.056, 'Rate Multiplier': 1000, 'Rate Exponent': 1, 'Base Rate': 0.1, 'Bet Multiplier': 1},
-        {'Pair': 'ARB/USDT', 'Position Multiplier': 5, 'Buffer Rate': 0.040, 'Rate Multiplier': 1000, 'Rate Exponent': 1, 'Base Rate': 0.1, 'Bet Multiplier': 1},
-        {'Pair': 'AVAX/USDT', 'Position Multiplier': 5, 'Buffer Rate': 0.038, 'Rate Multiplier': 1000, 'Rate Exponent': 1, 'Base Rate': 0.1, 'Bet Multiplier': 1},
-        {'Pair': 'BNB/USDT', 'Position Multiplier': 80, 'Buffer Rate': 0.036, 'Rate Multiplier': 1000, 'Rate Exponent': 1, 'Base Rate': 0.1, 'Bet Multiplier': 1},
-        {'Pair': 'BTC/USDT', 'Position Multiplier': 500, 'Buffer Rate': 0.035, 'Rate Multiplier': 3000, 'Rate Exponent': 1, 'Base Rate': 0.1, 'Bet Multiplier': 1},
-        {'Pair': 'DOGE/USDT', 'Position Multiplier': 80, 'Buffer Rate': 0.037, 'Rate Multiplier': 1000, 'Rate Exponent': 1, 'Base Rate': 0.1, 'Bet Multiplier': 1},
-        {'Pair': 'ENA/USDT', 'Position Multiplier': 5, 'Buffer Rate': 0.050, 'Rate Multiplier': 1000, 'Rate Exponent': 1, 'Base Rate': 0.1, 'Bet Multiplier': 1},
-        {'Pair': 'ETH/USDT', 'Position Multiplier': 100, 'Buffer Rate': 0.035, 'Rate Multiplier': 3000, 'Rate Exponent': 1, 'Base Rate': 0.1, 'Bet Multiplier': 1},
-        {'Pair': 'FARTCOIN/USDT', 'Position Multiplier': 1, 'Buffer Rate': 0.040, 'Rate Multiplier': 1000, 'Rate Exponent': 1, 'Base Rate': 0.1, 'Bet Multiplier': 1},
-        {'Pair': 'HYPE/USDT', 'Position Multiplier': 1, 'Buffer Rate': 0.040, 'Rate Multiplier': 1000, 'Rate Exponent': 1, 'Base Rate': 0.1, 'Bet Multiplier': 1}
+
     ])
 
 def calculate_traditional_fee(basis_points, position_size):
