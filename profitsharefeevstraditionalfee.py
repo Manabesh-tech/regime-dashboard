@@ -226,39 +226,64 @@ def calculate_traditional_fee(basis_points, position_size):
 
 def calculate_profit_sharing_fee(open_price, close_price, bet_amount, params):
     """Calculate profit sharing fee using the exact formula"""
-    base_rate = params['base_rate']
-    rate_multiplier = params['rate_multiplier']
-    rate_exponent = params['rate_exponent']
-    position_multiplier = params['position_multiplier']
-    bet_multiplier = params['bet_multiplier']
-    
-    P_t = open_price
-    P_T = close_price
-    
-    price_move_pct = (P_T / P_t) - 1
-    abs_price_move_pct = abs(price_move_pct)
-    
-    # Handle zero price move case
-    if abs_price_move_pct == 0:
+    try:
+        base_rate = params['base_rate']
+        rate_multiplier = params['rate_multiplier']
+        rate_exponent = params['rate_exponent']
+        position_multiplier = params['position_multiplier']
+        bet_multiplier = params['bet_multiplier']
+        
+        P_t = float(open_price)
+        P_T = float(close_price)
+        
+        # Handle edge cases
+        if P_t == 0:
+            return 0
+        
+        price_move_pct = (P_T / P_t) - 1
+        abs_price_move_pct = abs(price_move_pct)
+        
+        # Handle zero or very small price moves
+        if abs_price_move_pct <= 1e-10:  # Very small threshold
+            return 0
+            
+        # Validate all parameters are positive
+        if rate_multiplier <= 0 or position_multiplier <= 0 or bet_amount <= 0:
+            return 0
+        
+        # Calculate exponential term with safety checks
+        try:
+            exponential_term = 1 / (abs_price_move_pct * rate_multiplier) ** rate_exponent
+        except (ZeroDivisionError, OverflowError):
+            exponential_term = 0
+        
+        # Calculate position term with safety checks
+        try:
+            position_term = (bet_amount * bet_multiplier) / (10**6 * abs_price_move_pct * position_multiplier)
+        except (ZeroDivisionError, OverflowError):
+            position_term = 0
+        
+        # Calculate profit sharing fraction
+        denominator = 1 + exponential_term + position_term
+        if denominator == 0:
+            return 0
+            
+        profit_share_fraction = (1 - base_rate) / denominator
+        
+        # Calculate P_close
+        P_close = P_t + profit_share_fraction * (P_T - P_t)
+        
+        # Calculate fee
+        fee_charged_points = (P_T - P_close)
+        fee_charged_dollars = (fee_charged_points * bet_amount * bet_multiplier) / 100
+        
+        return max(0, fee_charged_dollars)  # Ensure non-negative
+        
+    except Exception as e:
+        st.error(f"Error in profit sharing calculation: {str(e)}")
+        st.error(f"Parameters: open_price={open_price}, close_price={close_price}, bet_amount={bet_amount}")
+        st.error(f"Params: {params}")
         return 0
-    
-    # Calculate exponential term
-    exponential_term = 1 / (abs_price_move_pct * rate_multiplier) ** rate_exponent
-    
-    # Calculate position term
-    position_term = (bet_amount * bet_multiplier) / (10**6 * abs_price_move_pct * position_multiplier)
-    
-    # Calculate profit sharing fraction
-    profit_share_fraction = (1 - base_rate) / (1 + exponential_term + position_term)
-    
-    # Calculate P_close
-    P_close = P_t + profit_share_fraction * (P_T - P_t)
-    
-    # Calculate fee
-    fee_charged_points = (P_T - P_close)
-    fee_charged_dollars = (fee_charged_points * bet_amount * bet_multiplier) / 100
-    
-    return fee_charged_dollars
 
 def create_comparison_table(traditional_data, profit_share_data):
     """Create comprehensive comparison table"""
