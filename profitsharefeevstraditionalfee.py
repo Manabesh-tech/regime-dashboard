@@ -7,6 +7,7 @@ from datetime import datetime
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from sqlalchemy import create_engine
 
 # Configure page
 st.set_page_config(
@@ -32,42 +33,57 @@ def fetch_metabase_data():
     """Fetch traditional spreads from Metabase"""
     try:
         # Get database connection details from secrets
-        metabase_config = st.secrets.get("metabase", {})
-        
-        if not metabase_config:
-            st.warning("Metabase configuration not found in secrets. Using mock data.")
-            return get_mock_traditional_data()
-        
-        # Direct database connection
-        if "host" in metabase_config:
-            import psycopg2
-            import sqlalchemy
-            
+        # metabase_config = st.secrets.get("metabase", {})
+        #
+        # if not metabase_config:
+        #     st.warning("Metabase configuration not found in secrets. Using mock data.")
+        #     return get_mock_traditional_data()
+        #
+        # # Direct database connection
+        # if "host" in metabase_config:
+        #     import psycopg2
+        #     import sqlalchemy
+        #
             # Create connection string
-            connection_string = f"postgresql://{metabase_config['user']}:{metabase_config['password']}@{metabase_config['host']}:{metabase_config['port']}/{metabase_config['database']}"
-            
-            engine = sqlalchemy.create_engine(connection_string)
-            
-            # Exact Metabase query for small volume fees
-            query = """
-            -- Spreads table with columns: Pair name, volume 1k, volume 5k, volume 10k, volume 20k
-            SELECT 
-                pair_name,
-                MAX(CASE WHEN amount::numeric = 1000 THEN fee::numeric * 10000 END) AS "1k",
-                MAX(CASE WHEN amount::numeric = 5000 THEN fee::numeric * 10000 END) AS "5k",
-                MAX(CASE WHEN amount::numeric = 10000 THEN fee::numeric * 10000 END) AS "10k",
-                MAX(CASE WHEN amount::numeric = 20000 THEN fee::numeric * 10000 END) AS "20k"
-            FROM oracle_exchange_spread 
-            WHERE source = 'binanceFuture'
-                AND time_group = (SELECT MAX(time_group) FROM oracle_exchange_spread)
-                AND amount::numeric IN (1000, 5000, 10000, 20000)
-            GROUP BY pair_name
-            ORDER BY pair_name;
-            """
-            
-            df = pd.read_sql(query, engine)
-            st.success(f"✅ Successfully loaded {len(df)} pairs from database (latest time_group)")
-            return df
+        db_params = {
+            'host': 'aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com',
+            'port': 5432,
+            'database': 'replication_report',
+            'user': 'public_replication',
+            'password': '866^FKC4hllk'
+        }
+
+        engine = create_engine(
+            f"postgresql://{db_params['user']}:{db_params['password']}@{db_params['host']}:{db_params['port']}/{db_params['database']}",
+            isolation_level="AUTOCOMMIT",  # 设置自动提交模式
+            pool_size=5,  # 连接池大小
+            max_overflow=10,  # 最大溢出连接数
+            pool_timeout=30,  # 连接超时时间
+            pool_recycle=1800,  # 连接回收时间(30分钟)
+            pool_pre_ping=True,  # 使用连接前先测试连接是否有效
+            pool_use_lifo=True,  # 使用后进先出,减少空闲连接
+            echo=False  # 不打印 SQL 语句
+        )
+        # Exact Metabase query for small volume fees
+        query = """
+        -- Spreads table with columns: Pair name, volume 1k, volume 5k, volume 10k, volume 20k
+        SELECT 
+            pair_name,
+            MAX(CASE WHEN amount::numeric = 1000 THEN fee::numeric * 10000 END) AS "1k",
+            MAX(CASE WHEN amount::numeric = 5000 THEN fee::numeric * 10000 END) AS "5k",
+            MAX(CASE WHEN amount::numeric = 10000 THEN fee::numeric * 10000 END) AS "10k",
+            MAX(CASE WHEN amount::numeric = 20000 THEN fee::numeric * 10000 END) AS "20k"
+        FROM oracle_exchange_spread 
+        WHERE source = 'binanceFuture'
+            AND time_group = (SELECT MAX(time_group) FROM oracle_exchange_spread)
+            AND amount::numeric IN (1000, 5000, 10000, 20000)
+        GROUP BY pair_name
+        ORDER BY pair_name;
+        """
+
+        df = pd.read_sql(query, engine)
+        st.success(f"✅ Successfully loaded {len(df)} pairs from database (latest time_group)")
+        return df
         
         # Fallback to API if database connection fails
         if "api_url" in metabase_config:
