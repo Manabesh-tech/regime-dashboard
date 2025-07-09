@@ -294,7 +294,7 @@ def create_comparison_table(traditional_data, profit_share_data):
                 close_price = 100 * (1 + price_move / 100)
                 profit_share_fee = calculate_profit_sharing_fee(100, close_price, bet_amount, ps_params)
                 
-                difference = profit_share_fee - traditional_fee
+                difference = profit_share_fee - traditional_fee*2
                 is_ps_more_expensive = difference > 0
                 
                 results.append({
@@ -302,7 +302,7 @@ def create_comparison_table(traditional_data, profit_share_data):
                     'Volume': volume,
                     'Position Size': position_size,
                     'Price Move (%)': price_move,
-                    'Traditional Fee ($)': traditional_fee,
+                    'Traditional Fee ($)': traditional_fee*2,
                     'Profit Share Fee ($)': profit_share_fee,
                     'Difference ($)': difference,
                     'PS More Expensive': is_ps_more_expensive,
