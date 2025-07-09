@@ -361,7 +361,7 @@ def main():
         selected_pairs = st.multiselect(
             "Select Pairs", 
             options=comparison_df['Pair'].unique(),
-            default=comparison_df['Pair'].unique()[:5]  # Default to first 5
+            default=comparison_df['Pair'].unique()  # Default to first 5
         )
     
     with col2:
