@@ -7,6 +7,29 @@ from datetime import datetime
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from sqlalchemy import create_engine
+
+# 全局数据库连接参数
+DB_PARAMS = {
+    'host': 'aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com',
+    'port': 5432,
+    'database': 'replication_report',
+    'user': 'public_replication',
+    'password': '866^FKC4hllk'
+}
+
+# 全局engine
+ENGINE = create_engine(
+    f"postgresql://{DB_PARAMS['user']}:{DB_PARAMS['password']}@{DB_PARAMS['host']}:{DB_PARAMS['port']}/{DB_PARAMS['database']}",
+    isolation_level="AUTOCOMMIT",
+    pool_size=5,
+    max_overflow=10,
+    pool_timeout=30,
+    pool_recycle=1800,
+    pool_pre_ping=True,
+    pool_use_lifo=True,
+    echo=False
+)
 
 # Configure page
 st.set_page_config(
@@ -27,162 +50,102 @@ volume_levels = ['1k', '5k', '10k', '20k']
 volume_amounts = {'1k': 1000, '5k': 5000, '10k': 10000, '20k': 20000}
 
 # Functions
-@st.cache_data(ttl=300)  # Cache for 5 minutes
+@st.cache_data(ttl=300)
 def fetch_metabase_data():
     """Fetch traditional spreads from Metabase"""
     try:
-        # Get database connection details from secrets
-        metabase_config = st.secrets.get("metabase", {})
-        
-        if not metabase_config:
-            st.warning("Metabase configuration not found in secrets. Using mock data.")
-            return get_mock_traditional_data()
-        
-        # Direct database connection
-        if "host" in metabase_config:
-            import psycopg2
-            import sqlalchemy
-            
-            # Create connection string
-            connection_string = f"postgresql://{metabase_config['user']}:{metabase_config['password']}@{metabase_config['host']}:{metabase_config['port']}/{metabase_config['database']}"
-            
-            engine = sqlalchemy.create_engine(connection_string)
-            
-            # Exact Metabase query for small volume fees
-            query = """
-            -- Spreads table with columns: Pair name, volume 1k, volume 5k, volume 10k, volume 20k
-            SELECT 
-                pair_name,
-                MAX(CASE WHEN amount::numeric = 1000 THEN fee::numeric * 10000 END) AS "1k",
-                MAX(CASE WHEN amount::numeric = 5000 THEN fee::numeric * 10000 END) AS "5k",
-                MAX(CASE WHEN amount::numeric = 10000 THEN fee::numeric * 10000 END) AS "10k",
-                MAX(CASE WHEN amount::numeric = 20000 THEN fee::numeric * 10000 END) AS "20k"
-            FROM oracle_exchange_spread 
-            WHERE source = 'binanceFuture'
-                AND time_group = (SELECT MAX(time_group) FROM oracle_exchange_spread)
-                AND amount::numeric IN (1000, 5000, 10000, 20000)
-            GROUP BY pair_name
-            ORDER BY pair_name;
-            """
-            
-            df = pd.read_sql(query, engine)
-            st.success(f"✅ Successfully loaded {len(df)} pairs from database (latest time_group)")
-            return df
-        
-        # Fallback to API if database connection fails
-        if "api_url" in metabase_config:
-            headers = {
-                "Authorization": f"Bearer {metabase_config.get('api_key', '')}",
-                "Content-Type": "application/json"
-            }
-            response = requests.get(metabase_config["api_url"], headers=headers)
-            if response.status_code == 200:
-                return pd.DataFrame(response.json())
-        
+        query = """
+        SELECT 
+            pair_name,
+            MAX(CASE WHEN amount::numeric = 1000 THEN fee::numeric * 10000 END) AS "1k",
+            MAX(CASE WHEN amount::numeric = 5000 THEN fee::numeric * 10000 END) AS "5k",
+            MAX(CASE WHEN amount::numeric = 10000 THEN fee::numeric * 10000 END) AS "10k",
+            MAX(CASE WHEN amount::numeric = 20000 THEN fee::numeric * 10000 END) AS "20k"
+        FROM oracle_exchange_spread 
+        WHERE source = 'binanceFuture'
+            AND time_group = (SELECT MAX(time_group) FROM oracle_exchange_spread)
+            AND amount::numeric IN (1000, 5000, 10000, 20000)
+        GROUP BY pair_name
+        ORDER BY pair_name;
+        """
+        df = pd.read_sql(query, ENGINE)
+        st.success(f"✅ Successfully loaded {len(df)} pairs from database (latest time_group)")
+        return df
     except Exception as e:
         st.error(f"❌ Error fetching Metabase data: {str(e)}")
         st.info("🔄 Falling back to mock data")
         return get_mock_traditional_data()
-    
-    return get_mock_traditional_data()
 
 @st.cache_data(ttl=300)
 def fetch_streamlit_data():
     """Fetch profit share parameters from database"""
     try:
-        # Get database connection details from secrets
-        metabase_config = st.secrets.get("metabase", {})
+        spreads_query = """
+        SELECT DISTINCT pair_name
+        FROM oracle_exchange_spread 
+        WHERE source = 'binanceFuture'
+            AND time_group = (SELECT MAX(time_group) FROM oracle_exchange_spread)
+        ORDER BY pair_name
+        """
+        spreads_pairs_df = pd.read_sql(spreads_query, ENGINE)
+        spreads_pairs = spreads_pairs_df['pair_name'].tolist()
         
-        if not metabase_config:
-            st.warning("Metabase configuration not found in secrets. Using mock data.")
+        st.info(f"🔍 Traditional pairs found: {len(spreads_pairs)}")
+        st.info(f"📋 First 10 traditional pairs: {spreads_pairs[:10]}")
+        
+        profit_pairs_query = """
+        SELECT DISTINCT pair_name 
+        FROM trade_pool_pairs where status in (1,2)
+        ORDER BY pair_name
+        """
+        profit_pairs_df = pd.read_sql(profit_pairs_query, ENGINE)
+        profit_pairs = profit_pairs_df['pair_name'].tolist()
+        
+        st.info(f"🔍 Profit-share pairs found: {len(profit_pairs)}")
+        st.info(f"📋 First 10 profit-share pairs: {profit_pairs[:10]}")
+        
+        matching_pairs = list(set(spreads_pairs).intersection(set(profit_pairs)))
+        st.info(f"🎯 Matching pairs: {len(matching_pairs)}")
+        st.info(f"📋 Matching pairs: {matching_pairs[:10] if len(matching_pairs) > 10 else matching_pairs}")
+        
+        if len(matching_pairs) == 0:
+            st.error("❌ No matching pairs found - this shouldn't happen!")
             return get_mock_profit_share_data()
         
-        # Direct database connection
-        if "host" in metabase_config:
-            import psycopg2
-            import sqlalchemy
-            
-            # Create connection string
-            connection_string = f"postgresql://{metabase_config['user']}:{metabase_config['password']}@{metabase_config['host']}:{metabase_config['port']}/{metabase_config['database']}"
-            
-            engine = sqlalchemy.create_engine(connection_string)
-            
-            # First get the traditional spreads pair names to match against
-            spreads_query = """
-            SELECT DISTINCT pair_name
-            FROM oracle_exchange_spread 
-            WHERE source = 'binanceFuture'
-                AND time_group = (SELECT MAX(time_group) FROM oracle_exchange_spread)
-            ORDER BY pair_name
-            """
-            spreads_pairs_df = pd.read_sql(spreads_query, engine)
-            spreads_pairs = spreads_pairs_df['pair_name'].tolist()
-            
-            # DEBUG: Show traditional pairs
-            st.info(f"🔍 Traditional pairs found: {len(spreads_pairs)}")
-            st.info(f"📋 First 10 traditional pairs: {spreads_pairs[:10]}")
-            
-            # Get profit-share pairs (remove created_at filter)
-            profit_pairs_query = """
-            SELECT DISTINCT pair_name 
-            FROM trade_pool_pairs 
-            ORDER BY pair_name
-            """
-            profit_pairs_df = pd.read_sql(profit_pairs_query, engine)
-            profit_pairs = profit_pairs_df['pair_name'].tolist()
-            
-            # DEBUG: Show profit-share pairs
-            st.info(f"🔍 Profit-share pairs found: {len(profit_pairs)}")
-            st.info(f"📋 First 10 profit-share pairs: {profit_pairs[:10]}")
-            
-            # Find matching pairs
-            matching_pairs = list(set(spreads_pairs).intersection(set(profit_pairs)))
-            st.info(f"🎯 Matching pairs: {len(matching_pairs)}")
-            st.info(f"📋 Matching pairs: {matching_pairs[:10] if len(matching_pairs) > 10 else matching_pairs}")
-            
-            if len(matching_pairs) == 0:
-                st.error("❌ No matching pairs found - this shouldn't happen!")
-                return get_mock_profit_share_data()
-            
-            # Now get profit share parameters ONLY for matching pairs (remove created_at filter)
-            query = """
-            SELECT 
-                pair_name as "Pair",
-                pnl_base_rate as "Base Rate",
-                rate_multiplier as "Rate Multiplier", 
-                rate_exponent as "Rate Exponent",
-                position_multiplier as "Position Multiplier",
-                1 as "Bet Multiplier",
-                funding_fee as "Buffer Rate"
-            FROM trade_pool_pairs
-            WHERE pair_name IN ({})
-            ORDER BY pair_name;
-            """.format(','.join([f"'{pair}'" for pair in matching_pairs]))
-            
-            df = pd.read_sql(query, engine)
-            
-            # Convert columns to proper data types
-            df["Base Rate"] = df["Base Rate"] / 100.0  # Convert to decimal (e.g., 0.1 -> 0.001)
-            df["Rate Multiplier"] = df["Rate Multiplier"].astype(int)
-            df["Rate Exponent"] = df["Rate Exponent"].astype(int) 
-            df["Position Multiplier"] = df["Position Multiplier"].astype(int)
-            df["Bet Multiplier"] = df["Bet Multiplier"].astype(int)
-            df["Buffer Rate"] = df["Buffer Rate"].astype(float)
-            
-            st.success(f"✅ Successfully loaded {len(df)} matching pairs from database")
-            if len(df) > 0:
-                st.info(f"📊 Matched pairs: {', '.join(df['Pair'].tolist())}")
-            else:
-                st.warning("⚠️ No matching pairs found between traditional spreads and profit-share parameters")
-            
-            return df
+        query = """
+        SELECT 
+            pair_name as "Pair",
+            pnl_base_rate as "Base Rate",
+            rate_multiplier as "Rate Multiplier", 
+            rate_exponent as "Rate Exponent",
+            position_multiplier as "Position Multiplier",
+            1 as "Bet Multiplier",
+            funding_fee as "Buffer Rate"
+        FROM trade_pool_pairs
+        WHERE pair_name IN ({})
+        ORDER BY pair_name;
+        """.format(','.join([f"'{pair}'" for pair in matching_pairs]))
         
+        df = pd.read_sql(query, ENGINE)
+        
+        df["Base Rate"] = df["Base Rate"]
+        df["Rate Multiplier"] = df["Rate Multiplier"].astype(int)
+        df["Rate Exponent"] = df["Rate Exponent"].astype(int) 
+        df["Position Multiplier"] = df["Position Multiplier"].astype(int)
+        df["Bet Multiplier"] = df["Bet Multiplier"].astype(int)
+        df["Buffer Rate"] = df["Buffer Rate"].astype(float)
+        
+        st.success(f"✅ Successfully loaded {len(df)} matching pairs from database")
+        if len(df) > 0:
+            st.info(f"📊 Matched pairs: {', '.join(df['Pair'].tolist())}")
+        else:
+            st.warning("⚠️ No matching pairs found between traditional spreads and profit-share parameters")
+        
+        return df
     except Exception as e:
         st.error(f"❌ Error fetching profit share data from database: {str(e)}")
         st.info("🔄 Falling back to mock data")
         return get_mock_profit_share_data()
-    
-    return get_mock_profit_share_data()
 
 def get_mock_traditional_data():
     """Mock traditional spread data based on screenshots"""
@@ -207,17 +170,6 @@ def get_mock_profit_share_data():
     return pd.DataFrame([
         {'Pair': '1000BONK/USDT', 'Position Multiplier': 2, 'Buffer Rate': 0.049, 'Rate Multiplier': 1000, 'Rate Exponent': 1, 'Base Rate': 0.1, 'Bet Multiplier': 1},
         {'Pair': 'AAVE/USDT', 'Position Multiplier': 10, 'Buffer Rate': 0.040, 'Rate Multiplier': 1000, 'Rate Exponent': 1, 'Base Rate': 0.1, 'Bet Multiplier': 1},
-        {'Pair': 'ADA/USDT', 'Position Multiplier': 80, 'Buffer Rate': 0.040, 'Rate Multiplier': 1000, 'Rate Exponent': 1, 'Base Rate': 0.1, 'Bet Multiplier': 1},
-        {'Pair': 'AI16Z/USDT', 'Position Multiplier': 1, 'Buffer Rate': 0.056, 'Rate Multiplier': 1000, 'Rate Exponent': 1, 'Base Rate': 0.1, 'Bet Multiplier': 1},
-        {'Pair': 'ARB/USDT', 'Position Multiplier': 5, 'Buffer Rate': 0.040, 'Rate Multiplier': 1000, 'Rate Exponent': 1, 'Base Rate': 0.1, 'Bet Multiplier': 1},
-        {'Pair': 'AVAX/USDT', 'Position Multiplier': 5, 'Buffer Rate': 0.038, 'Rate Multiplier': 1000, 'Rate Exponent': 1, 'Base Rate': 0.1, 'Bet Multiplier': 1},
-        {'Pair': 'BNB/USDT', 'Position Multiplier': 80, 'Buffer Rate': 0.036, 'Rate Multiplier': 1000, 'Rate Exponent': 1, 'Base Rate': 0.1, 'Bet Multiplier': 1},
-        {'Pair': 'BTC/USDT', 'Position Multiplier': 500, 'Buffer Rate': 0.035, 'Rate Multiplier': 3000, 'Rate Exponent': 1, 'Base Rate': 0.1, 'Bet Multiplier': 1},
-        {'Pair': 'DOGE/USDT', 'Position Multiplier': 80, 'Buffer Rate': 0.037, 'Rate Multiplier': 1000, 'Rate Exponent': 1, 'Base Rate': 0.1, 'Bet Multiplier': 1},
-        {'Pair': 'ENA/USDT', 'Position Multiplier': 5, 'Buffer Rate': 0.050, 'Rate Multiplier': 1000, 'Rate Exponent': 1, 'Base Rate': 0.1, 'Bet Multiplier': 1},
-        {'Pair': 'ETH/USDT', 'Position Multiplier': 100, 'Buffer Rate': 0.035, 'Rate Multiplier': 3000, 'Rate Exponent': 1, 'Base Rate': 0.1, 'Bet Multiplier': 1},
-        {'Pair': 'FARTCOIN/USDT', 'Position Multiplier': 1, 'Buffer Rate': 0.040, 'Rate Multiplier': 1000, 'Rate Exponent': 1, 'Base Rate': 0.1, 'Bet Multiplier': 1},
-        {'Pair': 'HYPE/USDT', 'Position Multiplier': 1, 'Buffer Rate': 0.040, 'Rate Multiplier': 1000, 'Rate Exponent': 1, 'Base Rate': 0.1, 'Bet Multiplier': 1}
     ])
 
 def calculate_traditional_fee(basis_points, position_size):
@@ -225,85 +177,58 @@ def calculate_traditional_fee(basis_points, position_size):
     return (basis_points / 10000) * position_size
 
 def calculate_profit_sharing_fee(open_price, close_price, bet_amount, params):
-    """Calculate profit sharing fee using the exact formula with robust error handling"""
+    """Calculate profit sharing fee using the exact formula"""
     try:
-        # Extract parameters with defaults
-        base_rate = float(params.get('base_rate', 0.1))
-        rate_multiplier = float(params.get('rate_multiplier', 1000))
-        rate_exponent = float(params.get('rate_exponent', 1))
-        position_multiplier = float(params.get('position_multiplier', 200))
-        bet_multiplier = float(params.get('bet_multiplier', 1))
+        base_rate = params['base_rate']
+        rate_multiplier = params['rate_multiplier']
+        rate_exponent = params['rate_exponent']
+        position_multiplier = params['position_multiplier']
+        bet_multiplier = params['bet_multiplier']
         
         P_t = float(open_price)
         P_T = float(close_price)
-        bet_amount = float(bet_amount)
         
-        # Handle edge cases
-        if P_t <= 0:
-            st.warning(f"Invalid open price: {P_t}")
+        if P_t == 0:
             return 0
         
         price_move_pct = (P_T / P_t) - 1
         abs_price_move_pct = abs(price_move_pct)
         
-        # Handle zero or very small price moves
         if abs_price_move_pct <= 1e-10:
             return 0
             
-        # Validate all parameters are positive
         if rate_multiplier <= 0 or position_multiplier <= 0 or bet_amount <= 0:
-            st.warning(f"Invalid parameters: rate_multiplier={rate_multiplier}, position_multiplier={position_multiplier}, bet_amount={bet_amount}")
             return 0
         
-        # Calculate exponential term with safety checks
         try:
-            exponential_base = abs_price_move_pct * rate_multiplier
-            if exponential_base <= 0:
-                exponential_term = float('inf')
-            else:
-                exponential_term = 1 / (exponential_base ** rate_exponent)
-        except (ZeroDivisionError, OverflowError, ValueError):
+            exponential_term = 1 / (abs_price_move_pct * rate_multiplier) ** rate_exponent
+        except (ZeroDivisionError, OverflowError):
             exponential_term = 0
         
-        # Calculate position term with safety checks
         try:
-            position_denominator = 10**6 * abs_price_move_pct * position_multiplier
-            if position_denominator <= 0:
-                position_term = 0
-            else:
-                position_term = (bet_amount * bet_multiplier) / position_denominator
-        except (ZeroDivisionError, OverflowError, ValueError):
+            position_term = (bet_amount * bet_multiplier) / (10**6 * abs_price_move_pct * position_multiplier)
+        except (ZeroDivisionError, OverflowError):
             position_term = 0
         
-        # Calculate profit sharing fraction
         denominator = 1 + exponential_term + position_term
-        if denominator <= 0 or not np.isfinite(denominator):
+        if denominator == 0:
             return 0
             
         profit_share_fraction = (1 - base_rate) / denominator
         
-        # Calculate P_close
         P_close = P_t + profit_share_fraction * (P_T - P_t)
         
-        # Calculate fee
         fee_charged_points = (P_T - P_close)
         fee_charged_dollars = (fee_charged_points * bet_amount * bet_multiplier) / 100
         
-        # Ensure result is finite and non-negative
-        if not np.isfinite(fee_charged_dollars):
-            return 0
-            
         return max(0, fee_charged_dollars)
         
     except Exception as e:
-        st.error(f"❌ Error in profit sharing calculation: {str(e)}")
-        st.error(f"📊 Parameters: open_price={open_price}, close_price={close_price}, bet_amount={bet_amount}")
-        st.error(f"🔧 Params: {params}")
+        st.error(f"Error in profit sharing calculation: {str(e)}")
         return 0
 
 def create_comparison_table(traditional_data, profit_share_data):
     """Create comprehensive comparison table"""
-    # Merge datasets
     merged_data = traditional_data.merge(
         profit_share_data, 
         left_on='pair_name', 
@@ -320,7 +245,6 @@ def create_comparison_table(traditional_data, profit_share_data):
     for _, row in merged_data.iterrows():
         pair_name = row['pair_name']
         
-        # Profit share parameters
         ps_params = {
             'base_rate': row.get('Base Rate', 0.1),
             'rate_multiplier': row.get('Rate Multiplier', 1000),
@@ -331,8 +255,8 @@ def create_comparison_table(traditional_data, profit_share_data):
         
         for volume in volume_levels:
             position_size = volume_amounts[volume]
-            traditional_spread = row[volume]
-            traditional_fee = calculate_traditional_fee(traditional_spread, position_size)
+            traditional_spread = row[volume] + 10
+            traditional_fee = calculate_traditional_fee(traditional_spread, position_size) * 2
             bet_amount = position_size / ps_params['bet_multiplier']
             
             for price_move in price_moves:
@@ -356,58 +280,12 @@ def create_comparison_table(traditional_data, profit_share_data):
     
     return pd.DataFrame(results)
 
-# Main app
-def main():
-    # Sidebar options
-    refresh_data = st.sidebar.button("🔄 Refresh Data")
-    show_raw_data = st.sidebar.checkbox("Show Raw Data", value=False)
-    
-    # Load data
-    if refresh_data or 'traditional_data' not in st.session_state:
-        with st.spinner("Loading data..."):
-            st.session_state.traditional_data = fetch_metabase_data()
-            st.session_state.profit_share_data = fetch_streamlit_data()
-    
-    traditional_data = st.session_state.traditional_data
-    profit_share_data = st.session_state.profit_share_data
-    
-    # Data status
-    col1, col2 = st.columns(2)
-    with col1:
-        st.metric("Traditional Spreads", f"{len(traditional_data)} pairs")
-    with col2:
-        st.metric("Profit Share Parameters", f"{len(profit_share_data)} pairs")
-    
-    # Show raw data if requested
-    if show_raw_data:
-        st.subheader("Raw Data")
-        tab1, tab2 = st.tabs(["Traditional Spreads", "Profit Share Parameters"])
-        
-        with tab1:
-            st.dataframe(traditional_data)
-        
-        with tab2:
-            st.dataframe(profit_share_data)
-    
-    # Create main tabs
-    tab1, tab2, tab3 = st.tabs(["📊 Overview Analysis", "🔍 Pair-Specific Analysis", "⚖️ Breakeven Analysis"])
-    
-    with tab1:
-        # Existing overview analysis
-        show_overview_analysis(comparison_df)
-    
-    with tab2:
-        # New pair-specific analysis
-        show_pair_specific_analysis(comparison_df)
-    
-    with tab3:
-        # New breakeven analysis
-        show_breakeven_analysis(traditional_data, profit_share_data)
-
 def show_overview_analysis(comparison_df):
     """Show the existing overview analysis"""
-    
-    # Filter options
+    if comparison_df.empty:
+        st.error("No data available for analysis")
+        return
+        
     st.subheader("🔍 Filters")
     col1, col2, col3 = st.columns(3)
     
@@ -415,31 +293,36 @@ def show_overview_analysis(comparison_df):
         selected_pairs = st.multiselect(
             "Select Pairs", 
             options=comparison_df['Pair'].unique(),
-            default=comparison_df['Pair'].unique()[:5]  # Default to first 5
+            default=list(comparison_df['Pair'].unique())[:5],
+            key="overview_pairs"
         )
     
     with col2:
         selected_volumes = st.multiselect(
             "Select Volumes",
             options=volume_levels,
-            default=volume_levels
+            default=volume_levels,
+            key="overview_volumes"
         )
     
     with col3:
         selected_moves = st.multiselect(
             "Select Price Moves (%)",
             options=price_moves,
-            default=price_moves
+            default=price_moves,
+            key="overview_moves"
         )
     
-    # Filter data
     filtered_df = comparison_df[
         (comparison_df['Pair'].isin(selected_pairs)) &
         (comparison_df['Volume'].isin(selected_volumes)) &
         (comparison_df['Price Move (%)'].isin(selected_moves))
     ]
     
-    # Summary metrics
+    if filtered_df.empty:
+        st.warning("No data matches the selected filters")
+        return
+    
     st.subheader("📈 Summary")
     col1, col2, col3, col4 = st.columns(4)
     
@@ -459,25 +342,15 @@ def show_overview_analysis(comparison_df):
         avg_diff = filtered_df['Difference ($)'].mean()
         st.metric("Avg Difference", f"${avg_diff:.3f}")
     
-    # Detailed comparison table
     st.subheader("📋 Detailed Comparison")
-    
-    # Format the dataframe for display
     display_df = filtered_df.copy()
     display_df['Traditional Fee ($)'] = display_df['Traditional Fee ($)'].apply(lambda x: f"${x:.3f}")
     display_df['Profit Share Fee ($)'] = display_df['Profit Share Fee ($)'].apply(lambda x: f"${x:.3f}")
     display_df['Difference ($)'] = display_df['Difference ($)'].apply(lambda x: f"${x:.3f}")
     
-    st.dataframe(
-        display_df,
-        use_container_width=True,
-        hide_index=True
-    )
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
     
-    # Visualizations
     st.subheader("📊 Visualizations")
-    
-    # Chart 1: Fee comparison by price move with traditional fee overlay
     fig1 = px.line(
         filtered_df,
         x='Price Move (%)',
@@ -487,29 +360,25 @@ def show_overview_analysis(comparison_df):
         title="Profit Share Fees vs Traditional Fees by Price Move"
     )
     
-    # Add traditional fee as horizontal lines for each pair and volume
     for pair in selected_pairs:
         for i, volume in enumerate(['1k', '5k', '10k', '20k']):
             if volume in selected_volumes:
-                # Get traditional fee for this pair and volume
                 pair_data = filtered_df[(filtered_df['Pair'] == pair) & (filtered_df['Volume'] == volume)]
                 if not pair_data.empty:
                     traditional_fee = pair_data['Traditional Fee ($)'].iloc[0]
                     
-                    # Add horizontal line for traditional fee
                     fig1.add_hline(
                         y=traditional_fee,
                         line_dash="solid",
                         line_color="black",
                         line_width=2,
                         opacity=0.8,
-                        col=i+1,  # Column index for facet
+                        col=i+1,
                         annotation_text=f"{pair} Traditional: ${traditional_fee:.3f}",
                         annotation_position="top right",
                         annotation_font_size=8
                     )
     
-    # Update layout for better visibility
     fig1.update_layout(
         showlegend=True,
         height=600,
@@ -517,53 +386,303 @@ def show_overview_analysis(comparison_df):
     )
     
     st.plotly_chart(fig1, use_container_width=True)
+
+def show_pair_specific_analysis(comparison_df):
+    """Show detailed analysis for a specific pair"""
+    if comparison_df.empty:
+        st.error("No data available for pair-specific analysis")
+        return
     
-    # Chart 2: Difference heatmap
-    if len(selected_pairs) <= 10:  # Only show heatmap for reasonable number of pairs
-        pivot_df = filtered_df.pivot_table(
-            index='Pair',
-            columns='Price Move (%)',
-            values='Difference ($)',
-            aggfunc='mean'
-        )
+    st.subheader("🎯 Select Pair for Detailed Analysis")
+    selected_pair = st.selectbox(
+        "Choose a trading pair:",
+        options=comparison_df['Pair'].unique(),
+        key="pair_specific_selector"
+    )
+    
+    pair_data = comparison_df[comparison_df['Pair'] == selected_pair]
+    
+    if pair_data.empty:
+        st.warning(f"No data available for {selected_pair}")
+        return
+    
+    st.subheader(f"📊 Detailed Analysis: {selected_pair}")
+    
+    fig = make_subplots(
+        rows=2, cols=2,
+        subplot_titles=['1k Volume', '5k Volume', '10k Volume', '20k Volume'],
+        vertical_spacing=0.15,
+        horizontal_spacing=0.1
+    )
+    
+    colors = ['blue', 'red', 'green', 'orange']
+    positions = [(1,1), (1,2), (2,1), (2,2)]
+    
+    for i, volume in enumerate(volume_levels):
+        volume_data = pair_data[pair_data['Volume'] == volume].sort_values('Price Move (%)')
         
-        fig2 = px.imshow(
-            pivot_df,
-            aspect="auto",
-            title="Fee Difference Heatmap (Profit Share - Traditional)",
-            color_continuous_scale="RdBu_r"
-        )
-        st.plotly_chart(fig2, use_container_width=True)
+        if not volume_data.empty:
+            row, col = positions[i]
+            
+            fig.add_trace(
+                go.Scatter(
+                    x=volume_data['Price Move (%)'],
+                    y=volume_data['Profit Share Fee ($)'],
+                    mode='lines+markers',
+                    name=f'Profit Share ({volume})',
+                    line=dict(color=colors[i], width=3),
+                    marker=dict(size=6)
+                ),
+                row=row, col=col
+            )
+            
+            traditional_fee = volume_data['Traditional Fee ($)'].iloc[0]
+            fig.add_hline(
+                y=traditional_fee,
+                line_dash="solid",
+                line_color="black",
+                line_width=3,
+                row=row, col=col,
+                annotation_text=f"Traditional: ${traditional_fee:.3f}",
+                annotation_position="top right"
+            )
     
-    # Export options
-    st.subheader("💾 Export Data")
-    col1, col2 = st.columns(2)
+    fig.update_layout(
+        height=800,
+        title_text=f"Fee Comparison for {selected_pair}<br><sub>Black lines = Traditional fees, Colored lines = Profit-sharing fees</sub>",
+        showlegend=True
+    )
+    
+    fig.update_xaxes(title_text="Price Move (%)")
+    fig.update_yaxes(title_text="Fee ($)")
+    
+    st.plotly_chart(fig, use_container_width=True)
+
+def show_breakeven_analysis(traditional_data, profit_share_data):
+    """Show breakeven parameter analysis"""
+    if traditional_data.empty or profit_share_data.empty:
+        st.error("No data available for breakeven analysis")
+        return
+    
+    merged_data = traditional_data.merge(
+        profit_share_data, 
+        left_on='pair_name', 
+        right_on='Pair', 
+        how='inner'
+    )
+    
+    if merged_data.empty:
+        st.error("No matching pairs for breakeven analysis")
+        return
+    
+    st.subheader("⚖️ Breakeven Parameter Analysis")
+    selected_pair = st.selectbox(
+        "Choose a trading pair for breakeven analysis:",
+        options=merged_data['pair_name'].unique(),
+        key="breakeven_pair_selector"
+    )
+    
+    pair_row = merged_data[merged_data['pair_name'] == selected_pair].iloc[0]
+    
+    current_params = {
+        'base_rate': pair_row.get('Base Rate', 0.1),
+        'rate_multiplier': pair_row.get('Rate Multiplier', 1000),
+        'rate_exponent': pair_row.get('Rate Exponent', 1),
+        'position_multiplier': pair_row.get('Position Multiplier', 200),
+        'bet_multiplier': pair_row.get('Bet Multiplier', 1)
+    }
+    
+    st.subheader(f"🎯 Current Parameters for {selected_pair}")
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Position Multiplier", current_params['position_multiplier'])
+        st.metric("Rate Multiplier", current_params['rate_multiplier'])
+    with col2:
+        st.metric("Rate Exponent", current_params['rate_exponent'])
+        st.metric("Base Rate", f"{current_params['base_rate']:.3f}")
+    with col3:
+        st.metric("Bet Multiplier", current_params['bet_multiplier'])
+    
+    st.subheader("🔍 Breakeven Parameter Optimization")
+    
+    col1, col2, col3 = st.columns(3)
     
     with col1:
-        csv = filtered_df.to_csv(index=False)
-        st.download_button(
-            label="Download CSV",
-            data=csv,
-            file_name=f"comparison_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            mime='text/csv'
-        )
+        st.markdown("### Position Multiplier Optimization")
+        optimize_position_multiplier(pair_row, current_params)
     
     with col2:
-        # Summary statistics
-        summary_stats = filtered_df.groupby(['Pair', 'Volume']).agg({
-            'Traditional Fee ($)': 'mean',
-            'Profit Share Fee ($)': 'mean',
-            'Difference ($)': 'mean',
-            'PS More Expensive': 'mean'
-        }).reset_index()
+        st.markdown("### Rate Multiplier Optimization")
+        optimize_rate_multiplier(pair_row, current_params)
+    
+    with col3:
+        st.markdown("### Rate Exponent Optimization")
+        optimize_rate_exponent(pair_row, current_params)
+
+def optimize_position_multiplier(pair_row, current_params):
+    """Find breakeven position multiplier"""
+    try:
+        multiplier_range = range(1, 1001, 10)
+        results = []
         
-        summary_csv = summary_stats.to_csv(index=False)
-        st.download_button(
-            label="Download Summary CSV",
-            data=summary_csv,
-            file_name=f"summary_stats_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            mime='text/csv'
-        )
+        for volume in volume_levels:
+            traditional_spread = pair_row[volume] + 10
+            traditional_fee = calculate_traditional_fee(traditional_spread, volume_amounts[volume]) * 2
+            
+            best_multiplier = None
+            min_diff = float('inf')
+            
+            for pos_mult in multiplier_range:
+                test_params = current_params.copy()
+                test_params['position_multiplier'] = pos_mult
+                
+                bet_amount = volume_amounts[volume] / test_params['bet_multiplier']
+                ps_fee = calculate_profit_sharing_fee(100, 101, bet_amount, test_params)
+                
+                diff = abs(ps_fee - traditional_fee)
+                if diff < min_diff:
+                    min_diff = diff
+                    best_multiplier = pos_mult
+            
+            results.append({
+                'Volume': volume,
+                'Current': current_params['position_multiplier'],
+                'Breakeven': best_multiplier,
+                'Traditional Fee': f"${traditional_fee:.3f}",
+                'Difference': f"${min_diff:.3f}"
+            })
+        
+        df = pd.DataFrame(results)
+        st.dataframe(df, use_container_width=True)
+        
+    except Exception as e:
+        st.error(f"Error in position multiplier optimization: {str(e)}")
+
+def optimize_rate_multiplier(pair_row, current_params):
+    """Find breakeven rate multiplier"""
+    try:
+        multiplier_range = range(100, 5001, 100)
+        results = []
+        
+        for volume in volume_levels:
+            traditional_spread = pair_row[volume] + 10
+            traditional_fee = calculate_traditional_fee(traditional_spread, volume_amounts[volume]) * 2
+            
+            best_multiplier = None
+            min_diff = float('inf')
+            
+            for rate_mult in multiplier_range:
+                test_params = current_params.copy()
+                test_params['rate_multiplier'] = rate_mult
+                
+                bet_amount = volume_amounts[volume] / test_params['bet_multiplier']
+                ps_fee = calculate_profit_sharing_fee(100, 101, bet_amount, test_params)
+                
+                diff = abs(ps_fee - traditional_fee)
+                if diff < min_diff:
+                    min_diff = diff
+                    best_multiplier = rate_mult
+            
+            results.append({
+                'Volume': volume,
+                'Current': current_params['rate_multiplier'],
+                'Breakeven': best_multiplier,
+                'Traditional Fee': f"${traditional_fee:.3f}",
+                'Difference': f"${min_diff:.3f}"
+            })
+        
+        df = pd.DataFrame(results)
+        st.dataframe(df, use_container_width=True)
+        
+    except Exception as e:
+        st.error(f"Error in rate multiplier optimization: {str(e)}")
+
+def optimize_rate_exponent(pair_row, current_params):
+    """Find breakeven rate exponent"""
+    try:
+        exponent_range = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3]
+        results = []
+        
+        for volume in volume_levels:
+            traditional_spread = pair_row[volume] + 10
+            traditional_fee = calculate_traditional_fee(traditional_spread, volume_amounts[volume]) * 2
+            
+            best_exponent = None
+            min_diff = float('inf')
+            
+            for rate_exp in exponent_range:
+                test_params = current_params.copy()
+                test_params['rate_exponent'] = rate_exp
+                
+                bet_amount = volume_amounts[volume] / test_params['bet_multiplier']
+                ps_fee = calculate_profit_sharing_fee(100, 101, bet_amount, test_params)
+                
+                diff = abs(ps_fee - traditional_fee)
+                if diff < min_diff:
+                    min_diff = diff
+                    best_exponent = rate_exp
+            
+            results.append({
+                'Volume': volume,
+                'Current': current_params['rate_exponent'],
+                'Breakeven': best_exponent,
+                'Traditional Fee': f"${traditional_fee:.3f}",
+                'Difference': f"${min_diff:.3f}"
+            })
+        
+        df = pd.DataFrame(results)
+        st.dataframe(df, use_container_width=True)
+        
+    except Exception as e:
+        st.error(f"Error in rate exponent optimization: {str(e)}")
+
+def main():
+    refresh_data = st.sidebar.button("🔄 Refresh Data")
+    show_raw_data = st.sidebar.checkbox("Show Raw Data", value=False)
+    
+    if refresh_data or 'traditional_data' not in st.session_state:
+        with st.spinner("Loading data..."):
+            st.session_state.traditional_data = fetch_metabase_data()
+            st.session_state.profit_share_data = fetch_streamlit_data()
+    
+    traditional_data = st.session_state.traditional_data
+    profit_share_data = st.session_state.profit_share_data
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Traditional Spreads", f"{len(traditional_data)} pairs")
+    with col2:
+        st.metric("Profit Share Parameters", f"{len(profit_share_data)} pairs")
+    
+    if show_raw_data:
+        st.subheader("Raw Data")
+        tab1, tab2 = st.tabs(["Traditional Spreads", "Profit Share Parameters"])
+        
+        with tab1:
+            st.dataframe(traditional_data)
+        
+        with tab2:
+            st.dataframe(profit_share_data)
+    
+    st.subheader("📊 Comparison Analysis")
+    
+    with st.spinner("Calculating comparisons..."):
+        comparison_df = create_comparison_table(traditional_data, profit_share_data)
+    
+    if comparison_df.empty:
+        st.stop()
+    
+    tab1, tab2, tab3 = st.tabs(["📊 Overview Analysis", "🔍 Pair-Specific Analysis", "⚖️ Breakeven Analysis"])
+    
+    with tab1:
+        show_overview_analysis(comparison_df)
+    
+    with tab2:
+        show_pair_specific_analysis(comparison_df)
+    
+    with tab3:
+        show_breakeven_analysis(traditional_data, profit_share_data)
 
 if __name__ == "__main__":
     main()
