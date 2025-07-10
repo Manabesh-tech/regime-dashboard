@@ -589,7 +589,7 @@ def optimize_position_multiplier(pair_row, current_params):
         st.dataframe(df, use_container_width=True, height=300)
         
         # Summary insight
-        avg_improvement = df['Improvement ($)'].apply(lambda x: float(x.replace('
+        avg_improvement = df['Improvement ($)'].apply(lambda x: float(x.replace('$', ''))
 
 def main():
     refresh_data = st.sidebar.button("🔄 Refresh Data")
