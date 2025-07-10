@@ -290,28 +290,46 @@ def show_overview_analysis(comparison_df):
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        selected_pairs = st.multiselect(
-            "Select Pairs", 
-            options=comparison_df['Pair'].unique(),
-            default=list(comparison_df['Pair'].unique())[:5],
-            key="overview_pairs"
-        )
+        # Add select all checkbox for pairs
+        select_all_pairs = st.checkbox("Select All Pairs", key="select_all_pairs_overview")
+        
+        if select_all_pairs:
+            selected_pairs = list(comparison_df['Pair'].unique())
+        else:
+            selected_pairs = st.multiselect(
+                "Select Pairs", 
+                options=comparison_df['Pair'].unique(),
+                default=list(comparison_df['Pair'].unique())[:5],
+                key="overview_pairs"
+            )
     
     with col2:
-        selected_volumes = st.multiselect(
-            "Select Volumes",
-            options=volume_levels,
-            default=volume_levels,
-            key="overview_volumes"
-        )
+        # Add select all checkbox for volumes
+        select_all_volumes = st.checkbox("Select All Volumes", key="select_all_volumes_overview")
+        
+        if select_all_volumes:
+            selected_volumes = volume_levels
+        else:
+            selected_volumes = st.multiselect(
+                "Select Volumes",
+                options=volume_levels,
+                default=volume_levels,
+                key="overview_volumes"
+            )
     
     with col3:
-        selected_moves = st.multiselect(
-            "Select Price Moves (%)",
-            options=price_moves,
-            default=price_moves,
-            key="overview_moves"
-        )
+        # Add select all checkbox for price moves
+        select_all_moves = st.checkbox("Select All Price Moves", key="select_all_moves_overview")
+        
+        if select_all_moves:
+            selected_moves = price_moves
+        else:
+            selected_moves = st.multiselect(
+                "Select Price Moves (%)",
+                options=price_moves,
+                default=price_moves,
+                key="overview_moves"
+            )
     
     filtered_df = comparison_df[
         (comparison_df['Pair'].isin(selected_pairs)) &
@@ -506,19 +524,19 @@ def show_breakeven_analysis(traditional_data, profit_share_data):
     
     st.subheader("🔍 Breakeven Parameter Optimization")
     
-    col1, col2, col3 = st.columns(3)
+    # Create full-width sections for each optimization
+    st.markdown("### 📊 Position Multiplier Optimization")
+    optimize_position_multiplier(pair_row, current_params)
     
-    with col1:
-        st.markdown("### Position Multiplier Optimization")
-        optimize_position_multiplier(pair_row, current_params)
+    st.markdown("---")  # Separator
     
-    with col2:
-        st.markdown("### Rate Multiplier Optimization")
-        optimize_rate_multiplier(pair_row, current_params)
+    st.markdown("### 📊 Rate Multiplier Optimization") 
+    optimize_rate_multiplier(pair_row, current_params)
     
-    with col3:
-        st.markdown("### Rate Exponent Optimization")
-        optimize_rate_exponent(pair_row, current_params)
+    st.markdown("---")  # Separator
+    
+    st.markdown("### 📊 Rate Exponent Optimization")
+    optimize_rate_exponent(pair_row, current_params)
 
 def optimize_position_multiplier(pair_row, current_params):
     """Find breakeven position multiplier"""
@@ -530,31 +548,102 @@ def optimize_position_multiplier(pair_row, current_params):
             traditional_spread = pair_row[volume] + 10
             traditional_fee = calculate_traditional_fee(traditional_spread, volume_amounts[volume]) * 2
             
+            # Calculate current profit-share fee
+            bet_amount = volume_amounts[volume] / current_params['bet_multiplier']
+            current_ps_fee = calculate_profit_sharing_fee(100, 101, bet_amount, current_params)
+            current_difference = traditional_fee - current_ps_fee
+            
+            # Find optimal position multiplier
             best_multiplier = None
-            min_diff = float('inf')
+            min_abs_diff = float('inf')
+            best_ps_fee = 0
             
             for pos_mult in multiplier_range:
                 test_params = current_params.copy()
                 test_params['position_multiplier'] = pos_mult
                 
-                bet_amount = volume_amounts[volume] / test_params['bet_multiplier']
                 ps_fee = calculate_profit_sharing_fee(100, 101, bet_amount, test_params)
+                abs_diff = abs(ps_fee - traditional_fee)
                 
-                diff = abs(ps_fee - traditional_fee)
-                if diff < min_diff:
-                    min_diff = diff
+                if abs_diff < min_abs_diff:
+                    min_abs_diff = abs_diff
                     best_multiplier = pos_mult
+                    best_ps_fee = ps_fee
+            
+            optimized_difference = traditional_fee - best_ps_fee
+            improvement = abs(current_difference) - abs(optimized_difference)
             
             results.append({
                 'Volume': volume,
-                'Current': current_params['position_multiplier'],
-                'Breakeven': best_multiplier,
-                'Traditional Fee': f"${traditional_fee:.3f}",
-                'Difference': f"${min_diff:.3f}"
+                'Traditional Fee ($)': f"${traditional_fee:.3f}",
+                'Current Position Multiplier': current_params['position_multiplier'],
+                'Current PS Fee ($)': f"${current_ps_fee:.3f}",
+                'Current Difference ($)': f"${current_difference:.3f}",
+                'Optimal Position Multiplier': best_multiplier,
+                'Optimal PS Fee ($)': f"${best_ps_fee:.3f}",
+                'Optimal Difference ($)': f"${optimized_difference:.3f}",
+                'Improvement ($)': f"${improvement:.3f}"
             })
         
         df = pd.DataFrame(results)
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(df, use_container_width=True, height=300)
+        
+        # Summary insight
+        avg_improvement = df['Improvement ($)'].apply(lambda x: float(x.replace('
+
+def main():
+    refresh_data = st.sidebar.button("🔄 Refresh Data")
+    show_raw_data = st.sidebar.checkbox("Show Raw Data", value=False)
+    
+    if refresh_data or 'traditional_data' not in st.session_state:
+        with st.spinner("Loading data..."):
+            st.session_state.traditional_data = fetch_metabase_data()
+            st.session_state.profit_share_data = fetch_streamlit_data()
+    
+    traditional_data = st.session_state.traditional_data
+    profit_share_data = st.session_state.profit_share_data
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Traditional Spreads", f"{len(traditional_data)} pairs")
+    with col2:
+        st.metric("Profit Share Parameters", f"{len(profit_share_data)} pairs")
+    
+    if show_raw_data:
+        st.subheader("Raw Data")
+        tab1, tab2 = st.tabs(["Traditional Spreads", "Profit Share Parameters"])
+        
+        with tab1:
+            st.dataframe(traditional_data)
+        
+        with tab2:
+            st.dataframe(profit_share_data)
+    
+    st.subheader("📊 Comparison Analysis")
+    
+    with st.spinner("Calculating comparisons..."):
+        comparison_df = create_comparison_table(traditional_data, profit_share_data)
+    
+    if comparison_df.empty:
+        st.stop()
+    
+    tab1, tab2, tab3 = st.tabs(["📊 Overview Analysis", "🔍 Pair-Specific Analysis", "⚖️ Breakeven Analysis"])
+    
+    with tab1:
+        show_overview_analysis(comparison_df)
+    
+    with tab2:
+        show_pair_specific_analysis(comparison_df)
+    
+    with tab3:
+        show_breakeven_analysis(traditional_data, profit_share_data)
+
+if __name__ == "__main__":
+    main(), ''))).mean()
+        if avg_improvement > 0:
+            st.success(f"💡 Average improvement: ${avg_improvement:.3f} - Position multiplier optimization recommended!")
+        else:
+            st.info("📊 Current position multiplier is already well-optimized")
         
     except Exception as e:
         st.error(f"Error in position multiplier optimization: {str(e)}")
@@ -569,31 +658,102 @@ def optimize_rate_multiplier(pair_row, current_params):
             traditional_spread = pair_row[volume] + 10
             traditional_fee = calculate_traditional_fee(traditional_spread, volume_amounts[volume]) * 2
             
+            # Calculate current profit-share fee
+            bet_amount = volume_amounts[volume] / current_params['bet_multiplier']
+            current_ps_fee = calculate_profit_sharing_fee(100, 101, bet_amount, current_params)
+            current_difference = traditional_fee - current_ps_fee
+            
+            # Find optimal rate multiplier
             best_multiplier = None
-            min_diff = float('inf')
+            min_abs_diff = float('inf')
+            best_ps_fee = 0
             
             for rate_mult in multiplier_range:
                 test_params = current_params.copy()
                 test_params['rate_multiplier'] = rate_mult
                 
-                bet_amount = volume_amounts[volume] / test_params['bet_multiplier']
                 ps_fee = calculate_profit_sharing_fee(100, 101, bet_amount, test_params)
+                abs_diff = abs(ps_fee - traditional_fee)
                 
-                diff = abs(ps_fee - traditional_fee)
-                if diff < min_diff:
-                    min_diff = diff
+                if abs_diff < min_abs_diff:
+                    min_abs_diff = abs_diff
                     best_multiplier = rate_mult
+                    best_ps_fee = ps_fee
+            
+            optimized_difference = traditional_fee - best_ps_fee
+            improvement = abs(current_difference) - abs(optimized_difference)
             
             results.append({
                 'Volume': volume,
-                'Current': current_params['rate_multiplier'],
-                'Breakeven': best_multiplier,
-                'Traditional Fee': f"${traditional_fee:.3f}",
-                'Difference': f"${min_diff:.3f}"
+                'Traditional Fee ($)': f"${traditional_fee:.3f}",
+                'Current Rate Multiplier': current_params['rate_multiplier'],
+                'Current PS Fee ($)': f"${current_ps_fee:.3f}",
+                'Current Difference ($)': f"${current_difference:.3f}",
+                'Optimal Rate Multiplier': best_multiplier,
+                'Optimal PS Fee ($)': f"${best_ps_fee:.3f}",
+                'Optimal Difference ($)': f"${optimized_difference:.3f}",
+                'Improvement ($)': f"${improvement:.3f}"
             })
         
         df = pd.DataFrame(results)
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(df, use_container_width=True, height=300)
+        
+        # Summary insight
+        avg_improvement = df['Improvement ($)'].apply(lambda x: float(x.replace('
+
+def main():
+    refresh_data = st.sidebar.button("🔄 Refresh Data")
+    show_raw_data = st.sidebar.checkbox("Show Raw Data", value=False)
+    
+    if refresh_data or 'traditional_data' not in st.session_state:
+        with st.spinner("Loading data..."):
+            st.session_state.traditional_data = fetch_metabase_data()
+            st.session_state.profit_share_data = fetch_streamlit_data()
+    
+    traditional_data = st.session_state.traditional_data
+    profit_share_data = st.session_state.profit_share_data
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Traditional Spreads", f"{len(traditional_data)} pairs")
+    with col2:
+        st.metric("Profit Share Parameters", f"{len(profit_share_data)} pairs")
+    
+    if show_raw_data:
+        st.subheader("Raw Data")
+        tab1, tab2 = st.tabs(["Traditional Spreads", "Profit Share Parameters"])
+        
+        with tab1:
+            st.dataframe(traditional_data)
+        
+        with tab2:
+            st.dataframe(profit_share_data)
+    
+    st.subheader("📊 Comparison Analysis")
+    
+    with st.spinner("Calculating comparisons..."):
+        comparison_df = create_comparison_table(traditional_data, profit_share_data)
+    
+    if comparison_df.empty:
+        st.stop()
+    
+    tab1, tab2, tab3 = st.tabs(["📊 Overview Analysis", "🔍 Pair-Specific Analysis", "⚖️ Breakeven Analysis"])
+    
+    with tab1:
+        show_overview_analysis(comparison_df)
+    
+    with tab2:
+        show_pair_specific_analysis(comparison_df)
+    
+    with tab3:
+        show_breakeven_analysis(traditional_data, profit_share_data)
+
+if __name__ == "__main__":
+    main(), ''))).mean()
+        if avg_improvement > 0:
+            st.success(f"💡 Average improvement: ${avg_improvement:.3f} - Rate multiplier optimization recommended!")
+        else:
+            st.info("📊 Current rate multiplier is already well-optimized")
         
     except Exception as e:
         st.error(f"Error in rate multiplier optimization: {str(e)}")
@@ -608,31 +768,102 @@ def optimize_rate_exponent(pair_row, current_params):
             traditional_spread = pair_row[volume] + 10
             traditional_fee = calculate_traditional_fee(traditional_spread, volume_amounts[volume]) * 2
             
+            # Calculate current profit-share fee
+            bet_amount = volume_amounts[volume] / current_params['bet_multiplier']
+            current_ps_fee = calculate_profit_sharing_fee(100, 101, bet_amount, current_params)
+            current_difference = traditional_fee - current_ps_fee
+            
+            # Find optimal rate exponent
             best_exponent = None
-            min_diff = float('inf')
+            min_abs_diff = float('inf')
+            best_ps_fee = 0
             
             for rate_exp in exponent_range:
                 test_params = current_params.copy()
                 test_params['rate_exponent'] = rate_exp
                 
-                bet_amount = volume_amounts[volume] / test_params['bet_multiplier']
                 ps_fee = calculate_profit_sharing_fee(100, 101, bet_amount, test_params)
+                abs_diff = abs(ps_fee - traditional_fee)
                 
-                diff = abs(ps_fee - traditional_fee)
-                if diff < min_diff:
-                    min_diff = diff
+                if abs_diff < min_abs_diff:
+                    min_abs_diff = abs_diff
                     best_exponent = rate_exp
+                    best_ps_fee = ps_fee
+            
+            optimized_difference = traditional_fee - best_ps_fee
+            improvement = abs(current_difference) - abs(optimized_difference)
             
             results.append({
                 'Volume': volume,
-                'Current': current_params['rate_exponent'],
-                'Breakeven': best_exponent,
-                'Traditional Fee': f"${traditional_fee:.3f}",
-                'Difference': f"${min_diff:.3f}"
+                'Traditional Fee ($)': f"${traditional_fee:.3f}",
+                'Current Rate Exponent': current_params['rate_exponent'],
+                'Current PS Fee ($)': f"${current_ps_fee:.3f}",
+                'Current Difference ($)': f"${current_difference:.3f}",
+                'Optimal Rate Exponent': best_exponent,
+                'Optimal PS Fee ($)': f"${best_ps_fee:.3f}",
+                'Optimal Difference ($)': f"${optimized_difference:.3f}",
+                'Improvement ($)': f"${improvement:.3f}"
             })
         
         df = pd.DataFrame(results)
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(df, use_container_width=True, height=300)
+        
+        # Summary insight
+        avg_improvement = df['Improvement ($)'].apply(lambda x: float(x.replace('
+
+def main():
+    refresh_data = st.sidebar.button("🔄 Refresh Data")
+    show_raw_data = st.sidebar.checkbox("Show Raw Data", value=False)
+    
+    if refresh_data or 'traditional_data' not in st.session_state:
+        with st.spinner("Loading data..."):
+            st.session_state.traditional_data = fetch_metabase_data()
+            st.session_state.profit_share_data = fetch_streamlit_data()
+    
+    traditional_data = st.session_state.traditional_data
+    profit_share_data = st.session_state.profit_share_data
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Traditional Spreads", f"{len(traditional_data)} pairs")
+    with col2:
+        st.metric("Profit Share Parameters", f"{len(profit_share_data)} pairs")
+    
+    if show_raw_data:
+        st.subheader("Raw Data")
+        tab1, tab2 = st.tabs(["Traditional Spreads", "Profit Share Parameters"])
+        
+        with tab1:
+            st.dataframe(traditional_data)
+        
+        with tab2:
+            st.dataframe(profit_share_data)
+    
+    st.subheader("📊 Comparison Analysis")
+    
+    with st.spinner("Calculating comparisons..."):
+        comparison_df = create_comparison_table(traditional_data, profit_share_data)
+    
+    if comparison_df.empty:
+        st.stop()
+    
+    tab1, tab2, tab3 = st.tabs(["📊 Overview Analysis", "🔍 Pair-Specific Analysis", "⚖️ Breakeven Analysis"])
+    
+    with tab1:
+        show_overview_analysis(comparison_df)
+    
+    with tab2:
+        show_pair_specific_analysis(comparison_df)
+    
+    with tab3:
+        show_breakeven_analysis(traditional_data, profit_share_data)
+
+if __name__ == "__main__":
+    main(), ''))).mean()
+        if avg_improvement > 0:
+            st.success(f"💡 Average improvement: ${avg_improvement:.3f} - Rate exponent optimization recommended!")
+        else:
+            st.info("📊 Current rate exponent is already well-optimized")
         
     except Exception as e:
         st.error(f"Error in rate exponent optimization: {str(e)}")
