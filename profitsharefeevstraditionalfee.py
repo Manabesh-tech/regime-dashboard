@@ -286,7 +286,7 @@ def create_comparison_table(traditional_data, profit_share_data):
         
         for volume in volume_levels:
             position_size = volume_amounts[volume]
-            traditional_spread = row[volume]+0.001
+            traditional_spread = row[volume]+10
             traditional_fee = calculate_traditional_fee(traditional_spread, position_size)*2
             bet_amount = position_size / ps_params['bet_multiplier']
             
