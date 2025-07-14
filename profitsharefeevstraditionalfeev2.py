@@ -544,9 +544,8 @@ def optimize_position_multiplier(pair_row, current_params):
         results = []
         
         for volume in volume_levels:
-            traditional_spread = pair_row[volume] + 10
+            traditional_spread = pair_row[volume] + 5
             traditional_fee = calculate_traditional_fee(traditional_spread, volume_amounts[volume]) * 2
-            
             bet_amount = volume_amounts[volume] / current_params['bet_multiplier']
             current_ps_fee = calculate_profit_sharing_fee(100, 101, bet_amount, current_params)
             current_difference = traditional_fee - current_ps_fee
@@ -603,7 +602,7 @@ def optimize_rate_multiplier(pair_row, current_params):
         results = []
         
         for volume in volume_levels:
-            traditional_spread = pair_row[volume] + 10
+            traditional_spread = pair_row[volume] + 5
             traditional_fee = calculate_traditional_fee(traditional_spread, volume_amounts[volume]) * 2
             
             bet_amount = volume_amounts[volume] / current_params['bet_multiplier']
@@ -662,7 +661,7 @@ def optimize_rate_exponent(pair_row, current_params):
         results = []
         
         for volume in volume_levels:
-            traditional_spread = pair_row[volume] + 10
+            traditional_spread = pair_row[volume] + 5
             traditional_fee = calculate_traditional_fee(traditional_spread, volume_amounts[volume]) * 2
             
             bet_amount = volume_amounts[volume] / current_params['bet_multiplier']
