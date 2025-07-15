@@ -204,8 +204,7 @@ class ExchangeAnalyzer:
         dates = []
        
         # 先减去8小时，得到UTC日期
-        utc_date = end_date - timedelta(hours=8)
-        dates.append(utc_date.strftime("%Y%m%d"))
+        dates.append(end_date.strftime("%Y%m%d"))
         
         # Create table names from dates
         table_names = [f"oracle_price_log_partition_{date}" for date in dates]
