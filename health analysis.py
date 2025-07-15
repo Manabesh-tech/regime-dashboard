@@ -189,25 +189,23 @@ class ExchangeAnalyzer:
         # Ensure timezone is explicitly set to Singapore
         singapore_tz = pytz.timezone('Asia/Singapore')
         if start_date.tzinfo is None:
+            print("start_date.tzinfo is None")
             start_date = singapore_tz.localize(start_date)
         if end_date.tzinfo is None:
+            print("end_date.tzinfo is None")
+
             end_date = singapore_tz.localize(end_date)
         
         # Convert to Singapore time
         start_date = start_date.astimezone(singapore_tz)
         end_date = end_date.astimezone(singapore_tz)
-        
-        # Remove timezone after conversion for compatibility with database
-        start_date = start_date.replace(tzinfo=None)
-        end_date = end_date.replace(tzinfo=None)
                 
         # Generate list of dates between start and end
-        current_date = start_date
         dates = []
-        
-        while current_date <= end_date:
-            dates.append(current_date.strftime("%Y%m%d"))
-            current_date += timedelta(days=1)
+       
+        # 先减去8小时，得到UTC日期
+        utc_date = end_date - timedelta(hours=8)
+        dates.append(utc_date.strftime("%Y%m%d"))
         
         # Create table names from dates
         table_names = [f"oracle_price_log_partition_{date}" for date in dates]
