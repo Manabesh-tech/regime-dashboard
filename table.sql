@@ -30,3 +30,16 @@ uat_db_params = {
     'user': 'public_rw',     # Different user
     'password': 'aTJ92^kl04hllk'  # Different password
 }
+
+//query rollbit_pair_config
+SELECT bust_buffer, created_at
+FROM rollbit_pair_config
+WHERE pair_name='1000PUMP/USDT' and created_at >= '2025-07-18 19:34:00'
+  AND created_at <= '2025-07-18 19:36:00'
+ORDER BY created_at DESC;
+//query surf buffer_rate config
+SELECT buffer_rate,created_at
+FROM trade_pair_risk_history
+WHERE pair_name='PUMP/USDT' and created_at >= '2025-07-18 19:34:00'
+  AND created_at <= '2025-07-18 19:36:00'
+ORDER BY created_at DESC;
