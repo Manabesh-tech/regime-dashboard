@@ -146,7 +146,7 @@ def fetch_uat_buffer_rates_10sec(token, hours=3):
         
         # Debug info
         if df.empty:
-            st.warning(f"No UAT data found for {token}")
+            st.warning(f"No PROD data found for {token}")
             # Try to see what tokens are available
             check_query = f"""
             SELECT DISTINCT pair_name 
@@ -155,9 +155,9 @@ def fetch_uat_buffer_rates_10sec(token, hours=3):
             LIMIT 10
             """
             available = pd.read_sql_query(check_query, engine)
-            st.info(f"Available tokens in UAT: {available['pair_name'].tolist()}")
+            st.info(f"Available tokens in PROD: {available['pair_name'].tolist()}")
         else:
-            st.success(f"Found {len(df)} UAT records for {token}")
+            st.success(f"Found {len(df)} PROD records for {token}")
             
         if not df.empty:
             df['timestamp'] = pd.to_datetime(df['timestamp'])
@@ -170,7 +170,7 @@ def fetch_uat_buffer_rates_10sec(token, hours=3):
             
         return df
     except Exception as e:
-        st.error(f"Error fetching UAT buffer rates: {e}")
+        st.error(f"Error fetching PROD buffer rates: {e}")
         return pd.DataFrame()
 
 # Function to get raw price data (used by both 10-sec and 20-sec volatility)
@@ -486,7 +486,7 @@ if len(active_charts) > 0:
                 mode='lines+markers',
                 line=dict(color='purple', width=3),
                 marker=dict(size=4),
-                name="UAT Buffer Rate (%)",
+                name="Buffer Rate (%)",
                 showlegend=True,
                 connectgaps=False
             ),
@@ -500,7 +500,7 @@ if len(active_charts) > 0:
             subtitle_parts.append(f"UAT Buffer: {latest_uat_buffer:.3f}%")
         
         fig.update_yaxes(
-            title_text="UAT Buffer (%)",
+            title_text="Surf Buffer (%)",
             row=current_row, col=1,
             tickformat=".4f",
             showgrid=True,
