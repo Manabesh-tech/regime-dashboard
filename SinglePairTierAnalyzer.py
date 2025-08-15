@@ -326,7 +326,7 @@ class EnhancedDepthTierAnalyzer:
                 # Calculate time range in Singapore time
                 singapore_tz = pytz.timezone('Asia/Singapore')
                 now = datetime.now(singapore_tz)
-                start_time = now - timedelta(hours=hours)
+                start_time = now - timedelta(hours=hours+8)
 
                 # Format for display
                 start_str_display = start_time.strftime("%Y-%m-%d %H:%M:%S")
@@ -997,7 +997,7 @@ def main():
         run_analysis = st.button("ANALYZE", use_container_width=True)
         
     # Fixed analysis at 24 hours
-    selected_hours = 24
+    selected_hours = 2
 
     # Main content
     if run_analysis and selected_pair:
