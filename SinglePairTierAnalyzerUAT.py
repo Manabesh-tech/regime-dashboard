@@ -91,9 +91,9 @@ DB_CONFIG = {
     'main': {
         'url': "postgresql://public_rw:aTJ92^kl04hllk@aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com:5432/report_dev"
     },
-    'replication': {
-        'url': "postgresql://public_replication:866^FKC4hllk@aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com:5432/replication_report"
-    }
+    # 'replication': {
+    #     'url': "postgresql://public_replication:866^FKC4hllk@aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com:5432/replication_report"
+    # }
 }
 
 # Create database engine
@@ -107,6 +107,7 @@ def get_engine(use_replication=False):
     """
     try:
         config = DB_CONFIG['replication' if use_replication else 'main']
+        print(config,110,use_replication)
         return create_engine(config['url'], pool_size=5, max_overflow=10)
     except Exception as e:
         st.error(f"Error creating database engine: {e}")
@@ -161,7 +162,7 @@ def get_available_pairs():
         return PREDEFINED_PAIRS  # Fallback to predefined pairs
 
 # Get current bid/ask data
-def get_current_bid_ask(pair_name, use_replication=True):
+def get_current_bid_ask(pair_name, use_replication=False):
     try:
         with get_session(use_replication=use_replication) as session:
             if not session:
@@ -308,7 +309,7 @@ class EnhancedDepthTierAnalyzer:
         # Initialize coin health data structure for OHLC analysis
         self.coin_health_data = {}
 
-    def fetch_and_analyze(self, pair_name, hours=24, progress_bar=None, use_replication=True, time_intervals=12):
+    def fetch_and_analyze(self, pair_name, hours=24, progress_bar=None, use_replication=False, time_intervals=12):
         """Fetch data and calculate metrics for each depth tier with time-based analysis
         
         Args:
@@ -318,6 +319,7 @@ class EnhancedDepthTierAnalyzer:
             use_replication: Whether to use replication database
             time_intervals: Number of time intervals to split data into for historical analysis
         """
+        print(use_replication,321)
         try:
             with get_session(use_replication=use_replication) as session:
                 if not session:
@@ -326,7 +328,7 @@ class EnhancedDepthTierAnalyzer:
                 # Calculate time range in Singapore time
                 singapore_tz = pytz.timezone('Asia/Singapore')
                 now = datetime.now(singapore_tz)
-                start_time = now - timedelta(hours=hours)
+                start_time = now - timedelta(hours=hours+8)
 
                 # Format for display
                 start_str_display = start_time.strftime("%Y-%m-%d %H:%M:%S")
@@ -402,10 +404,10 @@ class EnhancedDepthTierAnalyzer:
                             public."{table_name}"
                         WHERE
                             pair_name = :pair_name
-                            AND created_at >= :start_time
+                            AND created_at >= :start_time 
                         ORDER BY created_at DESC
                     """)
-                    
+                    print(query,pair_name,start_time)
                     # Execute query with parameters
                     result = session.execute(
                         query,
@@ -424,7 +426,7 @@ class EnhancedDepthTierAnalyzer:
                 
                 # Sort all collected data by timestamp
                 all_data.sort(key=lambda x: x[1], reverse=True)  # Sort by created_at (index 1)
-                
+                print(len(all_data))
                 if not all_data:
                     if progress_bar:
                         progress_bar.progress(0.2, text="No data found for the specified pair")
@@ -997,7 +999,7 @@ def main():
         run_analysis = st.button("ANALYZE", use_container_width=True)
         
     # Fixed analysis at 24 hours
-    selected_hours = 24
+    selected_hours = 2
 
     # Main content
     if run_analysis and selected_pair:
@@ -1044,13 +1046,14 @@ def main():
         analyzer = EnhancedDepthTierAnalyzer()
         
         # Calculate appropriate time intervals based on hours
-        time_intervals = max(12, selected_hours * 2)  # More intervals for longer periods
+        # time_intervals = max(12, selected_hours * 2)  # More intervals for longer periods
         
         success = analyzer.fetch_and_analyze(
             selected_pair, 
             hours=selected_hours, 
             progress_bar=progress_bar,
-            time_intervals=time_intervals
+            use_replication=False
+            # time_intervals=time_intervals
         )
 
         if success:
