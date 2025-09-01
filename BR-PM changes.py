@@ -121,6 +121,16 @@ def is_major(token):
             return True
     return False
 
+def map_rollbit_to_surf(rollbit_pair_name):
+    """Map Rollbit pair name to SURF pair name"""
+    mapping = {
+        # Rollbit pair name -> SURF pair name
+        "1000PUMP/USDT": "PUMP/USDT",
+        # Add more mappings here as needed
+        # "1000EXAMPLE": "EXAMPLE/USDT",
+    }
+    return mapping.get(rollbit_pair_name, rollbit_pair_name)
+
 def safe_division(a, b, default=0.0):
     """Safely divide two numbers, handling zeros and None values"""
     if a is None or b is None or pd.isna(a) or pd.isna(b) or b == 0:
@@ -633,11 +643,19 @@ def render_rollbit_comparison(params_df, rollbit_df):
         st.info("No data available for Rollbit comparison.")
         return
     
-    # Merge the dataframes on pair_name
+    # Create copies of dataframes to avoid modifying originals
+    surf_df = params_df[['pair_name', 'buffer_rate', 'position_multiplier', 'rate_multiplier', 'rate_exponent']].copy()
+    rollbit_df_copy = rollbit_df[['pair_name', 'buffer_rate', 'position_multiplier', 'rate_multiplier', 'rate_exponent']].copy()
+    
+    # Apply mapping to Rollbit pair names to match SURF format
+    rollbit_df_copy['mapped_pair_name'] = rollbit_df_copy['pair_name'].apply(map_rollbit_to_surf)
+    
+    # Merge the dataframes on pair names (SURF original names with Rollbit mapped names)
     merged_df = pd.merge(
-        params_df[['pair_name', 'buffer_rate', 'position_multiplier', 'rate_multiplier', 'rate_exponent']], 
-        rollbit_df[['pair_name', 'buffer_rate', 'position_multiplier', 'rate_multiplier', 'rate_exponent']], 
-        on='pair_name', 
+        surf_df, 
+        rollbit_df_copy, 
+        left_on='pair_name',
+        right_on='mapped_pair_name', 
         how='inner',
         suffixes=('', '_rollbit')
     )
@@ -645,6 +663,16 @@ def render_rollbit_comparison(params_df, rollbit_df):
     if merged_df.empty:
         st.info("No matching pairs found for Rollbit comparison.")
         return
+    
+    # Show mapping information if any mappings were applied
+    mapping_applied = False
+    for _, row in merged_df.iterrows():
+        if row['pair_name_rollbit'] != row['mapped_pair_name']:
+            mapping_applied = True
+            break
+    
+    if mapping_applied:
+        st.info("📝 **Note**: Some Rollbit pair names have been mapped for comparison (e.g., 1000PUMP → PUMP/USDT)")
     
     # Create tabs for different parameter comparisons
     comp_tabs = st.tabs(["Buffer Rate", "Position Multiplier", "Rate Multiplier", "Rate Exponent"])
@@ -654,7 +682,8 @@ def render_rollbit_comparison(params_df, rollbit_df):
         
         # Create buffer rate comparison table
         buffer_df = pd.DataFrame({
-            'Pair': merged_df['pair_name'],
+            'SURF Pair': merged_df['pair_name'],
+            'Rollbit Pair (Original)': merged_df['pair_name_rollbit'],
             'Type': merged_df['pair_name'].apply(lambda x: 'Major' if is_major(x) else 'Altcoin'),
             'SURF Buffer': merged_df['buffer_rate'].apply(
                 lambda x: f"{x*100:.3f}%" if not pd.isna(x) else "N/A"
@@ -691,7 +720,8 @@ def render_rollbit_comparison(params_df, rollbit_df):
         
         # Create position multiplier comparison table
         position_df = pd.DataFrame({
-            'Pair': merged_df['pair_name'],
+            'SURF Pair': merged_df['pair_name'],
+            'Rollbit Pair (Original)': merged_df['pair_name_rollbit'],
             'Type': merged_df['pair_name'].apply(lambda x: 'Major' if is_major(x) else 'Altcoin'),
             'SURF Position Mult.': merged_df['position_multiplier'].apply(
                 lambda x: f"{x:,.0f}" if not pd.isna(x) else "N/A"
@@ -728,7 +758,8 @@ def render_rollbit_comparison(params_df, rollbit_df):
         
         # Create rate multiplier comparison table
         rate_mult_df = pd.DataFrame({
-            'Pair': merged_df['pair_name'],
+            'SURF Pair': merged_df['pair_name'],
+            'Rollbit Pair (Original)': merged_df['pair_name_rollbit'],
             'Type': merged_df['pair_name'].apply(lambda x: 'Major' if is_major(x) else 'Altcoin'),
             'SURF Rate Mult.': merged_df['rate_multiplier'].apply(
                 lambda x: f"{x:.4f}" if not pd.isna(x) else "N/A"
@@ -765,7 +796,8 @@ def render_rollbit_comparison(params_df, rollbit_df):
         
         # Create rate exponent comparison table
         rate_exp_df = pd.DataFrame({
-            'Pair': merged_df['pair_name'],
+            'SURF Pair': merged_df['pair_name'],
+            'Rollbit Pair (Original)': merged_df['pair_name_rollbit'],
             'Type': merged_df['pair_name'].apply(lambda x: 'Major' if is_major(x) else 'Altcoin'),
             'SURF Rate Exp.': merged_df['rate_exponent'].apply(
                 lambda x: f"{x:.4f}" if not pd.isna(x) else "N/A"
