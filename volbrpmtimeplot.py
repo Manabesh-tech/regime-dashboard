@@ -11,6 +11,19 @@ import pytz
 from sqlalchemy import create_engine
 from scipy.stats import spearmanr
 
+# Surf to Rollbit token mapping
+SURF_TO_ROLLBIT_MAP = {
+    # 常见的需要映射的token
+    "PUMP/USDT": "1000PUMP/USDT"
+    
+    # 可以继续添加更多映射
+}
+
+def get_rollbit_token(surf_token):
+    """Get Rollbit token name from Surf token name"""
+    # 如果找不到映射，返回原始的surf_token
+    return SURF_TO_ROLLBIT_MAP.get(surf_token, surf_token)
+
 st.set_page_config(page_title="1min Volatility Plot with Rollbit", page_icon="📈", layout="wide")
 
 # --- UI Setup ---
@@ -65,6 +78,8 @@ with tab1:
             st.cache_data.clear()
             st.rerun()
 
+    # Show token mapping info
+    
     sg_tz = pytz.timezone('Asia/Singapore')
     now_sg = datetime.now(sg_tz)
     st.write(f"Current time (Singapore): {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -74,6 +89,9 @@ with tab1:
 def fetch_rollbit_parameters_simplified(token, hours=18):
     """Fetch simplified Rollbit parameters"""
     try:
+        # Map surf token to rollbit token
+        rollbit_token = SURF_TO_ROLLBIT_MAP.get(token, token)
+        
         now_sg = datetime.now(pytz.timezone('Asia/Singapore'))
         start_time_sg = now_sg - timedelta(hours=hours)
         
@@ -88,7 +106,7 @@ def fetch_rollbit_parameters_simplified(token, hours=18):
             position_multiplier,
             created_at + INTERVAL '8 hour' AS timestamp
         FROM rollbit_pair_config 
-        WHERE pair_name = '{token}'
+        WHERE pair_name = '{rollbit_token}'
         AND created_at >= '{start_str}'::timestamp - INTERVAL '8 hour'
         AND created_at <= '{end_str}'::timestamp - INTERVAL '8 hour'
         ORDER BY created_at
