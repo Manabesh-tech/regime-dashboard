@@ -409,20 +409,8 @@ if analyze and selected:
                     else:
                         st.info("No data available")
         
-        # Tab 2: Rankings
+        # Tab 2: Health
         with tab2:
-            st.header("Rankings & Analysis")
-            
-            tabs = st.tabs([f"{pc} Points" for pc in analyzer.point_counts])
-            
-            for i, pc in enumerate(analyzer.point_counts):
-                with tabs[i]:
-                    df = analyzer.create_comparison_df(pc)
-                    if not df.empty:
-                        st.dataframe(df, use_container_width=True, height=600)
-        
-        # Tab 3: Health
-        with tab3:
             st.header("Coin Health Analysis")
             st.write("Based on 1-minute candles over last 10 minutes")
             
