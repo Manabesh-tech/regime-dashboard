@@ -8,423 +8,384 @@ import warnings
 
 warnings.filterwarnings('ignore')
 
-# Page config
 st.set_page_config(
     page_title="Crypto Exchange Analysis",
     page_icon="📊",
     layout="wide"
 )
 
-# Clear cache
-st.cache_data.clear()
-
-# Database connection
+# Database
 @st.cache_resource
-def get_engine():
+def get_db():
     return create_engine(
         "postgresql://public_replication:866^FKC4hllk@aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com:5432/replication_report",
-        pool_pre_ping=True,
-        pool_size=5,
-        max_overflow=10
+        pool_pre_ping=True
     )
 
-engine = get_engine()
+engine = get_db()
 
 # Token mapping
-def map_token(surf_token):
-    mapping = {"PUMP/USDT": "1000PUMP/USDT"}
-    return mapping.get(surf_token, surf_token)
+TOKEN_MAP = {"PUMP/USDT": "1000PUMP/USDT"}
 
-class Analyzer:
+class CryptoAnalyzer:
     def __init__(self):
-        # Only 500 and 1500 points
-        self.point_counts = [500, 1500]
-        self.data = {}
-        self.health = {}
-    
-    def fetch(self, pairs):
-        sg_tz = pytz.timezone('Asia/Singapore')
-        now = datetime.now(sg_tz)
+        self.metrics_data = {}
+        self.health_data = {}
+        
+    def fetch_data(self, pairs):
+        """Fetch only enough data for 1500 points analysis"""
+        tz = pytz.timezone('Asia/Singapore')
+        now = datetime.now(tz)
         table = f"oracle_price_log_partition_{now.strftime('%Y%m%d')}"
         
-        # Fixed 1 hour lookback
-        start = (now - timedelta(hours=1)).strftime('%Y-%m-%d %H:%M:%S')
-        end = now.strftime('%Y-%m-%d %H:%M:%S')
+        # Only fetch ~20 minutes of data (enough for 1500 points + health metrics)
+        start = now - timedelta(minutes=20)
         
         results = {}
         for pair in pairs:
             results[pair] = {}
             
-            # Rollbit query
-            rollbit_query = f"""
-                SELECT created_at + INTERVAL '8 hour' AS timestamp, final_price AS price
+            # Get Rollbit token name
+            rollbit_pair = TOKEN_MAP.get(pair, pair)
+            
+            # Build queries with LIMIT to cap data
+            rollbit_q = f"""
+                SELECT 
+                    created_at + INTERVAL '8 hour' AS timestamp,
+                    final_price AS price
                 FROM {table}
-                WHERE source_type = 1 AND pair_name = '{map_token(pair)}'
-                AND created_at >= '{start}'::timestamp - INTERVAL '8 hour'
-                AND created_at <= '{end}'::timestamp - INTERVAL '8 hour'
+                WHERE source_type = 1 
+                    AND pair_name = '{rollbit_pair}'
+                    AND created_at >= '{start}'::timestamp - INTERVAL '8 hour'
                 ORDER BY timestamp DESC
+                LIMIT 1600
             """
             
-            # Surf query
-            surf_query = f"""
-                SELECT created_at + INTERVAL '8 hour' AS timestamp, final_price AS price
+            surf_q = f"""
+                SELECT 
+                    created_at + INTERVAL '8 hour' AS timestamp,
+                    final_price AS price
                 FROM {table}
-                WHERE source_type = 0 AND pair_name = '{pair}'
-                AND created_at >= '{start}'::timestamp - INTERVAL '8 hour'
-                AND created_at <= '{end}'::timestamp - INTERVAL '8 hour'
+                WHERE source_type = 0 
+                    AND pair_name = '{pair}'
+                    AND created_at >= '{start}'::timestamp - INTERVAL '8 hour'
                 ORDER BY timestamp DESC
+                LIMIT 1600
             """
             
             try:
                 with engine.connect() as conn:
-                    rollbit_df = pd.read_sql_query(text(rollbit_query), conn)
-                    surf_df = pd.read_sql_query(text(surf_query), conn)
-                    
+                    # Fetch Rollbit
+                    rollbit_df = pd.read_sql(text(rollbit_q), conn)
                     if not rollbit_df.empty:
                         results[pair]['rollbit'] = rollbit_df
-                        st.success(f"✓ Rollbit {pair}: {len(rollbit_df)} points")
+                        st.success(f"Rollbit {pair}: {len(rollbit_df)} points")
+                    
+                    # Fetch Surf
+                    surf_df = pd.read_sql(text(surf_q), conn)
                     if not surf_df.empty:
                         results[pair]['surf'] = surf_df
-                        st.success(f"✓ Surf {pair}: {len(surf_df)} points")
+                        st.success(f"Surf {pair}: {len(surf_df)} points")
+                        
             except Exception as e:
-                st.error(f"Error {pair}: {e}")
-        
+                st.error(f"Error fetching {pair}: {e}")
+                
         return results
     
     def calculate_choppiness(self, prices, window=20):
-        """Original choppiness calculation that works correctly"""
+        """Original working choppiness calculation"""
         diff = prices.diff().abs()
-        sum_abs_changes = diff.rolling(window, min_periods=1).sum()
-        price_range = prices.rolling(window, min_periods=1).max() - prices.rolling(window, min_periods=1).min()
+        sum_abs = diff.rolling(window, min_periods=1).sum()
+        range_roll = prices.rolling(window, min_periods=1).max() - prices.rolling(window, min_periods=1).min()
         
-        # Handle zero price range
-        if (price_range == 0).any():
-            price_range = price_range.replace(0, 1e-10)
+        # Handle zero range
+        range_roll = range_roll.replace(0, 1e-10)
         
-        epsilon = 1e-10
-        choppiness = 100 * sum_abs_changes / (price_range + epsilon)
+        chop = 100 * sum_abs / (range_roll + 1e-10)
+        chop = np.minimum(chop, 1000)  # Cap at 1000
+        chop = chop.fillna(200)  # Default 200
         
-        # Cap extreme values and handle NaN
-        choppiness = np.minimum(choppiness, 1000)
-        choppiness = choppiness.fillna(200)
-        
-        return choppiness.mean()
+        return chop.mean()
     
-    def calc_metrics(self, prices, points):
-        """Calculate metrics for specified number of points"""
-        if len(prices) < points:
-            return None
-        
-        # Use most recent N points
-        sample = prices.iloc[-points:]
-        
-        # Choppiness (using original calculation)
-        window = min(20, points // 10)
-        chop = self.calculate_choppiness(sample, window)
-        
-        # ATR%
-        atr = sample.diff().abs().mean()
-        atr_pct = (atr / sample.mean()) * 100
-        
-        # Trend strength
-        net_change = abs(sample.iloc[-1] - sample.iloc[-window])
-        sum_changes = sample.diff().abs().rolling(window).sum().iloc[-1]
-        trend = net_change / sum_changes if sum_changes > 0 else 0
-        
-        return {
-            'choppiness': chop,
-            'tick_atr_pct': atr_pct,
-            'trend_strength': trend
-        }
-    
-    def calc_health(self, df):
-        """Calculate 1-minute candle health metrics"""
-        df = df.copy()
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        df['price'] = pd.to_numeric(df['price'])
-        df = df.set_index('timestamp').sort_index()
-        
-        # Get last 10 minutes
-        cutoff = df.index.max() - pd.Timedelta(minutes=10)
-        recent = df[df.index >= cutoff]
-        
-        if len(recent) < 10:
-            return None
-        
-        # Create 1-minute OHLC
-        ohlc = recent['price'].resample('1T').ohlc().dropna()
-        
-        if len(ohlc) == 0:
-            return None
-        
-        # Initialize counters
-        doji_count = 0
-        high_wick_count = 0
-        wick_percentages = []
-        wick_sizes = []
-        wick_body_ratios = []
-        
-        for _, row in ohlc.iterrows():
-            body = abs(row['close'] - row['open'])
-            total_range = row['high'] - row['low']
-            
-            if total_range > 0:
-                upper_wick = row['high'] - max(row['open'], row['close'])
-                lower_wick = min(row['open'], row['close']) - row['low']
-                total_wick = upper_wick + lower_wick
-                
-                body_pct = (body / total_range) * 100
-                wick_pct = (total_wick / total_range) * 100
-                
-                # Count dojis (body < 30% of range)
-                if body_pct < 30:
-                    doji_count += 1
-                
-                # Count high wick candles (wick > 50% of range)
-                if wick_pct > 50:
-                    high_wick_count += 1
-                
-                wick_percentages.append(wick_pct)
-                wick_sizes.append(total_wick)
-                
-                if body > 0:
-                    wick_body_ratios.append(total_wick / body)
-                else:
-                    wick_body_ratios.append(10.0)
-        
-        # Calculate metrics
-        n = len(ohlc)
-        metrics = {
-            'doji_count': doji_count,  # Actual count, not percentage
-            'doji_pct': (doji_count / n) * 100 if n > 0 else 0,
-            'avg_wick_pct': np.mean(wick_percentages) if wick_percentages else 0,
-            'avg_wick_size': np.mean(wick_sizes) if wick_sizes else 0,
-            'high_wick_count': high_wick_count,  # Integer count
-            'max_wick': max(wick_sizes) if wick_sizes else 0,
-            'wick_body_ratio': np.mean(wick_body_ratios) if wick_body_ratios else 0
-        }
-        
-        return metrics
-    
-    def analyze(self, data):
-        """Analyze fetched data"""
+    def analyze_metrics(self, data):
+        """Analyze standard metrics for 500 and 1500 points"""
         for pair, exchanges in data.items():
-            key = pair.replace('/', '_')
-            
-            if key not in self.data:
-                self.data[key] = {}
+            coin_key = pair.replace('/', '_')
+            self.metrics_data[coin_key] = {}
             
             for exchange, df in exchanges.items():
                 prices = pd.Series(df['price'].values, dtype=float)
+                self.metrics_data[coin_key][exchange] = {}
                 
-                if exchange not in self.data[key]:
-                    self.data[key][exchange] = {}
-                
-                # Calculate metrics for 500 and 1500 points only
-                for pc in self.point_counts:
-                    metrics = self.calc_metrics(prices, pc)
-                    if metrics:
-                        self.data[key][exchange][pc] = metrics
-                
-                # Calculate health metrics
-                health = self.calc_health(df)
-                if health:
-                    if key not in self.health:
-                        self.health[key] = {}
-                    self.health[key][exchange] = health
+                # Only 500 and 1500 points
+                for points in [500, 1500]:
+                    if len(prices) >= points:
+                        sample = prices.iloc[-points:]
+                        
+                        # Choppiness
+                        window = min(20, points // 10)
+                        chop = self.calculate_choppiness(sample, window)
+                        
+                        # ATR%
+                        atr = sample.diff().abs().mean()
+                        atr_pct = (atr / sample.mean()) * 100
+                        
+                        # Trend
+                        net = abs(sample.iloc[-1] - sample.iloc[-window])
+                        sum_chg = sample.diff().abs().rolling(window).sum().iloc[-1]
+                        trend = net / sum_chg if sum_chg > 0 else 0
+                        
+                        self.metrics_data[coin_key][exchange][points] = {
+                            'choppiness': chop,
+                            'atr_pct': atr_pct,
+                            'trend': trend
+                        }
     
-    def get_comparison_df(self, point_count):
-        """Create comparison dataframe for parameter comparison"""
+    def analyze_health(self, data):
+        """Analyze 1-minute candle health metrics"""
+        for pair, exchanges in data.items():
+            coin_key = pair.replace('/', '_')
+            self.health_data[coin_key] = {}
+            
+            for exchange, df in exchanges.items():
+                df = df.copy()
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+                df['price'] = pd.to_numeric(df['price'])
+                df = df.set_index('timestamp').sort_index()
+                
+                # Last 10 minutes only
+                cutoff = df.index.max() - pd.Timedelta(minutes=10)
+                recent = df[df.index >= cutoff]
+                
+                if len(recent) < 10:
+                    continue
+                
+                # Create 1-minute candles
+                ohlc = recent['price'].resample('1T').ohlc().dropna()
+                
+                if len(ohlc) == 0:
+                    continue
+                
+                # Count metrics
+                doji_count = 0
+                high_wick_count = 0
+                wick_pcts = []
+                wick_sizes = []
+                wick_body_ratios = []
+                
+                for _, candle in ohlc.iterrows():
+                    body = abs(candle['close'] - candle['open'])
+                    total_range = candle['high'] - candle['low']
+                    
+                    if total_range > 0:
+                        upper_wick = candle['high'] - max(candle['open'], candle['close'])
+                        lower_wick = min(candle['open'], candle['close']) - candle['low']
+                        total_wick = upper_wick + lower_wick
+                        
+                        body_pct = (body / total_range) * 100
+                        wick_pct = (total_wick / total_range) * 100
+                        
+                        # Doji: body < 30%
+                        if body_pct < 30:
+                            doji_count += 1
+                        
+                        # High wick: wick > 50%
+                        if wick_pct > 50:
+                            high_wick_count += 1
+                        
+                        wick_pcts.append(wick_pct)
+                        wick_sizes.append(total_wick)
+                        
+                        if body > 0:
+                            wick_body_ratios.append(total_wick / body)
+                        else:
+                            wick_body_ratios.append(10.0)
+                
+                self.health_data[coin_key][exchange] = {
+                    'doji_count': doji_count,
+                    'high_wick_count': high_wick_count,
+                    'avg_wick_pct': np.mean(wick_pcts) if wick_pcts else 0,
+                    'avg_wick_size': np.mean(wick_sizes) if wick_sizes else 0,
+                    'max_wick': max(wick_sizes) if wick_sizes else 0,
+                    'wick_body_ratio': np.mean(wick_body_ratios) if wick_body_ratios else 0
+                }
+    
+    def get_metrics_df(self, points):
+        """Create metrics comparison dataframe"""
         rows = []
-        
-        for key, exchanges in self.data.items():
-            coin = key.replace('_', '/')
+        for coin_key, exchanges in self.metrics_data.items():
+            coin = coin_key.replace('_', '/')
             row = {'Coin': coin}
             
-            # Add metrics
-            for metric in ['choppiness', 'tick_atr_pct', 'trend_strength']:
-                metric_short = metric.replace('tick_atr_pct', 'ATR%').replace('choppiness', 'Chop').replace('trend_strength', 'Trend')
-                
-                rollbit_val = None
-                surf_val = None
-                
-                if 'rollbit' in exchanges and point_count in exchanges['rollbit']:
-                    rollbit_val = exchanges['rollbit'][point_count].get(metric)
-                if 'surf' in exchanges and point_count in exchanges['surf']:
-                    surf_val = exchanges['surf'][point_count].get(metric)
-                
-                row[f'{metric_short} ROLLBIT'] = rollbit_val
-                row[f'{metric_short} SURF'] = surf_val
-                
-                if rollbit_val is not None and surf_val is not None:
-                    row[f'{metric_short} Diff'] = surf_val - rollbit_val
+            # Get values
+            r_data = exchanges.get('rollbit', {}).get(points, {})
+            s_data = exchanges.get('surf', {}).get(points, {})
+            
+            # Choppiness
+            r_chop = r_data.get('choppiness')
+            s_chop = s_data.get('choppiness')
+            row['Chop ROLLBIT'] = r_chop
+            row['Chop SURF'] = s_chop
+            if r_chop and s_chop:
+                row['Chop Diff'] = s_chop - r_chop
+            
+            # ATR%
+            r_atr = r_data.get('atr_pct')
+            s_atr = s_data.get('atr_pct')
+            row['ATR% ROLLBIT'] = r_atr
+            row['ATR% SURF'] = s_atr
+            if r_atr and s_atr:
+                row['ATR% Diff'] = s_atr - r_atr
+            
+            # Trend
+            r_trend = r_data.get('trend')
+            s_trend = s_data.get('trend')
+            row['Trend ROLLBIT'] = r_trend
+            row['Trend SURF'] = s_trend
+            if r_trend and s_trend:
+                row['Trend Diff'] = s_trend - r_trend
             
             rows.append(row)
         
         return pd.DataFrame(rows)
     
     def get_health_df(self):
-        """Create health metrics dataframe with difference columns"""
+        """Create health dataframe with difference columns"""
         rows = []
         
-        for key in sorted(self.health.keys()):
-            coin = key.replace('_', '/')
+        for coin_key in sorted(self.health_data.keys()):
+            coin = coin_key.replace('_', '/')
             
-            # Get data for both exchanges
-            rollbit_data = self.health[key].get('rollbit', {})
-            surf_data = self.health[key].get('surf', {})
+            r_data = self.health_data[coin_key].get('rollbit', {})
+            s_data = self.health_data[coin_key].get('surf', {})
+            
+            # Calculate differences
+            wick_diff = None
+            doji_diff = None
+            if r_data and s_data:
+                wick_diff = s_data['high_wick_count'] - r_data['high_wick_count']
+                doji_diff = s_data['doji_count'] - r_data['doji_count']
             
             # Rollbit row
-            rollbit_row = {
+            r_row = {
                 'Coin': coin,
                 'Exchange': 'Rollbit',
-                'Doji Count': int(rollbit_data.get('doji_count', 0)),
-                'Doji %': round(rollbit_data.get('doji_pct', 0), 2),
-                'Avg Wick %': round(rollbit_data.get('avg_wick_pct', 0), 2),
-                'Avg Wick Size': round(rollbit_data.get('avg_wick_size', 0), 6),
-                'High Wick Count': int(rollbit_data.get('high_wick_count', 0)),
-                'Max Wick': round(rollbit_data.get('max_wick', 0), 6),
-                'Wick/Body Ratio': round(rollbit_data.get('wick_body_ratio', 0), 2),
-                'Wick Count Diff': None,  # Will be filled in difference row
-                'Doji Count Diff': None   # Will be filled in difference row
+                'Doji Count': r_data.get('doji_count', 0),
+                'High Wick Count': r_data.get('high_wick_count', 0),
+                'Avg Wick %': round(r_data.get('avg_wick_pct', 0), 2),
+                'Avg Wick Size': round(r_data.get('avg_wick_size', 0), 6),
+                'Max Wick': round(r_data.get('max_wick', 0), 6),
+                'Wick/Body Ratio': round(r_data.get('wick_body_ratio', 0), 2),
+                'Wick Diff': wick_diff,
+                'Doji Diff': doji_diff
             }
             
             # Surf row
-            surf_row = {
+            s_row = {
                 'Coin': coin,
                 'Exchange': 'Surf',
-                'Doji Count': int(surf_data.get('doji_count', 0)),
-                'Doji %': round(surf_data.get('doji_pct', 0), 2),
-                'Avg Wick %': round(surf_data.get('avg_wick_pct', 0), 2),
-                'Avg Wick Size': round(surf_data.get('avg_wick_size', 0), 6),
-                'High Wick Count': int(surf_data.get('high_wick_count', 0)),
-                'Max Wick': round(surf_data.get('max_wick', 0), 6),
-                'Wick/Body Ratio': round(surf_data.get('wick_body_ratio', 0), 2),
-                'Wick Count Diff': None,
-                'Doji Count Diff': None
+                'Doji Count': s_data.get('doji_count', 0),
+                'High Wick Count': s_data.get('high_wick_count', 0),
+                'Avg Wick %': round(s_data.get('avg_wick_pct', 0), 2),
+                'Avg Wick Size': round(s_data.get('avg_wick_size', 0), 6),
+                'Max Wick': round(s_data.get('max_wick', 0), 6),
+                'Wick/Body Ratio': round(s_data.get('wick_body_ratio', 0), 2),
+                'Wick Diff': wick_diff,
+                'Doji Diff': doji_diff
             }
             
-            # Calculate differences (Surf - Rollbit)
-            if rollbit_data and surf_data:
-                wick_diff = int(surf_data.get('high_wick_count', 0)) - int(rollbit_data.get('high_wick_count', 0))
-                doji_diff = int(surf_data.get('doji_count', 0)) - int(rollbit_data.get('doji_count', 0))
-                
-                # Add differences to both rows for visibility
-                rollbit_row['Wick Count Diff'] = wick_diff
-                rollbit_row['Doji Count Diff'] = doji_diff
-                surf_row['Wick Count Diff'] = wick_diff
-                surf_row['Doji Count Diff'] = doji_diff
-            
-            rows.append(rollbit_row)
-            rows.append(surf_row)
+            rows.append(r_row)
+            rows.append(s_row)
         
         return pd.DataFrame(rows) if rows else None
 
-# Main UI
-st.title("Crypto Exchange Analysis Dashboard")
-st.write(f"Time: {datetime.now(pytz.timezone('Asia/Singapore')).strftime('%Y-%m-%d %H:%M:%S')} SGT")
+# UI
+st.title("Crypto Exchange Analysis")
+st.write(f"{datetime.now(pytz.timezone('Asia/Singapore')).strftime('%Y-%m-%d %H:%M:%S')} SGT")
 
-# Two tabs only
-tab1, tab2 = st.tabs(["Parameter Comparison", "Coin Health (1-min Wicks)"])
+# Two tabs
+tab1, tab2 = st.tabs(["Parameter Comparison", "Coin Health"])
 
 # Sidebar
 with st.sidebar:
     st.header("Settings")
     
+    # Get pairs
     @st.cache_data
     def get_pairs():
         try:
-            query = "SELECT DISTINCT pair_name FROM trade_pool_pairs WHERE status IN (1,2) ORDER BY pair_name"
-            with engine.connect() as conn:
-                result = conn.execute(text(query))
-                return [row[0] for row in result]
+            with engine.connect() as c:
+                r = c.execute(text("SELECT DISTINCT pair_name FROM trade_pool_pairs WHERE status IN (1,2) ORDER BY pair_name"))
+                return [row[0] for row in r]
         except:
-            return ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+            return ["BTC/USDT", "ETH/USDT"]
     
-    all_pairs = get_pairs()
+    pairs = get_pairs()
     
-    # Three buttons
-    col1, col2, col3 = st.columns(3)
-    with col1:
+    # Buttons
+    c1, c2, c3 = st.columns(3)
+    with c1:
         if st.button("Major"):
-            st.session_state.selected = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "DOGE/USDT"]
-    with col2:
+            st.session_state.sel = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "DOGE/USDT"]
+    with c2:
         if st.button("All"):
-            st.session_state.selected = all_pairs
-    with col3:
+            st.session_state.sel = pairs
+    with c3:
         if st.button("Clear"):
-            st.session_state.selected = []
+            st.session_state.sel = []
     
-    if 'selected' not in st.session_state:
-        st.session_state.selected = ["BTC/USDT", "ETH/USDT"]
+    if 'sel' not in st.session_state:
+        st.session_state.sel = ["BTC/USDT", "ETH/USDT"]
     
-    selected = st.multiselect("Select Pairs", all_pairs, default=st.session_state.selected)
+    selected = st.multiselect("Select", pairs, st.session_state.sel)
     
-    st.info("Fetches ~1600 points max (enough for 1500 analysis)")
-    st.info("Point counts: 500 and 1500 only")
+    st.info("Max 1500 points analyzed")
     
-    analyze = st.button("🔍 Analyze", type="primary", use_container_width=True)
+    go = st.button("Analyze", type="primary")
 
-# Analysis
-if analyze and selected:
-    analyzer = Analyzer()
+# Run analysis
+if go and selected:
+    analyzer = CryptoAnalyzer()
     
-    with st.spinner("Analyzing..."):
-        data = analyzer.fetch(selected)
-        analyzer.analyze(data)
+    with st.spinner("Processing..."):
+        # Fetch
+        data = analyzer.fetch_data(selected)
         
-        # Tab 1: Parameter Comparison
+        # Analyze
+        analyzer.analyze_metrics(data)
+        analyzer.analyze_health(data)
+        
+        # Tab 1
         with tab1:
-            st.header("Parameter Comparison")
-            st.write("Showing Choppiness, ATR%, and Trend Strength for 500 and 1500 points")
+            st.header("Parameters (500 & 1500 points)")
             
-            for pc in analyzer.point_counts:
-                with st.expander(f"{pc} Points", expanded=(pc==500)):
-                    df = analyzer.get_comparison_df(pc)
-                    if not df.empty:
-                        st.dataframe(df, use_container_width=True)
-                    else:
-                        st.info("No data available")
+            # 500 points
+            st.subheader("500 Points")
+            df500 = analyzer.get_metrics_df(500)
+            if not df500.empty:
+                st.dataframe(df500, use_container_width=True)
+            
+            # 1500 points
+            st.subheader("1500 Points")
+            df1500 = analyzer.get_metrics_df(1500)
+            if not df1500.empty:
+                st.dataframe(df1500, use_container_width=True)
         
-        # Tab 2: Coin Health
+        # Tab 2
         with tab2:
-            st.header("Coin Health Analysis")
-            st.write("1-minute candles over last 10 minutes")
-            st.info("Wick Count Diff and Doji Count Diff show (Surf - Rollbit)")
+            st.header("Health (10 x 1-min candles)")
+            st.info("Doji: body<30%, High Wick: wick>50%. Diff = Surf - Rollbit")
             
-            df = analyzer.get_health_df()
-            
-            if df is not None:
-                # Style function
-                def style_row(row):
-                    if row['Exchange'] == 'Rollbit':
-                        return ['background-color: #e3f2fd'] * len(row)
-                    return ['background-color: #fff3e0'] * len(row)
-                
-                styled = df.style.apply(style_row, axis=1)
+            health_df = analyzer.get_health_df()
+            if health_df is not None:
+                # Style
+                def style(r):
+                    if r['Exchange'] == 'Rollbit':
+                        return ['background-color: #e3f2fd'] * len(r)
+                    return ['background-color: #fff3e0'] * len(r)
                 
                 st.dataframe(
-                    styled,
+                    health_df.style.apply(style, axis=1),
                     use_container_width=True,
-                    height=800,
-                    column_config={
-                        "Doji Count": st.column_config.NumberColumn(format="%d"),
-                        "High Wick Count": st.column_config.NumberColumn(format="%d"),
-                        "Wick Count Diff": st.column_config.NumberColumn(format="%d"),
-                        "Doji Count Diff": st.column_config.NumberColumn(format="%d"),
-                        "Doji %": st.column_config.NumberColumn(format="%.2f"),
-                        "Avg Wick %": st.column_config.NumberColumn(format="%.2f"),
-                        "Avg Wick Size": st.column_config.NumberColumn(format="%.6f"),
-                        "Max Wick": st.column_config.NumberColumn(format="%.6f"),
-                        "Wick/Body Ratio": st.column_config.NumberColumn(format="%.2f")
-                    }
+                    height=800
                 )
-                
-                # Download
-                csv = df.to_csv(index=False)
-                st.download_button("Download CSV", csv, "health_metrics.csv")
-            else:
-                st.info("No health data available")
-
-elif analyze:
-    st.warning("Please select at least one pair")
