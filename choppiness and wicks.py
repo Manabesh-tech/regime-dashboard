@@ -361,11 +361,14 @@ with st.sidebar:
     all_pairs = get_pairs()
     
     # Quick select buttons
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
         if st.button("Major Coins"):
             st.session_state.pairs = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "DOGE/USDT"]
     with col2:
+        if st.button("Select All"):
+            st.session_state.pairs = all_pairs
+    with col3:
         if st.button("Clear"):
             st.session_state.pairs = []
     
