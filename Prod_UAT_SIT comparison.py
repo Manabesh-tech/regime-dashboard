@@ -243,7 +243,7 @@ class SurfAnalyzer:
             hours: Hours to look back for data retrieval
         """
         # Environments to compare
-        environments_to_compare = ['UAT', 'PROD', 'SIT']
+        environments_to_compare = ['UAT']
         
         # Use explicit Singapore timezone for all time calculations
         singapore_tz = pytz.timezone('Asia/Singapore')

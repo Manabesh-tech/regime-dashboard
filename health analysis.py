@@ -118,6 +118,18 @@ now_utc = datetime.now(pytz.utc)
 now_sg = now_utc.astimezone(singapore_timezone)
 st.write(f"Current Singapore Time: {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
 
+# Surf to Rollbit token mapping
+SURF_TO_ROLLBIT_MAP = {
+    # 常见的需要映射的token
+    "PUMP/USDT": "1000PUMP/USDT"
+    # 可以继续添加更多映射
+}
+
+def get_rollbit_token(surf_token):
+    """Get Rollbit token name from Surf token name"""
+    # 如果找不到映射，返回原始的surf_token
+    return SURF_TO_ROLLBIT_MAP.get(surf_token, surf_token)
+
 # Exchange comparison class
 class ExchangeAnalyzer:
     """Specialized analyzer for comparing metrics between Surf and Rollbit"""
@@ -277,7 +289,8 @@ class ExchangeAnalyzer:
                     AND pair_name = '{pair_name}'
                 """
             else:
-                # For Rollbit data
+                # For Rollbit data - use token mapping
+                rollbit_pair_name = get_rollbit_token(pair_name)
                 query = f"""
                 SELECT 
                     pair_name,
@@ -289,7 +302,7 @@ class ExchangeAnalyzer:
                     created_at >= '{start_time_str}'::timestamp - INTERVAL '8 hour'
                     AND created_at <= '{end_time_str}'::timestamp - INTERVAL '8 hour'
                     AND source_type = 1
-                    AND pair_name = '{pair_name}'
+                    AND pair_name = '{rollbit_pair_name}'
                 """
             
             union_parts.append(query)
@@ -1366,6 +1379,11 @@ The dashboard compares these metrics and provides rankings and visualizations fo
 - **20-Minute Analysis**: Doji candles and choppiness over the last 20 minutes
 - **Doji Candles**: 5-second candles where body < 30% of total length
 - Shows market indecision and potential reversal points
+
+**Token Mapping**
+- Surf and Rollbit may use different token names
+- The system automatically maps Surf token names to Rollbit equivalents
+- Example: PUMP/USDT (Surf) → 1000PUMP/USDT (Rollbit)
 """)
 
 # Add footer
