@@ -360,7 +360,7 @@ with st.sidebar:
     
     selected = st.multiselect("Select Pairs", all_pairs, default=st.session_state.selected)
     
-    st.info("Fixed 1 hour data lookback")
+    st.info("Fetches ~1600 points max (enough for 1500 analysis)")
     st.info("Point counts: 500 and 1500 only")
     
     analyze = st.button("🔍 Analyze", type="primary", use_container_width=True)
