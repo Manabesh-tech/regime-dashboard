@@ -5,6 +5,8 @@ from datetime import datetime, timedelta
 import pytz
 from sqlalchemy import create_engine, text
 import warnings
+import pickle
+import os
 
 warnings.filterwarnings('ignore')
 
@@ -26,6 +28,16 @@ engine = get_db()
 
 # Token mapping
 TOKEN_MAP = {"PUMP/USDT": "1000PUMP/USDT"}
+
+# Initialize session state for persistent storage
+if 'analysis_results' not in st.session_state:
+    st.session_state.analysis_results = {}
+if 'last_analysis_time' not in st.session_state:
+    st.session_state.last_analysis_time = None
+if 'cached_pairs' not in st.session_state:
+    st.session_state.cached_pairs = None
+if 'pairs_cache_time' not in st.session_state:
+    st.session_state.pairs_cache_time = None
 
 class CryptoAnalyzer:
     def __init__(self):
@@ -301,7 +313,15 @@ class CryptoAnalyzer:
 
 # UI
 st.title("Crypto Exchange Analysis")
-st.write(f"{datetime.now(pytz.timezone('Asia/Singapore')).strftime('%Y-%m-%d %H:%M:%S')} SGT")
+
+# Display current time and last analysis time
+current_time = datetime.now(pytz.timezone('Asia/Singapore'))
+st.write(f"Current Time: {current_time.strftime('%Y-%m-%d %H:%M:%S')} SGT")
+
+if st.session_state.last_analysis_time:
+    time_diff = current_time - st.session_state.last_analysis_time
+    minutes_ago = int(time_diff.total_seconds() / 60)
+    st.info(f"Last analysis: {st.session_state.last_analysis_time.strftime('%Y-%m-%d %H:%M:%S')} SGT ({minutes_ago} minutes ago)")
 
 # Two tabs
 tab1, tab2 = st.tabs(["Parameter Comparison", "Coin Health"])
@@ -310,19 +330,41 @@ tab1, tab2 = st.tabs(["Parameter Comparison", "Coin Health"])
 with st.sidebar:
     st.header("Settings")
     
-    # Get pairs
-    @st.cache_data
+    # Get pairs with better caching
     def get_pairs():
+        # Use session state cache first
+        if st.session_state.cached_pairs is not None:
+            # Check if cache is still fresh (within 30 minutes)
+            if st.session_state.pairs_cache_time:
+                cache_age = datetime.now(pytz.timezone('Asia/Singapore')) - st.session_state.pairs_cache_time
+                if cache_age.total_seconds() < 1800:  # 30 minutes
+                    return st.session_state.cached_pairs
+        
+        # Fetch fresh data
         try:
             with engine.connect() as c:
                 r = c.execute(text("SELECT DISTINCT pair_name FROM trade_pool_pairs WHERE status IN (1,2) ORDER BY pair_name"))
-                return [row[0] for row in r]
-        except:
+                pairs = [row[0] for row in r]
+                # Update cache
+                st.session_state.cached_pairs = pairs
+                st.session_state.pairs_cache_time = datetime.now(pytz.timezone('Asia/Singapore'))
+                return pairs
+        except Exception as e:
+            st.error(f"Error fetching pairs: {e}")
+            # Return cached data if available, otherwise defaults
+            if st.session_state.cached_pairs:
+                return st.session_state.cached_pairs
             return ["BTC/USDT", "ETH/USDT"]
     
     pairs = get_pairs()
     
-    # Buttons
+    # Refresh pairs button
+    if st.button("🔄 Refresh Pairs List"):
+        st.session_state.cached_pairs = None
+        st.session_state.pairs_cache_time = None
+        st.rerun()
+    
+    # Selection buttons
     c1, c2, c3 = st.columns(3)
     with c1:
         if st.button("Major"):
@@ -337,17 +379,32 @@ with st.sidebar:
     if 'sel' not in st.session_state:
         st.session_state.sel = ["BTC/USDT", "ETH/USDT"]
     
-    selected = st.multiselect("Select", pairs, st.session_state.sel)
+    selected = st.multiselect("Select Pairs", pairs, st.session_state.sel)
     
-    st.info("Max 1500 points analyzed")
+    st.info("Max 1500 points analyzed per pair")
     
-    go = st.button("Analyze", type="primary")
+    # Analysis buttons
+    col1, col2 = st.columns(2)
+    with col1:
+        go = st.button("🔍 Analyze", type="primary", use_container_width=True)
+    with col2:
+        clear_cache = st.button("🗑️ Clear Results", use_container_width=True)
+    
+    if clear_cache:
+        st.session_state.analysis_results = {}
+        st.session_state.last_analysis_time = None
+        st.success("Cleared cached results!")
+        st.rerun()
+    
+    # Show cached results info
+    if st.session_state.analysis_results:
+        st.success(f"📊 Cached results available for {len(st.session_state.analysis_results)} analyses")
 
 # Run analysis
 if go and selected:
     analyzer = CryptoAnalyzer()
     
-    with st.spinner("Processing..."):
+    with st.spinner("Processing... This may take a while for many pairs."):
         # Fetch
         data = analyzer.fetch_data(selected)
         
@@ -355,7 +412,20 @@ if go and selected:
         analyzer.analyze_metrics(data)
         analyzer.analyze_health(data)
         
-        # Tab 1
+        # Store results in session state
+        analysis_key = f"{','.join(sorted(selected))}_{current_time.strftime('%Y%m%d_%H%M%S')}"
+        
+        st.session_state.analysis_results[analysis_key] = {
+            'metrics_data': analyzer.metrics_data,
+            'health_data': analyzer.health_data,
+            'timestamp': current_time,
+            'pairs': selected
+        }
+        
+        # Update last analysis time
+        st.session_state.last_analysis_time = current_time
+        
+        # Display results
         with tab1:
             st.header("Parameters (500 & 1500 points)")
             
@@ -389,3 +459,57 @@ if go and selected:
                     use_container_width=True,
                     height=800
                 )
+        
+        st.success("✅ Analysis complete and saved!")
+
+# Display cached results if no new analysis
+elif st.session_state.analysis_results and not go:
+    # Get the most recent analysis
+    if st.session_state.analysis_results:
+        latest_key = max(st.session_state.analysis_results.keys())
+        latest_result = st.session_state.analysis_results[latest_key]
+        
+        # Create analyzer and populate with cached data
+        analyzer = CryptoAnalyzer()
+        analyzer.metrics_data = latest_result['metrics_data']
+        analyzer.health_data = latest_result['health_data']
+        
+        st.info(f"📊 Showing cached results from {latest_result['timestamp'].strftime('%Y-%m-%d %H:%M:%S')} SGT")
+        st.write(f"Pairs analyzed: {', '.join(latest_result['pairs'])}")
+        
+        # Display cached results
+        with tab1:
+            st.header("Parameters (500 & 1500 points)")
+            
+            # 500 points
+            st.subheader("500 Points")
+            df500 = analyzer.get_metrics_df(500)
+            if not df500.empty:
+                st.dataframe(df500, use_container_width=True)
+            
+            # 1500 points
+            st.subheader("1500 Points")
+            df1500 = analyzer.get_metrics_df(1500)
+            if not df1500.empty:
+                st.dataframe(df1500, use_container_width=True)
+        
+        # Tab 2
+        with tab2:
+            st.header("Health (10 x 1-min candles)")
+            st.info("Doji: body<30%, High Wick: wick>50%. Diff = Surf - Rollbit")
+            
+            health_df = analyzer.get_health_df()
+            if health_df is not None:
+                # Style
+                def style(r):
+                    if r['Exchange'] == 'Rollbit':
+                        return ['background-color: #e3f2fd'] * len(r)
+                    return ['background-color: #fff3e0'] * len(r)
+                
+                st.dataframe(
+                    health_df.style.apply(style, axis=1),
+                    use_container_width=True,
+                    height=800
+                )
+else:
+    st.info("👆 Select pairs and click 'Analyze' to start")
