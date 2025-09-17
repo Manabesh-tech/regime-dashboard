@@ -7,517 +7,352 @@ from sqlalchemy import create_engine, text
 import warnings
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import json
 
 warnings.filterwarnings('ignore')
 
 st.set_page_config(
-    page_title="Order Book Level Optimization",
+    page_title="Order Book N Optimizer",
     page_icon="📊",
     layout="wide"
 )
-uat_db_params = {
+
+# Database configuration - use your actual credentials
+db_params = {
     'host': 'aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com',
     'port': 5432,
-    'database': 'report_dev',  # Different database
-    'user': 'public_rw',     # Different user
-    'password': 'aTJ92^kl04hllk'  # Different password
+    'database': 'report_dev',
+    'user': 'public_rw',
+    'password': 'aTJ92^kl04hllk'
 }
-# Database
+
 @st.cache_resource
 def get_db():
     return create_engine(
-        f"postgresql://{uat_db_params['user']}:{uat_db_params['password']}@{uat_db_params['host']}:{uat_db_params['port']}/{uat_db_params['database']}"
+        f"postgresql://{db_params['user']}:{db_params['password']}@{db_params['host']}:{db_params['port']}/{db_params['database']}",
+        pool_pre_ping=True
     )
 
 engine = get_db()
 
-class DepthOptimizer:
+class OrderBookOptimizer:
     def __init__(self):
-        self.optimization_results = {}
-        
-    def fetch_order_book_data(self, pair):
-        """Fetch order book snapshot data if available, otherwise use price data"""
+        self.results = {}
+
+    def fetch_order_book_data(self, pair, minutes=30):
+        """Fetch real order book data"""
         tz = pytz.timezone('Asia/Singapore')
         now = datetime.now(tz)
-        
-        # Try to get order book data first
-        try:
-            # Check if order book table exists
-            query = f"""
-                SELECT 
-                    created_at + INTERVAL '8 hour' AS timestamp,
-                    bids,
-                    asks
-                FROM oracle_order_book_partition_{now.strftime('%Y%m%d')}
-                WHERE pair_name = '{pair}'
-                    AND created_at >= NOW() - INTERVAL '30 minutes'
-                ORDER BY timestamp DESC
-                LIMIT 2000
-            """
-            with engine.connect() as conn:
-                df = pd.read_sql(text(query), conn)
-                if not df.empty:
-                    return df, 'orderbook'
-        except:
-            pass
-        
-        # Fallback to price data
-        table = f"oracle_price_log_partition_{now.strftime('%Y%m%d')}"
-        start = now - timedelta(minutes=30)
-        
+        table = f"oracle_order_book_partition_{now.strftime('%Y%m%d')}"
+
         query = f"""
             SELECT 
                 created_at + INTERVAL '8 hour' AS timestamp,
-                final_price AS price
+                bids::text,
+                asks::text,
+                jsonb_array_length(bids::jsonb) as bid_levels,
+                jsonb_array_length(asks::jsonb) as ask_levels,
+                LEAST(jsonb_array_length(bids::jsonb), jsonb_array_length(asks::jsonb)) as max_levels
             FROM {table}
             WHERE pair_name = '{pair}'
-                AND source_type = 0
-                AND created_at >= '{start}'::timestamp - INTERVAL '8 hour'
-            ORDER BY timestamp DESC
-            LIMIT 2000
+                AND created_at >= NOW() - INTERVAL '{minutes} minutes'
+            ORDER BY created_at ASC
         """
-        
-        with engine.connect() as conn:
-            df = pd.read_sql(text(query), conn)
-            return df, 'price'
-    
-    def calculate_choppiness(self, prices, window=20):
-        """Calculate choppiness index"""
-        if len(prices) < window:
-            return 200  # Default
-            
+
+        try:
+            with engine.connect() as conn:
+                df = pd.read_sql(text(query), conn)
+                if not df.empty:
+                    df['timestamp'] = pd.to_datetime(df['timestamp'])
+                    return df
+                return pd.DataFrame()
+        except Exception as e:
+            st.error(f"Database error: {e}")
+            return pd.DataFrame()
+
+    def calculate_weighted_price(self, bids_str, asks_str, n_levels):
+        """Calculate weighted mid price using n levels"""
+        try:
+            bids = json.loads(bids_str)
+            asks = json.loads(asks_str)
+
+            # Use only n levels
+            bids = bids[:n_levels]
+            asks = asks[:n_levels]
+
+            if not bids or not asks:
+                return None
+
+            # For n=1, simple mid
+            if n_levels == 1:
+                return (float(bids[0]['p']) + float(asks[0]['p'])) / 2
+
+            # Volume-weighted calculation
+            bid_sum = sum(float(b['p']) * float(b['v']) for b in bids)
+            bid_vol = sum(float(b['v']) for b in bids)
+            ask_sum = sum(float(a['p']) * float(a['v']) for a in asks)
+            ask_vol = sum(float(a['v']) for a in asks)
+
+            if bid_vol > 0 and ask_vol > 0:
+                bid_vwap = bid_sum / bid_vol
+                ask_vwap = ask_sum / ask_vol
+                return (bid_vwap + ask_vwap) / 2
+
+            return None
+        except:
+            return None
+
+    def calculate_metrics(self, prices):
+        """Calculate choppiness and doji metrics"""
+        if len(prices) < 20:
+            return None
+
+        # Choppiness (your formula)
+        window = 20
         diff = prices.diff().abs()
         sum_abs = diff.rolling(window, min_periods=1).sum()
         range_roll = prices.rolling(window, min_periods=1).max() - prices.rolling(window, min_periods=1).min()
-        
         range_roll = range_roll.replace(0, 1e-10)
-        
-        chop = 100 * sum_abs / (range_roll + 1e-10)
+        chop = 100 * sum_abs / range_roll
         chop = np.minimum(chop, 1000)
-        chop = chop.fillna(200)
-        
-        return chop.mean()
-    
-    def calculate_doji_count(self, prices, candle_size=120):
-        """Calculate doji candles (120 points = 1 minute)"""
-        if len(prices) < candle_size:
-            return 0
-        
+        choppiness = chop.mean()
+
+        # Doji count (1-minute candles)
         doji_count = 0
-        
-        for i in range(0, len(prices) - candle_size, candle_size):
-            segment = prices.iloc[i:i+candle_size]
-            
-            if len(segment) < candle_size:
-                continue
-                
-            open_price = segment.iloc[0]
-            close_price = segment.iloc[-1]
-            high_price = segment.max()
-            low_price = segment.min()
-            
-            body = abs(close_price - open_price)
-            total_range = high_price - low_price
-            
-            if total_range > 0:
-                body_pct = (body / total_range) * 100
-                if body_pct < 30:  # Doji threshold
-                    doji_count += 1
-        
-        return doji_count
-    
-    def simulate_level_count_effect(self, prices, n_levels):
-        """
-        Simulate the effect of using only n order book levels
-        
-        Key insight: Fewer levels = more responsive to immediate liquidity = higher choppiness
-        More levels = averaging across more liquidity = smoother prices
-        """
-        if len(prices) == 0:
-            return prices
-        
-        # Simulate the effect of limited order book depth
-        # Fewer levels = more volatile (less averaging)
-        # More levels = smoother (more averaging)
-        
-        if n_levels == 1:
-            # Top of book only - very jumpy
-            noise_factor = 0.02  # 2% noise
-            window = 1
-        elif n_levels <= 3:
-            # Top few levels - still quite responsive
-            noise_factor = 0.015
-            window = 2
-        elif n_levels <= 5:
-            # Moderate depth
-            noise_factor = 0.01
-            window = 3
-        elif n_levels <= 10:
-            # Good depth
-            noise_factor = 0.005
-            window = 5
-        elif n_levels <= 20:
-            # Deep book
-            noise_factor = 0.003
-            window = 8
-        else:
-            # Very deep (Rollbit-like)
-            noise_factor = 0.002
-            window = 10
-        
-        # Add noise inversely proportional to depth
-        noise = np.random.normal(0, prices.std() * noise_factor, len(prices))
-        noisy_prices = prices + noise
-        
-        # Apply smoothing proportional to depth
-        if window > 1:
-            smoothed = noisy_prices.rolling(window=window, min_periods=1, center=True).mean()
-            # Blend based on depth - more levels = more smoothing
-            blend_factor = min(0.8, n_levels / 30)
-            adjusted = noisy_prices * (1 - blend_factor) + smoothed * blend_factor
-        else:
-            adjusted = noisy_prices
-        
-        return adjusted
-    
-    def optimize_level_count(self, pair, data, data_type, level_range, target='balanced'):
-        """
-        Optimize the number of order book levels to use
-        
-        level_range: list of integers [1, 2, 3, 5, 10, 20, 50, 100]
-        """
+        high_wick_count = 0
+
+        if len(prices) > 120:  # Need at least 1 minute of data
+            # Resample to 1-minute OHLC
+            ohlc = prices.resample('1T').ohlc().dropna()
+
+            for _, candle in ohlc.iterrows():
+                body = abs(candle['close'] - candle['open'])
+                total_range = candle['high'] - candle['low']
+
+                if total_range > 0:
+                    body_pct = (body / total_range) * 100
+                    if body_pct < 30:
+                        doji_count += 1
+
+                    upper_wick = candle['high'] - max(candle['open'], candle['close'])
+                    lower_wick = min(candle['open'], candle['close']) - candle['low']
+                    wick_pct = ((upper_wick + lower_wick) / total_range) * 100
+                    if wick_pct > 50:
+                        high_wick_count += 1
+
+        return {
+            'choppiness': choppiness,
+            'doji_count': doji_count,
+            'high_wick_count': high_wick_count,
+            'data_points': len(prices),
+            'volatility': (prices.std() / prices.mean()) * 100 if prices.mean() > 0 else 0
+        }
+
+    def optimize_n(self, pair, level_range=[1,2,3,5,7,10,15,20,30,50]):
+        """Find optimal N value"""
+        df = self.fetch_order_book_data(pair)
+
+        if df.empty:
+            st.error(f"No order book data available for {pair}")
+            return pd.DataFrame()
+
+        max_available = df['max_levels'].min()
+        st.info(f"📊 Found {len(df)} snapshots, max consistent depth: {max_available} levels")
+
+        # Filter to available levels
+        level_range = [n for n in level_range if n <= max_available]
+
         results = []
-        
-        if data_type == 'price':
-            prices = pd.Series(data['price'].values, dtype=float)
-        else:
-            # For order book data, calculate mid prices
-            # This is simplified - in reality you'd process the actual order book
-            prices = pd.Series(data['price'].values if 'price' in data.columns else np.random.randn(len(data)), dtype=float)
-        
-        if len(prices) < 1500:
-            st.warning(f"Only {len(prices)} data points available")
-            prices = prices.iloc[-min(1500, len(prices)):]
-        else:
-            prices = prices.iloc[-1500:]
-        
-        for n_levels in level_range:
-            # Simulate the effect of using n levels
-            adjusted_prices = self.simulate_level_count_effect(prices, n_levels)
-            
-            # Calculate metrics
-            choppiness = self.calculate_choppiness(adjusted_prices)
-            doji_count = self.calculate_doji_count(adjusted_prices)
-            
-            # Calculate score
-            if target == 'max_choppiness':
-                score = choppiness
-            elif target == 'min_doji':
-                score = -doji_count
-            else:  # balanced
-                # Target choppiness around 250-350, minimize dojis
-                if 250 <= choppiness <= 350:
-                    chop_score = 1.0  # Perfect range
-                else:
-                    distance = min(abs(choppiness - 250), abs(choppiness - 350))
-                    chop_score = max(0, 1 - distance / 100)
-                
-                doji_score = max(0, 1 - doji_count / 10)
-                score = chop_score * 0.7 + doji_score * 0.3
-            
-            results.append({
-                'n_levels': n_levels,
-                'choppiness': choppiness,
-                'doji_count': doji_count,
-                'score': score
-            })
-        
+        progress = st.progress(0)
+
+        for i, n in enumerate(level_range):
+            # Calculate prices for this N
+            prices_list = []
+            timestamps = []
+
+            for _, row in df.iterrows():
+                if row['max_levels'] >= n:
+                    price = self.calculate_weighted_price(row['bids'], row['asks'], n)
+                    if price:
+                        prices_list.append(price)
+                        timestamps.append(row['timestamp'])
+
+            if len(prices_list) > 100:
+                prices = pd.Series(prices_list, index=pd.DatetimeIndex(timestamps))
+                metrics = self.calculate_metrics(prices)
+
+                if metrics:
+                    # Calculate optimization score
+                    chop = metrics['choppiness']
+
+                    # Score calculation: prioritize 250-350 range, minimize dojis
+                    if 250 <= chop <= 350:
+                        chop_score = 100  # Perfect
+                    elif 200 <= chop <= 400:
+                        chop_score = 50 - abs(chop - 300) / 2  # Acceptable
+                    else:
+                        chop_score = max(0, 25 - abs(chop - 300) / 10)  # Poor
+
+                    # Doji penalty (lower is better)
+                    doji_penalty = metrics['doji_count'] * 5
+                    wick_penalty = metrics['high_wick_count'] * 2
+
+                    total_score = chop_score - doji_penalty - wick_penalty
+
+                    results.append({
+                        'N': n,
+                        'Choppiness': round(chop, 2),
+                        'Doji Count': metrics['doji_count'],
+                        'High Wicks': metrics['high_wick_count'],
+                        'Score': round(total_score, 2),
+                        'Data Points': metrics['data_points'],
+                        'Volatility %': round(metrics['volatility'], 4),
+                        'Status': '✅' if 250 <= chop <= 350 else '⚠️' if 200 <= chop <= 400 else '❌'
+                    })
+
+            progress.progress((i + 1) / len(level_range))
+
+        progress.empty()
         return pd.DataFrame(results)
 
-# Main UI
-st.title("🎯 Order Book Level Count Optimization")
-st.markdown("""
-This tool optimizes the number of order book levels (n) to achieve:
-- Target choppiness (250-350 range)
-- Minimum doji candles
-- Optimal price stability
-""")
+# UI
+st.title("🎯 Order Book N-Level Optimizer")
+st.markdown("Finding optimal order book depth (N) for choppiness 250-350 with minimum dojis")
 
-# Create tabs
-tab1, tab2 = st.tabs(["Optimization Analysis", "Comparison View"])
-
+# Sidebar
 with st.sidebar:
-    st.header("Configuration")
-    
-    # Pair selection
-    pairs = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "DOGE/USDT"]
-    selected_pair = st.selectbox("Select Pair", pairs)
-    
-    st.subheader("Level Count Range")
-    
-    # Predefined level options
-    level_presets = {
-        "Quick Test (1-10)": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-        "Standard (1-20)": [1, 2, 3, 5, 7, 10, 12, 15, 17, 20],
-        "Extended (1-50)": [1, 2, 3, 5, 10, 15, 20, 25, 30, 40, 50],
-        "Full Range (1-100)": [1, 2, 3, 5, 10, 20, 30, 40, 50, 75, 100],
-        "Rollbit-style (many)": [1, 5, 10, 20, 50, 100, 200, 500]
+    st.header("Settings")
+
+    pairs = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "DOGE/USDT", "BNB/USDT"]
+    selected_pair = st.selectbox("Trading Pair", pairs)
+
+    # Level presets
+    presets = {
+        "Quick (1-10)": [1, 2, 3, 5, 7, 10],
+        "Standard (1-20)": [1, 2, 3, 5, 7, 10, 15, 20],
+        "Extended (1-50)": [1, 2, 3, 5, 10, 15, 20, 30, 40, 50],
+        "Full (1-100)": [1, 3, 5, 10, 20, 30, 50, 70, 100]
     }
-    
-    preset = st.selectbox("Choose Preset", list(level_presets.keys()))
-    level_range = level_presets[preset]
-    
-    st.info(f"Testing levels: {level_range}")
-    
-    # Optimization target
-    target = st.radio(
-        "Optimization Target",
-        ["balanced", "max_choppiness", "min_doji"],
-        help="""
-        - Balanced: Targets 250-350 choppiness with min doji
-        - Max Choppiness: Find most volatile configuration
-        - Min Doji: Find cleanest trends
-        """
-    )
-    
+
+    preset = st.selectbox("Level Range", list(presets.keys()))
+    levels = presets[preset]
+
+    st.info(f"Testing N values: {levels}")
+
     run_btn = st.button("🚀 Run Optimization", type="primary", use_container_width=True)
 
-# Main content
-with tab1:
-    if run_btn:
-        optimizer = DepthOptimizer()
-        
-        with st.spinner(f"Fetching data for {selected_pair}..."):
-            data, data_type = optimizer.fetch_order_book_data(selected_pair)
-            
-            if data.empty:
-                st.error("No data available for optimization")
-            else:
-                st.success(f"Loaded {len(data)} data points ({data_type} data)")
-                
-                with st.spinner("Running optimization..."):
-                    results = optimizer.optimize_level_count(
-                        selected_pair, data, data_type, level_range, target
-                    )
-                    
-                    if not results.empty:
-                        # Find optimal
-                        if target == 'max_choppiness':
-                            optimal_idx = results['choppiness'].idxmax()
-                        elif target == 'min_doji':
-                            optimal_idx = results['doji_count'].idxmin()
-                        else:
-                            optimal_idx = results['score'].idxmax()
-                        
-                        optimal = results.loc[optimal_idx]
-                        
-                        # Display results
-                        st.success("Optimization Complete!")
-                        
-                        # Metrics
-                        col1, col2, col3, col4 = st.columns(4)
-                        with col1:
-                            st.metric(
-                                "Optimal Level Count",
-                                f"{int(optimal['n_levels'])} levels",
-                                help="Number of order book levels to use"
-                            )
-                        with col2:
-                            delta = optimal['choppiness'] - 300
-                            st.metric(
-                                "Choppiness",
-                                f"{optimal['choppiness']:.2f}",
-                                f"{delta:+.2f} from target",
-                                delta_color="inverse" if abs(delta) > 50 else "normal"
-                            )
-                        with col3:
-                            st.metric(
-                                "Doji Count",
-                                f"{int(optimal['doji_count'])}",
-                                help="Number of doji candles in test period"
-                            )
-                        with col4:
-                            st.metric(
-                                "Score",
-                                f"{optimal['score']:.3f}",
-                                help="Combined optimization score"
-                            )
-                        
-                        # Recommendations
-                        st.info(f"""
-                        **Recommendation for {selected_pair}:**
-                        - Use **{int(optimal['n_levels'])} order book levels** for price calculation
-                        - This achieves choppiness of {optimal['choppiness']:.2f} (target: 250-350)
-                        - Produces {int(optimal['doji_count'])} doji candles
-                        
-                        **Interpretation:**
-                        - Levels 1-3: Very responsive, high volatility
-                        - Levels 4-10: Balanced responsiveness
-                        - Levels 11-50: Stable, lower volatility
-                        - Levels 50+: Very stable (Rollbit-like)
-                        """)
-                        
-                        # Visualization
-                        fig = make_subplots(
-                            rows=2, cols=2,
-                            subplot_titles=(
-                                "Choppiness vs Level Count",
-                                "Doji Count vs Level Count",
-                                "Optimization Score",
-                                "Choppiness vs Doji Trade-off"
-                            )
-                        )
-                        
-                        # Chart 1: Choppiness vs Levels
-                        fig.add_trace(
-                            go.Scatter(
-                                x=results['n_levels'],
-                                y=results['choppiness'],
-                                mode='lines+markers',
-                                name='Choppiness',
-                                line=dict(color='blue', width=2),
-                                marker=dict(size=8)
-                            ),
-                            row=1, col=1
-                        )
-                        fig.add_hrect(y0=250, y1=350, fillcolor="green", opacity=0.1,
-                                     line_width=0, row=1, col=1)
-                        fig.add_annotation(x=max(results['n_levels'])*0.8, y=300,
-                                         text="Target Range", showarrow=False,
-                                         row=1, col=1)
-                        
-                        # Chart 2: Doji vs Levels
-                        fig.add_trace(
-                            go.Scatter(
-                                x=results['n_levels'],
-                                y=results['doji_count'],
-                                mode='lines+markers',
-                                name='Doji Count',
-                                line=dict(color='red', width=2),
-                                marker=dict(size=8)
-                            ),
-                            row=1, col=2
-                        )
-                        
-                        # Chart 3: Score vs Levels
-                        fig.add_trace(
-                            go.Scatter(
-                                x=results['n_levels'],
-                                y=results['score'],
-                                mode='lines+markers',
-                                name='Score',
-                                line=dict(color='green', width=2),
-                                marker=dict(size=8)
-                            ),
-                            row=2, col=1
-                        )
-                        
-                        # Chart 4: Scatter plot
-                        fig.add_trace(
-                            go.Scatter(
-                                x=results['doji_count'],
-                                y=results['choppiness'],
-                                mode='markers',
-                                marker=dict(
-                                    size=10,
-                                    color=results['n_levels'],
-                                    colorscale='Viridis',
-                                    showscale=True,
-                                    colorbar=dict(title="Levels")
-                                ),
-                                text=[f"n={n}" for n in results['n_levels']],
-                                hovertemplate='Levels: %{text}<br>Doji: %{x}<br>Chop: %{y:.2f}'
-                            ),
-                            row=2, col=2
-                        )
-                        
-                        # Add optimal point markers
-                        for row in [1, 2]:
-                            for col in [1, 2]:
-                                if row == 2 and col == 2:
-                                    continue
-                                fig.add_vline(
-                                    x=optimal['n_levels'],
-                                    line_dash="dash",
-                                    line_color="purple",
-                                    opacity=0.5,
-                                    row=row, col=col
-                                )
-                        
-                        # Update layout
-                        fig.update_layout(
-                            height=700,
-                            showlegend=False,
-                            title_text=f"{selected_pair} Order Book Level Optimization"
-                        )
-                        
-                        # Update axes
-                        fig.update_xaxes(title_text="Number of Levels", type="log", row=1, col=1)
-                        fig.update_xaxes(title_text="Number of Levels", type="log", row=1, col=2)
-                        fig.update_xaxes(title_text="Number of Levels", type="log", row=2, col=1)
-                        fig.update_xaxes(title_text="Doji Count", row=2, col=2)
-                        fig.update_yaxes(title_text="Choppiness", row=1, col=1)
-                        fig.update_yaxes(title_text="Doji Count", row=1, col=2)
-                        fig.update_yaxes(title_text="Score", row=2, col=1)
-                        fig.update_yaxes(title_text="Choppiness", row=2, col=2)
-                        
-                        st.plotly_chart(fig, use_container_width=True)
-                        
-                        # Detailed results table
-                        st.subheader("Detailed Results")
-                        display_df = results.copy()
-                        display_df['choppiness'] = display_df['choppiness'].round(2)
-                        display_df['score'] = display_df['score'].round(4)
-                        
-                        # Highlight optimal row
-                        def highlight_optimal(row):
-                            if row.name == optimal_idx:
-                                return ['background-color: #90EE90'] * len(row)
-                            elif 250 <= row['choppiness'] <= 350:
-                                return ['background-color: #FFFACD'] * len(row)
-                            return [''] * len(row)
-                        
-                        st.dataframe(
-                            display_df.style.apply(highlight_optimal, axis=1),
-                            use_container_width=True
-                        )
+# Main area
+if run_btn:
+    optimizer = OrderBookOptimizer()
 
-with tab2:
-    st.header("Compare Different Level Configurations")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.subheader("Configuration Impact")
-        st.markdown("""
-        | Levels | Behavior | Use Case |
-        |--------|----------|----------|
-        | 1 | Top of book only | HFT, arbitrage |
-        | 2-3 | Very responsive | Short-term trading |
-        | 4-7 | Balanced | General trading |
-        | 8-15 | Stable | Position trading |
-        | 16-50 | Very stable | Index calculation |
-        | 50+ | Rollbit-like | Maximum stability |
-        """)
-    
-    with col2:
-        st.subheader("Expected Outcomes")
-        st.markdown("""
-        **Fewer Levels (1-5):**
-        - ✅ High choppiness (good for volatility trading)
-        - ❌ More doji candles
-        - ❌ More false signals
-        
-        **More Levels (20+):**
-        - ✅ Fewer doji candles
-        - ✅ Cleaner trends
-        - ❌ Lower choppiness (may miss target)
-        - ❌ Slower to react to real moves
-        """)
-    
-    st.info("""
-    **Key Insight:** The optimal number of levels depends on your use case:
-    - For matching Rollbit's behavior: Use many levels (50-100+)
-    - For target choppiness (250-350): Usually 5-15 levels
-    - For minimum dojis: More levels (20+)
-    """)
+    with st.spinner(f"Analyzing {selected_pair}..."):
+        results_df = optimizer.optimize_n(selected_pair, levels)
+
+        if not results_df.empty:
+            # Find optimal
+            optimal_idx = results_df['Score'].idxmax()
+            optimal = results_df.loc[optimal_idx]
+
+            # Display optimal result
+            st.success("✅ Optimization Complete!")
+
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Optimal N", f"{int(optimal['N'])} levels")
+            with col2:
+                delta = optimal['Choppiness'] - 300
+                st.metric("Choppiness", f"{optimal['Choppiness']}", f"{delta:+.1f}")
+            with col3:
+                st.metric("Doji Count", int(optimal['Doji Count']))
+            with col4:
+                st.metric("Score", optimal['Score'])
+
+            # Results table
+            st.subheader("All Results")
+
+            # Highlight optimal row
+            def highlight_row(row):
+                if row.name == optimal_idx:
+                    return ['background-color: #90EE90'] * len(row)
+                elif row['Status'] == '✅':
+                    return ['background-color: #FFFACD'] * len(row)
+                return [''] * len(row)
+
+            st.dataframe(
+                results_df.style.apply(highlight_row, axis=1),
+                use_container_width=True
+            )
+
+            # Visualization
+            fig = make_subplots(
+                rows=1, cols=2,
+                subplot_titles=("Choppiness vs N", "Doji Count vs N")
+            )
+
+            # Choppiness chart
+            fig.add_trace(
+                go.Scatter(
+                    x=results_df['N'],
+                    y=results_df['Choppiness'],
+                    mode='lines+markers',
+                    name='Choppiness',
+                    line=dict(color='blue', width=2),
+                    marker=dict(size=8)
+                ),
+                row=1, col=1
+            )
+
+            # Add target zone
+            fig.add_hrect(
+                y0=250, y1=350,
+                fillcolor="green", opacity=0.2,
+                line_width=0, row=1, col=1
+            )
+
+            # Doji chart
+            fig.add_trace(
+                go.Bar(
+                    x=results_df['N'],
+                    y=results_df['Doji Count'],
+                    name='Doji Count',
+                    marker_color='red'
+                ),
+                row=1, col=2
+            )
+
+            # Mark optimal
+            fig.add_vline(
+                x=optimal['N'],
+                line_dash="dash",
+                line_color="purple",
+                opacity=0.5,
+                row=1, col="all"
+            )
+
+            fig.update_xaxes(title="Order Book Levels (N)", type="log")
+            fig.update_yaxes(title="Choppiness", row=1, col=1)
+            fig.update_yaxes(title="Doji Count", row=1, col=2)
+
+            fig.update_layout(
+                height=400,
+                title_text=f"{selected_pair} Optimization Results",
+                showlegend=False
+            )
+
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Recommendation
+            st.info(f"""
+            **Recommendation for {selected_pair}:**
+            
+            Use **{int(optimal['N'])} order book levels** for price calculation:
+            - Achieves choppiness of {optimal['Choppiness']} (target: 250-350)
+            - Produces {int(optimal['Doji Count'])} doji candles
+            - High wick count: {int(optimal['High Wicks'])}
+            
+            This configuration provides the best balance between price responsiveness and stability.
+            """)
+        else:
+            st.error("No valid results. Check data availability.")
+else:
+    st.info("👆 Click 'Run Optimization' to start analysis")
