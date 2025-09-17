@@ -15,13 +15,18 @@ st.set_page_config(
     page_icon="📊",
     layout="wide"
 )
-
+uat_db_params = {
+    'host': 'aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com',
+    'port': 5432,
+    'database': 'report_dev',  # Different database
+    'user': 'public_rw',     # Different user
+    'password': 'aTJ92^kl04hllk'  # Different password
+}
 # Database
 @st.cache_resource
 def get_db():
     return create_engine(
-        "postgresql://public_replication:866^FKC4hllk@aws-jp-tk-surf-pg-public.cluster-csteuf9lw8dv.ap-northeast-1.rds.amazonaws.com:5432/replication_report",
-        pool_pre_ping=True
+        f"postgresql://{uat_db_params['user']}:{uat_db_params['password']}@{uat_db_params['host']}:{uat_db_params['port']}/{uat_db_params['database']}"
     )
 
 engine = get_db()
