@@ -38,13 +38,17 @@ if 'cached_pairs' not in st.session_state:
     st.session_state.cached_pairs = None
 if 'pairs_cache_time' not in st.session_state:
     st.session_state.pairs_cache_time = None
+if 'leverage_cache' not in st.session_state:
+    st.session_state.leverage_cache = None
+if 'leverage_cache_time' not in st.session_state:
+    st.session_state.leverage_cache_time = None
 
 class CryptoAnalyzer:
     def __init__(self):
         self.metrics_data = {}
         self.health_data = {}
         
-    def fetch_data(self, pairs):
+    def fetch_data(self, pairs, log: bool = True, log_container=None):
         """Fetch only enough data for 1500 points analysis"""
         tz = pytz.timezone('Asia/Singapore')
         now = datetime.now(tz)
@@ -91,13 +95,15 @@ class CryptoAnalyzer:
                     rollbit_df = pd.read_sql(text(rollbit_q), conn)
                     if not rollbit_df.empty:
                         results[pair]['rollbit'] = rollbit_df
-                        st.success(f"Rollbit {pair}: {len(rollbit_df)} points")
+                        if log:
+                            (log_container or st).success(f"Rollbit {pair}: {len(rollbit_df)} points")
                     
                     # Fetch Surf
                     surf_df = pd.read_sql(text(surf_q), conn)
                     if not surf_df.empty:
                         results[pair]['surf'] = surf_df
-                        st.success(f"Surf {pair}: {len(surf_df)} points")
+                        if log:
+                            (log_container or st).success(f"Surf {pair}: {len(surf_df)} points")
                         
             except Exception as e:
                 st.error(f"Error fetching {pair}: {e}")
@@ -238,7 +244,7 @@ class CryptoAnalyzer:
             s_chop = s_data.get('choppiness')
             row['Chop ROLLBIT'] = r_chop
             row['Chop SURF'] = s_chop
-            if r_chop and s_chop:
+            if r_chop is not None and s_chop is not None:
                 row['Chop Diff'] = s_chop - r_chop
             
             # ATR%
@@ -246,7 +252,7 @@ class CryptoAnalyzer:
             s_atr = s_data.get('atr_pct')
             row['ATR% ROLLBIT'] = r_atr
             row['ATR% SURF'] = s_atr
-            if r_atr and s_atr:
+            if r_atr is not None and s_atr is not None:
                 row['ATR% Diff'] = s_atr - r_atr
             
             # Trend
@@ -254,7 +260,7 @@ class CryptoAnalyzer:
             s_trend = s_data.get('trend')
             row['Trend ROLLBIT'] = r_trend
             row['Trend SURF'] = s_trend
-            if r_trend and s_trend:
+            if r_trend is not None and s_trend is not None:
                 row['Trend Diff'] = s_trend - r_trend
             
             rows.append(row)
@@ -311,6 +317,84 @@ class CryptoAnalyzer:
         
         return pd.DataFrame(rows) if rows else None
 
+# Leverage helpers
+def get_1000x_pairs():
+    tz = pytz.timezone('Asia/Singapore')
+    now = datetime.now(tz)
+    if st.session_state.leverage_cache is not None and st.session_state.leverage_cache_time is not None:
+        age = now - st.session_state.leverage_cache_time
+        if age.total_seconds() < 1800:
+            return st.session_state.leverage_cache
+    try:
+        with engine.connect() as c:
+            query = text(
+                """
+                SELECT pair_name
+                FROM (
+                  WITH PairStats AS (
+                    SELECT
+                      t.pair_name,
+                      p.max_leverage AS pair_max_leverage,
+                      COUNT(*) AS total_open_orders,
+                      SUM(CASE WHEN t.leverage = p.max_leverage THEN 1 ELSE 0 END) AS max_leverage_orders
+                    FROM trade_fill_fresh t
+                    JOIN trade_pool_pairs p ON t.pair_name = p.pair_name
+                    WHERE t.taker_way IN (1, 3)
+                    GROUP BY t.pair_name, p.max_leverage
+                  ),
+                  LeverageCounts AS (
+                    SELECT
+                      pair_name,
+                      leverage,
+                      COUNT(*) AS leverage_count,
+                      RANK() OVER (PARTITION BY pair_name ORDER BY COUNT(*) DESC) AS rank
+                    FROM trade_fill_fresh
+                    WHERE taker_way IN (1, 3)
+                    GROUP BY pair_name, leverage
+                  ),
+                  MaxUsedLeverage AS (
+                    SELECT pair_name, MAX(leverage) AS max_used_leverage
+                    FROM trade_fill_fresh
+                    WHERE taker_way IN (1, 3)
+                    GROUP BY pair_name
+                  ),
+                  MedianLeverage AS (
+                    SELECT t.pair_name,
+                           PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY t.leverage) AS median_leverage
+                    FROM trade_fill_fresh t
+                    WHERE t.taker_way IN (1, 3)
+                    GROUP BY t.pair_name
+                  )
+                  SELECT
+                    ps.pair_name,
+                    ps.pair_max_leverage,
+                    ps.total_open_orders,
+                    ps.max_leverage_orders,
+                    ROUND(ps.max_leverage_orders * 100.0 / ps.total_open_orders, 2) AS max_leverage_percentage,
+                    lc.leverage AS most_used_leverage,
+                    lc.leverage_count,
+                    mul.max_used_leverage,
+                    ml.median_leverage
+                  FROM PairStats ps
+                  LEFT JOIN LeverageCounts lc ON ps.pair_name = lc.pair_name AND lc.rank = 1
+                  LEFT JOIN MaxUsedLeverage mul ON ps.pair_name = mul.pair_name
+                  LEFT JOIN MedianLeverage ml ON ps.pair_name = ml.pair_name
+                ) AS source
+                WHERE source.pair_max_leverage = 1000
+                ORDER BY pair_name
+                """
+            )
+            r = c.execute(query)
+            pairs = [row[0] for row in r]
+            st.session_state.leverage_cache = pairs
+            st.session_state.leverage_cache_time = now
+            return pairs
+    except Exception as e:
+        st.error(f"Error fetching 1000x pairs: {e}")
+        if st.session_state.leverage_cache is not None:
+            return st.session_state.leverage_cache
+        return []
+
 # UI
 st.title("Crypto Exchange Analysis")
 
@@ -323,8 +407,8 @@ if st.session_state.last_analysis_time:
     minutes_ago = int(time_diff.total_seconds() / 60)
     st.info(f"Last analysis: {st.session_state.last_analysis_time.strftime('%Y-%m-%d %H:%M:%S')} SGT ({minutes_ago} minutes ago)")
 
-# Two tabs
-tab1, tab2 = st.tabs(["Parameter Comparison", "Coin Health"])
+# Tabs
+tab1, tab2, tab3 = st.tabs(["Parameter Comparison", "Coin Health", "1000x Choppiness"])
 
 # Sidebar
 with st.sidebar:
@@ -513,3 +597,32 @@ elif st.session_state.analysis_results and not go:
                 )
 else:
     st.info("👆 Select pairs and click 'Analyze' to start")
+
+# 1000x Choppiness auto section
+with tab3:
+    st.header("1000x Choppiness")
+    pairs_1000x = get_1000x_pairs()
+    if pairs_1000x:
+        analyzer_chop = CryptoAnalyzer()
+        table_placeholder = st.empty()
+        log_box = st.container()
+        with st.spinner("Loading 1000x pairs and computing choppiness..."):
+            # Stream progress logs to bottom container while fetching
+            data_1000 = analyzer_chop.fetch_data(pairs_1000x, log=True, log_container=log_box)
+            analyzer_chop.analyze_metrics(data_1000)
+            df_chop = analyzer_chop.get_metrics_df(1500)
+            # Render table at the top
+            try:
+                if df_chop is not None and len(df_chop) > 0:
+                    cols = [c for c in ["Coin", "Chop ROLLBIT", "Chop SURF", "Chop Diff"] if c in df_chop.columns]
+                    if not cols:
+                        cols = [c for c in ["Coin"] if c in df_chop.columns]
+                    table_placeholder.dataframe(df_chop[cols], use_container_width=True)
+                else:
+                    table_placeholder.info("No choppiness data available for 1000x pairs.")
+            except Exception as e:
+                table_placeholder.error(f"Error rendering choppiness table: {e}")
+            # Final line in logs
+            log_box.success("✅ Analysis complete and saved!")
+    else:
+        st.info("No 1000x leverage pairs found.")
