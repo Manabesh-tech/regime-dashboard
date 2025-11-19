@@ -125,7 +125,7 @@ def get_combined_data(token, hours=3):
     SELECT 
         created_at + INTERVAL '8 hour' AS timestamp,
         final_price
-    FROM public.oracle_price_log_partition_{today_str}
+    FROM public.oracle_price_log_partition_v1
     WHERE created_at >= '{start_time_str}'::timestamp - INTERVAL '8 hour'
     AND created_at <= '{end_time_str}'::timestamp - INTERVAL '8 hour'
     AND source_type = 0
@@ -142,7 +142,7 @@ def get_combined_data(token, hours=3):
             SELECT 
                 created_at + INTERVAL '8 hour' AS timestamp,
                 final_price
-            FROM public.oracle_price_log_partition_{yesterday_str}
+            FROM public.oracle_price_log_partition_v1
             WHERE created_at >= '{start_time_str}'::timestamp - INTERVAL '8 hour'
             AND created_at <= '{end_time_str}'::timestamp - INTERVAL '8 hour'
             AND source_type = 0

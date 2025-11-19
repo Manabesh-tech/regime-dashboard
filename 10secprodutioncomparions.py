@@ -136,7 +136,7 @@ def fetch_surf_parameters_10sec(token, hours=3):
             position_multiplier,
             created_at + INTERVAL '8 hour' AS timestamp
         FROM 
-            trade_pair_risk_history
+            trade_pair_risk_history_partition
         WHERE 
             pair_name = '{token}'
             AND created_at >= '{start_str}'::timestamp - INTERVAL '8 hour'
@@ -175,7 +175,7 @@ def get_volatility_data_10sec(token, hours=3):
         created_at + INTERVAL '8 hour' AS timestamp,
         final_price
     FROM 
-        public.oracle_price_log_partition_{today_str}
+        public.oracle_price_log_partition_v1
     WHERE 
         created_at >= '{start_time_str}'::timestamp - INTERVAL '8 hour'
         AND created_at <= '{end_time_str}'::timestamp - INTERVAL '8 hour'
@@ -195,7 +195,7 @@ def get_volatility_data_10sec(token, hours=3):
                 created_at + INTERVAL '8 hour' AS timestamp,
                 final_price
             FROM 
-                public.oracle_price_log_partition_{yesterday_str}
+                public.oracle_price_log_partition_v1
             WHERE 
                 created_at >= '{start_time_str}'::timestamp - INTERVAL '8 hour'
                 AND created_at <= '{end_time_str}'::timestamp - INTERVAL '8 hour'

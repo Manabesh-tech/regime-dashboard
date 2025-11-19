@@ -88,7 +88,7 @@ st.write(f"Current Singapore Time: {now_sg.strftime('%Y-%m-%d %H:%M:%S')}")
 def get_partition_tables(conn, start_date, end_date):
     """
     Get list of partition tables that need to be queried based on date range.
-    Returns a list of table names (oracle_price_log_partition_YYYYMMDD)
+    Returns a list of table names (oracle_price_log_partition_v1)
     """
     # Convert to datetime objects if they're strings
     if isinstance(start_date, str):
@@ -111,7 +111,7 @@ def get_partition_tables(conn, start_date, end_date):
         current_date += timedelta(days=1)
     
     # Create table names from dates
-    table_names = [f"oracle_price_log_partition_{date}" for date in dates]
+    table_names = ["oracle_price_log_partition_v1"]
     
     # Verify which tables actually exist in the database
     cursor = conn.cursor()
@@ -329,8 +329,8 @@ def analyze_price_runs(df):
 # Check data availability in today's partition table
 today_str = now_sg.date().strftime("%Y%m%d")
 yesterday_str = (now_sg.date() - timedelta(days=1)).strftime("%Y%m%d")
-today_table = f"oracle_price_log_partition_{today_str}"
-yesterday_table = f"oracle_price_log_partition_{yesterday_str}"
+today_table = "oracle_price_log_partition_v1"
+yesterday_table = "oracle_price_log_partition_v1"
 
 # Check tables exist
 cursor = conn.cursor()

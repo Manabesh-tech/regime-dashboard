@@ -135,7 +135,7 @@ def fetch_uat_buffer_rates_10sec(token, hours=3):
             pair_name,
             buffer_rate AS buffer_rate,
             created_at + INTERVAL '8 hour' AS timestamp
-        FROM trade_pair_risk_history 
+        FROM trade_pair_risk_history_partition 
         WHERE pair_name = '{token}'
         AND created_at >= '{start_str}'::timestamp - INTERVAL '8 hour'
         AND created_at <= '{end_str}'::timestamp - INTERVAL '8 hour'
@@ -150,7 +150,7 @@ def fetch_uat_buffer_rates_10sec(token, hours=3):
             # Try to see what tokens are available
             check_query = f"""
             SELECT DISTINCT pair_name 
-            FROM trade_pair_risk_history 
+            FROM trade_pair_risk_history_partition 
             WHERE created_at >= '{start_str}'::timestamp - INTERVAL '8 hour'
             LIMIT 10
             """
@@ -191,7 +191,7 @@ def get_raw_price_data(token, hours=3):
     SELECT 
         created_at + INTERVAL '8 hour' AS timestamp,
         final_price
-    FROM public.oracle_price_log_partition_{today_str}
+    FROM public.oracle_price_log_partition_v1
     WHERE created_at >= '{start_time_str}'::timestamp - INTERVAL '8 hour'
     AND created_at <= '{end_time_str}'::timestamp - INTERVAL '8 hour'
     AND source_type = 0
@@ -208,7 +208,7 @@ def get_raw_price_data(token, hours=3):
             SELECT 
                 created_at + INTERVAL '8 hour' AS timestamp,
                 final_price
-            FROM public.oracle_price_log_partition_{yesterday_str}
+            FROM public.oracle_price_log_partition_v1
             WHERE created_at >= '{start_time_str}'::timestamp - INTERVAL '8 hour'
             AND created_at <= '{end_time_str}'::timestamp - INTERVAL '8 hour'
             AND source_type = 0

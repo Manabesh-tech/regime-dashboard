@@ -144,7 +144,7 @@ def get_available_pairs():
                 
                 for date in [today, yesterday]:
                     try:
-                        table_name = f"oracle_price_log_partition_{date}"
+                        table_name = "oracle_price_log_partition_v1"
                         query = text(f"""
                             SELECT DISTINCT pair_name 
                             FROM public."{table_name}" 
@@ -212,7 +212,7 @@ def get_partition_tables(session, platform, start_date, end_date):
         current_date += timedelta(days=1)
     
     # Create table names
-    table_names = [f"oracle_price_log_partition_{date}" for date in dates]
+    table_names = ["oracle_price_log_partition_v1"]
     
     # Verify which tables actually exist
     existing_tables = []

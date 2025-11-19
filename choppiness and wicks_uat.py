@@ -60,7 +60,7 @@ class CryptoAnalyzer:
         """Fetch only enough data for 1500 points analysis"""
         tz = pytz.timezone('Asia/Singapore')
         now = datetime.now(tz)
-        table = f"oracle_price_log_partition_{now.strftime('%Y%m%d')}"
+        table = "oracle_price_log_partition_v1"
         
         # Only fetch ~20 minutes of data (enough for 1500 points + health metrics)
         start = now - timedelta(minutes=20)

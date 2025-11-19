@@ -63,7 +63,7 @@ def debug_print(message):
 # Function to get current partition table name
 def get_current_partition_table():
     today = datetime.now().strftime("%Y%m%d")
-    return f"oracle_price_log_partition_{today}"
+    return "oracle_price_log_partition_v1"
 
 # Function to fetch available tokens
 @st.cache_data(ttl=600, show_spinner="Fetching tokens...")

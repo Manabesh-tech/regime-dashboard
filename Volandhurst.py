@@ -74,7 +74,7 @@ extreme_vol_threshold = 1.0  # 100% annualized volatility
 def get_partition_tables(conn, start_date, end_date):
     """
     Get list of partition tables that need to be queried based on date range.
-    Returns a list of table names (oracle_price_log_partition_YYYYMMDD)
+    Returns a list of table names (oracle_price_log_partition_v1)
     """
     # Convert to datetime objects if they're strings
     if isinstance(start_date, str):
@@ -97,7 +97,7 @@ def get_partition_tables(conn, start_date, end_date):
         current_date += timedelta(days=1)
     
     # Create table names from dates
-    table_names = [f"oracle_price_log_partition_{date}" for date in dates]
+    table_names = ["oracle_price_log_partition_v1"]
     
     # Verify which tables actually exist in the database
     cursor = conn.cursor()

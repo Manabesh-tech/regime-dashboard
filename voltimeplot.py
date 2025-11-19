@@ -132,7 +132,7 @@ def get_partition_tables(start_date, end_date):
         current_date += timedelta(days=1)
 
     # Table names
-    table_names = [f"oracle_price_log_partition_{date}" for date in dates]
+    table_names = ["oracle_price_log_partition_v1"]
 
     # Check which tables exist
     cursor = conn.cursor()

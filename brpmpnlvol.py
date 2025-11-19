@@ -565,7 +565,7 @@ def calculate_volatility(pair_name, hours=24, _cache_key=None):
             current_date += timedelta(days=1)
         
         # Table names
-        table_names = [f"oracle_price_log_partition_{date}" for date in dates]
+        table_names = ["oracle_price_log_partition_v1"]
         
         # Check which tables exist
         with engine.connect() as connection:
