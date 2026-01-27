@@ -170,7 +170,7 @@ def _dispatch_and_wait_scheduler(wait_seconds: int = 600, poll_interval: float =
 
         # Last resort: environment variable
         if not token:
-            token = os.environ.get("GITHUB_PAT","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")
+            token = os.environ.get("GITHUB_PAT")
 
         if not token:
             st.error(
