@@ -11,3 +11,4 @@ pytz
 protobuf==3.20.3
 scikit-learn>=1.0.0
 streamlit-autorefresh
+requests

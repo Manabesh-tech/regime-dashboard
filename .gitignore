@@ -1,0 +1,5 @@
+.idea/
+.DS_Store
+output/
+scheduler_state.json
+crawler/result
