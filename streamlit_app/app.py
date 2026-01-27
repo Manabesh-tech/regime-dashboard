@@ -70,7 +70,7 @@ UTC8 = timezone(timedelta(hours=8))
 
 # ---------- Remote GitHub helpers (for Cloud refresh) ----------
 
-GITHUB_OWNER = os.environ.get("GITHUB_OWNER", "Manabesh-tech")
+GITHUB_OWNER = os.environ.get("GITHUB_OWNER", "czx51")
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "regime-dashboard")
 GITHUB_RAW_BASE = os.environ.get(
     "GITHUB_RAW_BASE",
@@ -170,7 +170,7 @@ def _dispatch_and_wait_scheduler(wait_seconds: int = 600, poll_interval: float =
 
         # Last resort: environment variable
         if not token:
-            token = os.environ.get("GITHUB_PAT")
+            token = os.environ.get("GITHUB_PAT","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")
 
         if not token:
             st.error(
@@ -360,39 +360,61 @@ def run_crawlers_for_symbols(symbols: List[str]) -> None:
 
 
 def load_crawler_results() -> Tuple[Dict, Dict]:
-    """Load crawler JSON results.
+    """Load crawler results from database."""
+    oi_data: Dict = {}
+    tv_data: Dict = {}
 
-    Prefer loading from raw.githubusercontent.com (updated by GitHub Actions),
-    and fall back to local files under crawler/result for local runs.
-    """
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        try:
+            # 加载持仓数据
+            oi_df = pd.read_sql("""
+                SELECT symbol, oi_change_1h, oi_change_4h, oi_change_24h, 
+                       oi_volume_ratio, exchange_data
+                FROM oracle_open_interest
+            """, conn)
+            for _, row in oi_df.iterrows():
+                symbol = str(row["symbol"]).upper()
+                # 使用 row[] 访问，如果字段不存在会抛出异常，这样可以及时发现问题
+                oi_change_1h = row["oi_change_1h"] if pd.notna(row.get("oi_change_1h")) else None
+                oi_change_4h = row["oi_change_4h"] if pd.notna(row.get("oi_change_4h")) else None
+                oi_change_24h = row["oi_change_24h"] if pd.notna(row.get("oi_change_24h")) else None
+                oi_volume_ratio = row["oi_volume_ratio"] if pd.notna(row.get("oi_volume_ratio")) else None
+                exchange_data_str = row["exchange_data"] if pd.notna(row.get("exchange_data")) else None
 
-    # Remote-first (for Streamlit Cloud)
-    oi_remote, tv_remote = _try_load_remote_crawler_results()
-    oi_data: Dict = oi_remote or {}
-    tv_data: Dict = tv_remote or {}
+                oi_data[symbol] = {
+                    "持仓变化（1小时）": oi_change_1h,
+                    "持仓变化（4小时）": oi_change_4h,
+                    "持仓变化（24小时）": oi_change_24h,
+                    "持仓/24小时成交额": oi_volume_ratio,
+                    "交易所数据": json.loads(exchange_data_str) if exchange_data_str else [],
+                }
 
-    # Fallback to local files if remote is unavailable
-    if not oi_data or not tv_data:
-        oi_path = os.path.join(RESULT_DIR, "openinterest.json")
-        tv_path = os.path.join(RESULT_DIR, "tradingvolume.json")
-
-        if not oi_data and os.path.exists(oi_path):
-            try:
-                with open(oi_path, "r", encoding="utf-8") as f:
-                    oi_data = json.load(f)
-            except json.JSONDecodeError:
-                oi_data = {}
-        if not tv_data and os.path.exists(tv_path):
-            try:
-                with open(tv_path, "r", encoding="utf-8") as f:
-                    tv_data = json.load(f)
-            except json.JSONDecodeError:
-                tv_data = {}
+            # 加载交易量数据
+            tv_df = pd.read_sql("""
+                SELECT symbol, volume_24h_percent, volume_24h_raw, volume_24h,
+                       market_cap_raw, market_cap
+                FROM oracle_trading_volume
+            """, conn)
+            for _, row in tv_df.iterrows():
+                symbol = str(row["symbol"]).upper()
+                tv_data[symbol] = {
+                    "成交额24h%": row.get("volume_24h_percent"),
+                    "成交额24h_raw": row.get("volume_24h_raw"),
+                    "成交额24h": row.get("volume_24h"),
+                    "总市值_raw": row.get("market_cap_raw"),
+                    "总市值": row.get("market_cap"),
+                }
+        finally:
+            conn.close()
+    except Exception as e:  # noqa: BLE001
+        print(f"[app] Failed to load from database: {e!r}")
 
     return oi_data, tv_data
 
 
-def _parse_percent(text: str) -> float | None:
+def _parse_percent(text: str | None) -> float | None:
+    """解析百分比字符串，如 "+0.21%" 或 "-1.33%"，返回浮点数。"""
     if text is None:
         return None
     t = str(text).strip().replace("%", "")
@@ -410,14 +432,16 @@ def parse_openinterest_24h(oi_data: Dict) -> pd.DataFrame:
         if not isinstance(v, dict):
             continue
 
-        raw_1h = v.get("持仓变化（1小时）") or ""
-        raw_4h = v.get("持仓变化（4小时）") or ""
-        raw_24h = v.get("持仓变化（24小时）") or ""
-        raw_ratio = v.get("持仓/24小时成交额") or ""
+        # 获取原始值
+        raw_1h = v.get("持仓变化（1小时）")
+        raw_4h = v.get("持仓变化（4小时）")
+        raw_24h = v.get("持仓变化（24小时）")
+        raw_ratio = v.get("持仓/24小时成交额")
 
-        val_1h = _parse_percent(raw_1h)
-        val_4h = _parse_percent(raw_4h)
-        val_24h = _parse_percent(raw_24h)
+        # 解析百分比值：如果值是 None、空字符串或只包含空白字符，则返回 None
+        val_1h = _parse_percent(raw_1h) if raw_1h and str(raw_1h).strip() else None
+        val_4h = _parse_percent(raw_4h) if raw_4h and str(raw_4h).strip() else None
+        val_24h = _parse_percent(raw_24h) if raw_24h and str(raw_24h).strip() else None
 
         ratio = None
         if raw_ratio is not None:
@@ -515,6 +539,13 @@ def write_last_start(ts: datetime) -> None:
 
 def compute_scores(df_base: pd.DataFrame, df_oi: pd.DataFrame, df_tv: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     df = df_base.copy()
+    # 确保所有 DataFrame 的 symbol 列都是字符串类型且大写，以便正确合并
+    df["symbol"] = df["symbol"].astype(str).str.upper()
+    if not df_oi.empty:
+        df_oi["symbol"] = df_oi["symbol"].astype(str).str.upper()
+    if not df_tv.empty:
+        df_tv["symbol"] = df_tv["symbol"].astype(str).str.upper()
+
     df = df.merge(df_oi, on="symbol", how="left")
     df = df.merge(df_tv, on="symbol", how="left")
 
@@ -534,11 +565,11 @@ def compute_scores(df_base: pd.DataFrame, df_oi: pd.DataFrame, df_tv: pd.DataFra
     df["z_market_cap"] = zscore(df["market_cap"]).fillna(0.0)
 
     df["score"] = (
-        -df["z_1k"] * 0.25
-        + df["z_volume_24h"] * 0.25
-        + df["z_market_cap"] * 0.25
-        + df["z_oi_24h"] * 0.125
-        + df["z_vol_24h"] * 0.125
+            -df["z_1k"] * 0.25
+            + df["z_volume_24h"] * 0.25
+            + df["z_market_cap"] * 0.25
+            + df["z_oi_24h"] * 0.125
+            + df["z_vol_24h"] * 0.125
     )
 
     df_scores = df[["symbol", "pair_name", "score"]].copy()
@@ -583,8 +614,8 @@ def _show_overview_metrics(df_scores_view: pd.DataFrame, df_raw_view: pd.DataFra
 
 
 def _style_raw_table(
-    df_raw_view: pd.DataFrame,
-    df_raw_full: pd.DataFrame | None = None,
+        df_raw_view: pd.DataFrame,
+        df_raw_full: pd.DataFrame | None = None,
 ) -> "pd.io.formats.style.Styler":  # type: ignore[name-defined]
     if df_raw_view.empty:
         return df_raw_view.style
@@ -666,11 +697,63 @@ def _style_raw_table(
 
 
 def _load_history() -> Dict[str, list]:
-    """Load history JSON from remote GitHub RAW only."""
+    """Load history data from database."""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        try:
+            query = """
+            SELECT 
+                symbol,
+                ts,
+                spread_1k,
+                score,
+                oi_24h_change,
+                vol_24h_change,
+                volume_24h,
+                market_cap,
+                oi_exchanges
+            FROM oracle_liquidity_history
+            WHERE ts >= NOW() - INTERVAL '7 days'
+            ORDER BY symbol, ts ASC
+            """
+            df = pd.read_sql(query, conn)
 
-    remote = _try_load_remote_history()
-    if isinstance(remote, dict):
-        return remote  # type: ignore[return-value]
+            if not df.empty:
+                # 转换为原来的格式：{symbol: [records...]}
+                history: Dict[str, list] = {}
+                for symbol in df["symbol"].unique():
+                    symbol_df = df[df["symbol"] == symbol].copy()
+                    records = []
+                    for _, row in symbol_df.iterrows():
+                        rec = {
+                            "ts": row["ts"].isoformat() if pd.notna(row["ts"]) else None,
+                            "spread_1k": row["spread_1k"] if pd.notna(row["spread_1k"]) else None,
+                            "score": row["score"] if pd.notna(row["score"]) else None,
+                            "oi_24h_change": row["oi_24h_change"] if pd.notna(row["oi_24h_change"]) else None,
+                            "vol_24h_change": row["vol_24h_change"] if pd.notna(row["vol_24h_change"]) else None,
+                            "volume_24h": row["volume_24h"] if pd.notna(row["volume_24h"]) else None,
+                            "market_cap": row["market_cap"] if pd.notna(row["market_cap"]) else None,
+                        }
+                        # 处理 oi_exchanges JSONB 字段
+                        if pd.notna(row["oi_exchanges"]):
+                            if isinstance(row["oi_exchanges"], dict):
+                                rec["oi_exchanges"] = row["oi_exchanges"]
+                            elif isinstance(row["oi_exchanges"], str):
+                                try:
+                                    rec["oi_exchanges"] = json.loads(row["oi_exchanges"])
+                                except json.JSONDecodeError:
+                                    rec["oi_exchanges"] = {}
+                            else:
+                                rec["oi_exchanges"] = {}
+                        else:
+                            rec["oi_exchanges"] = {}
+                        records.append(rec)
+                    history[symbol] = records
+                return history
+        finally:
+            conn.close()
+    except Exception as e:  # noqa: BLE001
+        print(f"[app] Failed to load history from database: {e!r}")
 
     return {}
 
@@ -842,21 +925,22 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
 
-    if st.button("Data Refresh", use_container_width=True):
-        with st.status("Triggering scheduler and waiting for new data...", expanded=True):
-            ok = _dispatch_and_wait_scheduler()
-            if ok:
-                st.success("Data updated")
-                # Clear cached dataframes and cached functions if any
-                st.session_state["df_scores"] = None
-                st.session_state["df_raw"] = None
-                try:
-                    st.cache_data.clear()
-                except Exception:
-                    pass
-                st.rerun()
-            else:
-                st.warning("Timed out waiting for scheduler run to complete")
+    # Data Refresh button hidden
+    # if st.button("Data Refresh", use_container_width=True):
+    #     with st.status("Triggering scheduler and waiting for new data...", expanded=True):
+    #         ok = _dispatch_and_wait_scheduler()
+    #         if ok:
+    #             st.success("Data updated")
+    #             # Clear cached dataframes and cached functions if any
+    #             st.session_state["df_scores"] = None
+    #             st.session_state["df_raw"] = None
+    #             try:
+    #                 st.cache_data.clear()
+    #             except Exception:
+    #                 pass
+    #             st.rerun()
+    #         else:
+    #             st.warning("Timed out waiting for scheduler run to complete")
     refresh_clicked = False
     page = st.radio("Page", ("Introduction", "Liquidity Score", "Raw Data", "History plot"))
 
@@ -892,7 +976,7 @@ intro = (
     "**Data sources**\n"
     "- 1k cost (`1k`): latest snapshot from the PostgreSQL table `oracle_exchange_spread`.\n"
     "- Open interest and volume changes (and OI/volume ratio): scraped from Coinglass via Playwright.\n"
-    "- GitHub Actions runs `scheduler.py` on a schedule, refreshing crawler results and maintaining the last 7 days in `crawler/result/history.json`.\n\n"
+    "- GitHub Actions runs `scheduler.py` on a schedule, refreshing crawler results and maintaining the last 7 days in the `liquidity_history` database table.\n\n"
     "**Liquidity score**\n"
     "For each symbol we use three indicators: 1k cost, OI 24h change, and volume 24h change.\n"
     "Before computing z-scores, we winsorize OI 24h change and volume 24h change using a median-absolute-deviation (MAD) rule: values beyond median ± 3×MAD are clipped to the corresponding bounds.\n"
